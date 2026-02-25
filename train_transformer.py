@@ -1,27 +1,30 @@
 import os
 import argparse
 import numpy as np
-import spacy
+import pandas as pd
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
-from transformers import CLIPVisionModel
+import torchvision.models as models
 from PIL import Image
 
+from utils import load_calvin_to_dataframe, visualize_frames
+
 class ActionToVerbTransformer(nn.Module):
-    def __init__(self, num_verbs, d_model=768, max_seq_length=512, nhead=12, num_layers=6, action_dim=7):
+    def __init__(self, num_verbs, d_model=64, max_seq_length=512, nhead=8, num_layers=4, action_dim=7):
         super().__init__()
         
-        # Vision encoder for first and last frames
-        # We use CLIP's ViT-B/32 backbone
-        self.visual_backbone = CLIPVisionModel.from_pretrained("openai/clip-vit-base-patch32")
+        # Load ResNet18 & remove the final classification layer
+        resnet = models.resnet18(weights=models.ResNet18_Weights.IMAGENET1K_V1)
+        self.visual_backbone = nn.Sequential(*list(resnet.children())[:-1])
+        
         for param in self.visual_backbone.parameters():
             param.requires_grad = False
             
-        # Projections to align visual and action features to d_model
-        self.vision_proj = nn.Linear(768, d_model)
+        # Project image and action embeddings
+        self.vision_proj = nn.Linear(512, d_model)
         self.action_proj = nn.Linear(action_dim, d_model)
         
         # [CLS] token for classification and position embeddings
@@ -39,7 +42,7 @@ class ActionToVerbTransformer(nn.Module):
             nn.Linear(d_model, d_model // 2),
             nn.LayerNorm(d_model // 2),
             nn.ReLU(),
-            nn.Dropout(0.1),
+            # nn.Dropout(0.1), # adds random noise to prevent overfitting
             nn.Linear(d_model // 2, num_verbs)
         )
 
@@ -48,9 +51,8 @@ class ActionToVerbTransformer(nn.Module):
         # trajectories: (Batch, Seq_Len, action_dim)
         batch_size = first_frame.shape[0]
         
-        # Extract visual features (Pooler output gives global image representation)
-        v_start = self.visual_backbone(first_frame).pooler_output.unsqueeze(1) # (B, 1, 768)
-        v_end = self.visual_backbone(last_frame).pooler_output.unsqueeze(1)     # (B, 1, 768)
+        v_start = self.visual_backbone(first_frame).flatten(2).transpose(1, 2)
+        v_end = self.visual_backbone(last_frame).flatten(2).transpose(1, 2)
         
         # Project all inputs to d_model
         v_start_emb = self.vision_proj(v_start)
@@ -76,70 +78,34 @@ class ActionToVerbTransformer(nn.Module):
         return verb_logits
 
 class CalvinVerbDataset(Dataset):
-    def __init__(self, data_dir, transform=None, max_seq_len=64):
+    def __init__(self, df, data_dir, transform=None, max_seq_len=64):
         """
-        CALVIN specific dataset loader.
-        Expects 'auto_lang_ann.npy' in a subfolder.
+        CALVIN specific dataset loader using a pandas DataFrame.
         """
+        self.df = df
         self.data_dir = data_dir
         self.transform = transform
         self.max_seq_len = max_seq_len
         
-        # 1. Load spaCy for verb extraction
-        try:
-            self.nlp = spacy.load("en_core_web_sm")
-        except OSError:
-            from spacy.cli import download
-            download("en_core_web_sm")
-            self.nlp = spacy.load("en_core_web_sm")
-
-        # 2. Load Language Annotations
-        # CALVIN structure: lang_annotations/auto_lang_ann.npy
-        lang_path = os.path.join(data_dir, "lang_annotations", "auto_lang_ann.npy")
-        if not os.path.exists(lang_path):
-            raise FileNotFoundError(f"Could not find CALVIN language annotations at {lang_path}")
-        
-        self.lang_data = np.load(lang_path, allow_pickle=True).item()
-        
-        # In CALVIN, language data is often structured as a dict of lists
-        # keys: 'info' (indices), 'language' (annotations)
-        self.instructions = self.lang_data['language']['ann']
-        self.indices = self.lang_data['info']['indx'] # List of (start_idx, end_idx) pairs
-        
-        # 3. Build Vocabulary
-        self.verb_to_id = {}
-        self._build_vocab()
-
-    def _extract_verb(self, text):
-        """Extracts the primary verb from a CALVIN instruction."""
-        doc = self.nlp(text.lower())
-        for token in doc:
-            if token.pos_ == "VERB" and (token.dep_ in ("ROOT", "conj", "xcomp", "advcl")):
-                parts = [t.text for t in token.children if t.dep_ == "prt"]
-                return " ".join([token.text] + parts)
-        return "unknown"
-
-    def _build_vocab(self):
-        print("Parsing verbs from instructions to build vocabulary...")
-        verbs = set()
-        for text in self.instructions:
-            verb = self._extract_verb(text)
-            verbs.add(verb)
-        
-        self.verb_to_id = {v: i for i, v in enumerate(sorted(list(verbs)))}
-        print(f"Vocab built: {len(self.verb_to_id)} unique verbs found.")
+        # Vocabulary is already built in the dataframe, just map it
+        unique_verbs = sorted(list(set(df['primary_verb'].unique())))
+        self.verb_to_id = {v: i for i, v in enumerate(unique_verbs)}
+        self.id_to_verb = {i: v for v, i in self.verb_to_id.items()}
+        print(f"Vocab mapped: {len(self.verb_to_id)} unique verbs found.")
 
     def __len__(self):
-        return len(self.instructions)
+        return len(self.df)
 
     def _load_npz(self, idx):
-        # CALVIN files are usually named ep_XXXXXXX.npz
+        # CALVIN files are usually named episode_XXXXXXX.npz
         filename = f"episode_{idx:07d}.npz"
         return np.load(os.path.join(self.data_dir, filename))
 
     def __getitem__(self, idx):
-        start_idx, end_idx = self.indices[idx]
-        instruction = self.instructions[idx]
+        row = self.df.iloc[idx]
+        start_idx = row['start_idx']
+        end_idx = row['end_idx']
+        verb = row['primary_verb']
         
         # Load start and end frames
         # CALVIN stores frames in individual step files or sequence files
@@ -177,7 +143,6 @@ class CalvinVerbDataset(Dataset):
         actions_tensor = torch.tensor(actions_padded, dtype=torch.float32)
         
         # Label extraction
-        verb = self._extract_verb(instruction)
         label_id = self.verb_to_id.get(verb, self.verb_to_id.get("unknown", 0))
         label = torch.tensor(label_id, dtype=torch.long)
         
@@ -195,7 +160,12 @@ def main(args):
     ])
 
     print(f"Loading dataset from {args.data_dir}...")
-    dataset = CalvinVerbDataset(args.data_dir, transform=transform, max_seq_len=args.max_seq_len)
+    df = load_calvin_to_dataframe(args.data_dir)
+    
+    print("Visualizing some examples...")
+    visualize_frames(df, args.data_dir, num_samples=3)
+
+    dataset = CalvinVerbDataset(df, args.data_dir, transform=transform, max_seq_len=args.max_seq_len)
     dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers)
 
     num_verbs = len(dataset.verb_to_id)
@@ -235,6 +205,39 @@ def main(args):
         avg_loss = total_loss / len(dataloader)
         print(f"--- Epoch {epoch+1} Summary: Avg Loss: {avg_loss:.4f} | Final Acc: {100*correct/total:.2f}% ---")
 
+    print("\n=== Final Training Summary: Predictions vs Ground Truth (First 5) ===")
+    model.eval()
+    num_printed = 0
+    with torch.no_grad():
+        for first, last, actions, labels in dataloader:
+            if num_printed >= 5:
+                break
+                
+            first, last = first.to(device), last.to(device)
+            actions = actions.to(device)
+            
+            logits = model(first, last, actions)
+            preds = torch.argmax(logits, dim=1)
+            
+            for p, l in zip(preds, labels):
+                if num_printed >= 5:
+                    break
+                pred_verb = dataset.id_to_verb[p.item()]
+                true_verb = dataset.id_to_verb[l.item()]
+                status = "✅" if p.item() == l.item() else "❌"
+                print(f"{status} Target: {true_verb:<15} | Predicted: {pred_verb}")
+                num_printed += 1
+
+    # Save the model if a save path is provided
+    if args.save_path:
+        save_dir = os.path.dirname(args.save_path)
+        if save_dir:
+            os.makedirs(save_dir, exist_ok=True)
+            
+        # We save the model's state dictionary (the weights)
+        torch.save(model.state_dict(), args.save_path)
+        print(f"\nModel weights successfully saved to {args.save_path}")
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_dir", type=str, required=True, help="Path to CALVIN dataset (containing episode_XXXX.npz files)")
@@ -243,6 +246,7 @@ if __name__ == "__main__":
     parser.add_argument("--lr", type=float, default=1e-5)
     parser.add_argument("--max_seq_len", type=int, default=128)
     parser.add_argument("--num_workers", type=int, default=4)
+    parser.add_argument("--save_path", type=str, default=None, help="Optional: Path to save the trained model weights (e.g., my_model.pth)")
     
     args = parser.parse_args()
     main(args)

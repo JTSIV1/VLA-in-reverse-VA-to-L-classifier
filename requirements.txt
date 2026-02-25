@@ -1,0 +1,7 @@
+spacy
+numpy
+pandas
+torch
+torchvision
+transformers
+matplotlib
