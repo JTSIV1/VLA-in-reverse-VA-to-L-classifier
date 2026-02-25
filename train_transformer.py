@@ -11,9 +11,15 @@ import torchvision.models as models
 from PIL import Image
 
 from utils import load_calvin_to_dataframe, visualize_frames
+from config import (
+    DATA_DIR, IMAGE_KEY, ACTION_KEY, EPISODE_TEMPLATE,
+    ACTION_DIM, D_MODEL, NHEAD, NUM_LAYERS, MAX_SEQ_LENGTH, RESNET_FEATURE_DIM,
+    IMAGE_SIZE, CLIP_MEAN, CLIP_STD,
+    BATCH_SIZE, EPOCHS, LEARNING_RATE, MAX_SEQ_LEN, NUM_WORKERS,
+)
 
 class ActionToVerbTransformer(nn.Module):
-    def __init__(self, num_verbs, d_model=64, max_seq_length=512, nhead=8, num_layers=4, action_dim=7):
+    def __init__(self, num_verbs, d_model=D_MODEL, max_seq_length=MAX_SEQ_LENGTH, nhead=NHEAD, num_layers=NUM_LAYERS, action_dim=ACTION_DIM):
         super().__init__()
         
         # Load ResNet18 & remove the final classification layer
@@ -24,7 +30,7 @@ class ActionToVerbTransformer(nn.Module):
             param.requires_grad = False
             
         # Project image and action embeddings
-        self.vision_proj = nn.Linear(512, d_model)
+        self.vision_proj = nn.Linear(RESNET_FEATURE_DIM, d_model)
         self.action_proj = nn.Linear(action_dim, d_model)
         
         # [CLS] token for classification and position embeddings
@@ -78,7 +84,7 @@ class ActionToVerbTransformer(nn.Module):
         return verb_logits
 
 class CalvinVerbDataset(Dataset):
-    def __init__(self, df, data_dir, transform=None, max_seq_len=64):
+    def __init__(self, df, data_dir, transform=None, max_seq_len=MAX_SEQ_LEN):
         """
         CALVIN specific dataset loader using a pandas DataFrame.
         """
@@ -98,7 +104,7 @@ class CalvinVerbDataset(Dataset):
 
     def _load_npz(self, idx):
         # CALVIN files are usually named episode_XXXXXXX.npz
-        filename = f"episode_{idx:07d}.npz"
+        filename = EPISODE_TEMPLATE.format(idx)
         return np.load(os.path.join(self.data_dir, filename))
 
     def __getitem__(self, idx):
@@ -114,8 +120,8 @@ class CalvinVerbDataset(Dataset):
         end_data = self._load_npz(end_idx)
         
         # Image frames (CALVIN uses 'rgb_static' for the desk camera)
-        img_start = Image.fromarray(start_data['rgb_static']).convert("RGB")
-        img_end = Image.fromarray(end_data['rgb_static']).convert("RGB")
+        img_start = Image.fromarray(start_data[IMAGE_KEY]).convert("RGB")
+        img_end = Image.fromarray(end_data[IMAGE_KEY]).convert("RGB")
         
         if self.transform:
             first_frame = self.transform(img_start)
@@ -129,7 +135,7 @@ class CalvinVerbDataset(Dataset):
         all_actions = []
         for i in range(start_idx, end_idx + 1):
             step_data = self._load_npz(i)
-            all_actions.append(step_data['rel_actions']) # rel_actions is 7D in CALVIN
+            all_actions.append(step_data[ACTION_KEY]) # rel_actions is 7D in CALVIN
         
         actions = np.array(all_actions) # (T, 7)
         
@@ -153,10 +159,9 @@ def main(args):
     
     # Standard CLIP normalization
     transform = transforms.Compose([
-        transforms.Resize((224, 224)),
+        transforms.Resize(IMAGE_SIZE),
         transforms.ToTensor(),
-        transforms.Normalize(mean=[0.48145466, 0.4578275, 0.40821073], 
-                             std=[0.26862954, 0.26130258, 0.27577711])
+        transforms.Normalize(mean=CLIP_MEAN, std=CLIP_STD)
     ])
 
     print(f"Loading dataset from {args.data_dir}...")
@@ -240,12 +245,12 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data_dir", type=str, required=True, help="Path to CALVIN dataset (containing episode_XXXX.npz files)")
-    parser.add_argument("--batch_size", type=int, default=16)
-    parser.add_argument("--epochs", type=int, default=10)
-    parser.add_argument("--lr", type=float, default=1e-5)
-    parser.add_argument("--max_seq_len", type=int, default=128)
-    parser.add_argument("--num_workers", type=int, default=4)
+    parser.add_argument("--data_dir", type=str, default=DATA_DIR, help="Path to CALVIN dataset (containing episode_XXXX.npz files)")
+    parser.add_argument("--batch_size", type=int, default=BATCH_SIZE)
+    parser.add_argument("--epochs", type=int, default=EPOCHS)
+    parser.add_argument("--lr", type=float, default=LEARNING_RATE)
+    parser.add_argument("--max_seq_len", type=int, default=MAX_SEQ_LEN)
+    parser.add_argument("--num_workers", type=int, default=NUM_WORKERS)
     parser.add_argument("--save_path", type=str, default=None, help="Optional: Path to save the trained model weights (e.g., my_model.pth)")
     
     args = parser.parse_args()

@@ -1,7 +1,9 @@
-spacy
 numpy
 pandas
+matplotlib
+pillow
 torch
 torchvision
-transformers
-matplotlib
+scikit-learn
+spacy
+ipykernel

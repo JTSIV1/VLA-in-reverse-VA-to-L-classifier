@@ -4,13 +4,18 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
+from config import (
+    SPACY_MODEL, LANG_ANNOTATIONS_SUBDIR, LANG_ANNOTATIONS_FILE,
+    IMAGE_KEY, EPISODE_TEMPLATE,
+)
+
 # Load spaCy once gracefully
 try:
-    nlp = spacy.load("en_core_web_sm")
+    nlp = spacy.load(SPACY_MODEL)
 except OSError:
     from spacy.cli import download
-    download("en_core_web_sm")
-    nlp = spacy.load("en_core_web_sm")
+    download(SPACY_MODEL)
+    nlp = spacy.load(SPACY_MODEL)
 
 def extract_verb(text):
     """Extracts verbs and their particles (e.g. 'pick up') from text."""
@@ -30,7 +35,7 @@ def load_calvin_to_dataframe(data_dir):
     Reads the CALVIN auto_lang_ann.npy file and structures the
     episodes into a Pandas DataFrame for easier filtering/access.
     """
-    lang_path = os.path.join(data_dir, "lang_annotations", "auto_lang_ann.npy")
+    lang_path = os.path.join(data_dir, LANG_ANNOTATIONS_SUBDIR, LANG_ANNOTATIONS_FILE)
     if not os.path.exists(lang_path):
         raise FileNotFoundError(f"Annotations not found at {lang_path}")
     
@@ -76,12 +81,12 @@ def visualize_frames(df, data_dir, num_samples=3):
         axes = np.array([axes])
         
     for i, (_, row) in enumerate(samples.iterrows()):
-        start_path = os.path.join(data_dir, f"episode_{row['start_idx']:07d}.npz")
-        end_path = os.path.join(data_dir, f"episode_{row['end_idx']:07d}.npz")
-        
+        start_path = os.path.join(data_dir, EPISODE_TEMPLATE.format(row['start_idx']))
+        end_path = os.path.join(data_dir, EPISODE_TEMPLATE.format(row['end_idx']))
+
         try:
-            start_img = np.load(start_path)['rgb_static']
-            end_img = np.load(end_path)['rgb_static']
+            start_img = np.load(start_path)[IMAGE_KEY]
+            end_img = np.load(end_path)[IMAGE_KEY]
             
             axes[i, 0].imshow(start_img)
             axes[i, 0].set_title(f"Start | Verb: {row['primary_verb']}")
