@@ -38,5 +38,9 @@ NUM_WORKERS = 4
 WARMUP_EPOCHS = 2
 GRAD_CLIP_NORM = 1.0
 
+# ─── FAST tokenization ───────────────────────────────────────────────────────
+FAST_VOCAB_SIZE = 1024
+FAST_TOKENIZER_PATH = "./checkpoints/fast_tokenizer"
+
 # ─── NLP ──────────────────────────────────────────────────────────────────────
 SPACY_MODEL = "en_core_web_sm"

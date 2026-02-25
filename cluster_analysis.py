@@ -4,11 +4,12 @@ Builds features from action sequences, runs PCA + K-Means,
 and saves plots + metrics to checkpoints/.
 
 Usage:
-    python cluster_analysis.py [--max_len 64]
+    python cluster_analysis.py [--max_len 64] [--workers 8]
     sbatch run_cluster.sh
 """
 import argparse
 import os
+import time
 import numpy as np
 import matplotlib
 matplotlib.use("Agg")
@@ -17,35 +18,45 @@ from sklearn.decomposition import PCA
 from sklearn.cluster import KMeans
 from sklearn.metrics import adjusted_rand_score, normalized_mutual_info_score
 from collections import Counter
+from multiprocessing import Pool
+from functools import partial
 
 from config import TRAIN_DIR, ACTION_KEY, EPISODE_TEMPLATE, ACTION_DIM
 from utils import load_calvin_to_dataframe
 
 
-def build_features(df, max_len):
-    """Load action trajectories and build fixed-length feature matrix."""
+def _load_action(idx, data_dir, action_key, template):
+    """Load a single frame's action vector (worker function for multiprocessing)."""
+    path = os.path.join(data_dir, template.format(idx))
+    return np.load(path)[action_key].astype(np.float32)
+
+
+def build_features(df, max_len, num_workers):
+    """Load action trajectories in parallel and build fixed-length feature matrix."""
     # Collect all unique frame indices we actually need
     needed_indices = set()
-    for _, row in df.iterrows():
-        needed_indices.update(range(row['start_idx'], row['end_idx'] + 1))
+    for s, e in zip(df['start_idx'].values, df['end_idx'].values):
+        needed_indices.update(range(s, e + 1))
     needed_indices = sorted(needed_indices)
-    print(f"Loading {len(needed_indices)} unique frames ...")
+    print(f"Need to load {len(needed_indices)} unique frames using {num_workers} workers ...")
 
-    # Load only the frames we need into a dict
-    idx_to_pos = {}
-    actions_list = []
-    for i, idx in enumerate(needed_indices):
-        path = os.path.join(TRAIN_DIR, EPISODE_TEMPLATE.format(idx))
-        ep = np.load(path)
-        actions_list.append(ep[ACTION_KEY].astype(np.float32))
-        idx_to_pos[idx] = i
-        if (i + 1) % 50000 == 0:
-            print(f"  loaded {i + 1}/{len(needed_indices)} frames")
+    t0 = time.time()
+    load_fn = partial(_load_action,
+                      data_dir=TRAIN_DIR,
+                      action_key=ACTION_KEY,
+                      template=EPISODE_TEMPLATE)
+
+    with Pool(num_workers) as pool:
+        actions_list = pool.map(load_fn, needed_indices, chunksize=1024)
 
     all_actions = np.array(actions_list)  # (num_unique_frames, 7)
-    print(f"Loaded actions array: {all_actions.shape}")
+    elapsed = time.time() - t0
+    print(f"Loaded {all_actions.shape} in {elapsed:.1f}s ({len(needed_indices)/elapsed:.0f} frames/s)")
 
-    # Build feature matrix
+    # Build index mapping
+    idx_to_pos = {idx: i for i, idx in enumerate(needed_indices)}
+
+    # Build feature matrix via pure slicing
     N = len(df)
     features = np.zeros((N, max_len * ACTION_DIM), dtype=np.float32)
     starts = df['start_idx'].values
@@ -144,6 +155,7 @@ def run_kmeans(features, verb_labels, pca_2d, unique_verbs, cmap, out_dir):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--max_len", type=int, default=64)
+    parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--out_dir", type=str, default="./checkpoints")
     args = parser.parse_args()
 
@@ -153,7 +165,7 @@ def main():
     df = load_calvin_to_dataframe(TRAIN_DIR)
     print(f"Episodes: {len(df)}, Unique verbs: {df['primary_verb'].nunique()}\n")
 
-    features, verb_labels = build_features(df, args.max_len)
+    features, verb_labels = build_features(df, args.max_len, args.workers)
     print(f"Feature matrix: {features.shape}  ({len(set(verb_labels))} unique verbs)\n")
 
     pca_2d, unique_verbs, cmap = run_pca(features, verb_labels, args.out_dir)

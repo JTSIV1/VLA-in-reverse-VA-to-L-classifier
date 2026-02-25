@@ -15,7 +15,7 @@ from config import (
     ACTION_DIM, D_MODEL, NHEAD, NUM_LAYERS, DROPOUT_RATE, PATCH_SIZE,
     IMAGE_SIZE, IMG_MEAN, IMG_STD,
     BATCH_SIZE, EPOCHS, LEARNING_RATE, MAX_SEQ_LEN, NUM_WORKERS,
-    WARMUP_EPOCHS, GRAD_CLIP_NORM,
+    WARMUP_EPOCHS, GRAD_CLIP_NORM, FAST_VOCAB_SIZE, FAST_TOKENIZER_PATH,
 )
 
 
@@ -39,42 +39,50 @@ class ActionToVerbTransformer(nn.Module):
     def __init__(self, num_verbs, d_model=D_MODEL, nhead=NHEAD,
                  num_layers=NUM_LAYERS, action_dim=ACTION_DIM,
                  dropout=DROPOUT_RATE, img_size=IMAGE_SIZE[0],
-                 patch_size=PATCH_SIZE, max_action_len=MAX_SEQ_LEN):
+                 patch_size=PATCH_SIZE, max_action_len=MAX_SEQ_LEN,
+                 modality="full", action_rep="native",
+                 fast_vocab_size=FAST_VOCAB_SIZE):
         super().__init__()
+        self.modality = modality
+        self.action_rep = action_rep
         self.num_patches = (img_size // patch_size) ** 2
 
-        # -- Vision: ViT-style patch embedding (no pretrained CNN needed for
-        # 200x200 synthetic CALVIN images; preserves spatial info unlike ResNet
-        # global avg pool which collapses each image to a single token) --
-        self.patch_embed = PatchEmbed(img_size, patch_size, 3, d_model)
+        # -- Vision branch (skip for action_only) --
+        if modality != "action_only":
+            # ViT-style patch embedding: no pretrained CNN needed for
+            # 200x200 synthetic CALVIN images; preserves spatial info unlike
+            # ResNet global avg pool which collapses each image to a single token
+            self.patch_embed = PatchEmbed(img_size, patch_size, 3, d_model)
+            # Spatial position shared between start/end images
+            self.patch_pos = nn.Parameter(torch.zeros(1, self.num_patches, d_model))
+            # Token type: lets transformer distinguish start vs end frame patches
+            self.type_img_start = nn.Parameter(torch.zeros(1, 1, d_model))
+            self.type_img_end = nn.Parameter(torch.zeros(1, 1, d_model))
 
-        # -- Action projection --
-        self.action_proj = nn.Linear(action_dim, d_model)
+        # -- Action branch (skip for vision_only) --
+        if modality != "vision_only":
+            if action_rep == "native":
+                self.action_proj = nn.Linear(action_dim, d_model)
+            else:
+                # FAST: discrete token IDs -> learned embeddings
+                self.action_embed = nn.Embedding(fast_vocab_size, d_model)
+            # Temporal position for action sequence
+            self.action_pos = nn.Parameter(torch.zeros(1, max_action_len, d_model))
+            self.type_action = nn.Parameter(torch.zeros(1, 1, d_model))
 
         # -- CLS token --
         self.cls_token = nn.Parameter(torch.zeros(1, 1, d_model))
-
-        # -- Positional embeddings (separate per modality so spatial patch
+        # Separate positional embeddings per modality so spatial patch
         # positions and temporal action positions are independently learned,
-        # rather than sharing a single flat 1D encoding) --
+        # rather than sharing a single flat 1D encoding
         self.cls_pos = nn.Parameter(torch.zeros(1, 1, d_model))
-        self.patch_pos = nn.Parameter(torch.zeros(1, self.num_patches, d_model))
-        self.action_pos = nn.Parameter(torch.zeros(1, max_action_len, d_model))
-
-        # -- Token type embeddings (lets the transformer distinguish CLS,
-        # start-frame patches, end-frame patches, and action tokens regardless
-        # of their position in the sequence — like BERT segment embeddings) --
+        # Token type: like BERT segment embeddings
         self.type_cls = nn.Parameter(torch.zeros(1, 1, d_model))
-        self.type_img_start = nn.Parameter(torch.zeros(1, 1, d_model))
-        self.type_img_end = nn.Parameter(torch.zeros(1, 1, d_model))
-        self.type_action = nn.Parameter(torch.zeros(1, 1, d_model))
 
         # Initialize all learned embeddings (ViT convention)
-        for p in [self.cls_token, self.cls_pos,
-                  self.patch_pos, self.action_pos,
-                  self.type_cls, self.type_img_start,
-                  self.type_img_end, self.type_action]:
-            nn.init.trunc_normal_(p, std=0.02)
+        for name, p in self.named_parameters():
+            if 'type_' in name or '_pos' in name or 'cls_token' in name:
+                nn.init.trunc_normal_(p, std=0.02)
 
         # -- Transformer encoder --
         encoder_layer = nn.TransformerEncoderLayer(
@@ -92,26 +100,34 @@ class ActionToVerbTransformer(nn.Module):
         )
 
     def forward(self, first_frame, last_frame, trajectories, seq_lengths=None):
-        batch_size = first_frame.shape[0]
-
-        # Patch embeddings + spatial position + type
-        start_patches = (self.patch_embed(first_frame)
-                         + self.patch_pos + self.type_img_start)
-        end_patches = (self.patch_embed(last_frame)
-                       + self.patch_pos + self.type_img_end)
-
-        # Action embeddings + temporal position + type
-        action_len = trajectories.size(1)
-        action_emb = (self.action_proj(trajectories)
-                      + self.action_pos[:, :action_len, :] + self.type_action)
+        batch_size = trajectories.size(0)
 
         # CLS token + position + type
         cls = self.cls_token.expand(batch_size, -1, -1) + self.cls_pos + self.type_cls
+        parts = [cls]
 
-        # Sequence layout: [CLS] [start patches] [end patches] [actions]
-        # Start/end patches are adjacent so they can cross-attend in early layers;
-        # variable-length actions are at the end so padding is contiguous.
-        full_seq = torch.cat([cls, start_patches, end_patches, action_emb], dim=1)
+        # Vision: patch embeddings + spatial position + type
+        if self.modality != "action_only":
+            start_patches = (self.patch_embed(first_frame)
+                             + self.patch_pos + self.type_img_start)
+            end_patches = (self.patch_embed(last_frame)
+                           + self.patch_pos + self.type_img_end)
+            parts.extend([start_patches, end_patches])
+
+        # Action embeddings + temporal position + type
+        if self.modality != "vision_only":
+            action_len = trajectories.size(1)
+            if self.action_rep == "native":
+                action_emb = self.action_proj(trajectories)
+            else:
+                action_emb = self.action_embed(trajectories)
+            action_emb = action_emb + self.action_pos[:, :action_len, :] + self.type_action
+            parts.append(action_emb)
+
+        # Sequence layout: [CLS] [start patches?] [end patches?] [actions?]
+        # Start/end patches adjacent for cross-attention; variable-length
+        # actions at the end so padding is contiguous.
+        full_seq = torch.cat(parts, dim=1)
 
         # Padding mask: True = padded position to ignore
         src_key_padding_mask = None
@@ -127,12 +143,19 @@ class ActionToVerbTransformer(nn.Module):
 
 
 class CalvinVerbDataset(Dataset):
-    def __init__(self, df, data_dir, transform=None, max_seq_len=MAX_SEQ_LEN):
-        """CALVIN dataset loader using a pandas DataFrame."""
+    def __init__(self, df, data_dir, transform=None, max_seq_len=MAX_SEQ_LEN,
+                 modality="full", fast_tokenizer=None):
+        """CALVIN dataset loader with modality ablation support.
+        Args:
+            modality: "full", "action_only", or "vision_only"
+            fast_tokenizer: if provided, tokenize actions into FAST token IDs
+        """
         self.df = df
         self.data_dir = data_dir
         self.transform = transform
         self.max_seq_len = max_seq_len
+        self.modality = modality
+        self.fast_tokenizer = fast_tokenizer
         self.num_patches = (IMAGE_SIZE[0] // PATCH_SIZE) ** 2
 
         unique_verbs = sorted(list(set(df['primary_verb'].unique())))
@@ -153,54 +176,90 @@ class CalvinVerbDataset(Dataset):
         end_idx = row['end_idx']
         verb = row['primary_verb']
 
-        # Load start and end frames
-        start_data = self._load_npz(start_idx)
-        end_data = self._load_npz(end_idx)
-        img_start = Image.fromarray(np.array(start_data[IMAGE_KEY])).convert("RGB")
-        img_end = Image.fromarray(np.array(end_data[IMAGE_KEY])).convert("RGB")
-
-        if self.transform:
-            first_frame = self.transform(img_start)
-            last_frame = self.transform(img_end)
+        # -- Load images (skip for action_only to save I/O) --
+        if self.modality != "action_only":
+            start_data = self._load_npz(start_idx)
+            end_data = self._load_npz(end_idx)
+            img_start = Image.fromarray(np.array(start_data[IMAGE_KEY])).convert("RGB")
+            img_end = Image.fromarray(np.array(end_data[IMAGE_KEY])).convert("RGB")
+            if self.transform:
+                first_frame = self.transform(img_start)
+                last_frame = self.transform(img_end)
+            else:
+                first_frame = transforms.ToTensor()(img_start)
+                last_frame = transforms.ToTensor()(img_end)
         else:
-            first_frame = transforms.ToTensor()(img_start)
-            last_frame = transforms.ToTensor()(img_end)
+            # Dummy tensors — not used by model but keeps DataLoader shape consistent
+            first_frame = torch.zeros(3, IMAGE_SIZE[0], IMAGE_SIZE[1])
+            last_frame = torch.zeros(3, IMAGE_SIZE[0], IMAGE_SIZE[1])
 
-        # Action trajectory
-        all_actions = []
-        for i in range(start_idx, end_idx + 1):
-            step_data = self._load_npz(i)
-            all_actions.append(np.array(step_data[ACTION_KEY]))
+        # -- Load actions (skip for vision_only) --
+        if self.modality != "vision_only":
+            all_actions = []
+            for i in range(start_idx, end_idx + 1):
+                step_data = self._load_npz(i)
+                all_actions.append(np.array(step_data[ACTION_KEY]))
+            actions = np.array(all_actions)  # (T, 7)
+            L = actions.shape[0]
 
-        actions = np.array(all_actions)  # (T, 7)
-        L = actions.shape[0]
-
-        if L < self.max_seq_len:
-            actions_padded = np.pad(actions, ((0, self.max_seq_len - L), (0, 0)),
-                                    mode='constant')
+            if self.fast_tokenizer is not None:
+                # FAST tokenization: (T, 7) -> list[int] token IDs
+                token_ids = self.fast_tokenizer(actions[np.newaxis])
+                if isinstance(token_ids, list) and len(token_ids) > 0:
+                    if isinstance(token_ids[0], list):
+                        token_ids = token_ids[0]
+                token_ids = list(token_ids)
+                L_tok = len(token_ids)
+                if L_tok < self.max_seq_len:
+                    token_ids = token_ids + [0] * (self.max_seq_len - L_tok)
+                else:
+                    token_ids = token_ids[:self.max_seq_len]
+                actions_tensor = torch.tensor(token_ids, dtype=torch.long)
+                action_real_len = min(L_tok, self.max_seq_len)
+            else:
+                # Native continuous actions
+                if L < self.max_seq_len:
+                    actions_padded = np.pad(actions, ((0, self.max_seq_len - L), (0, 0)),
+                                            mode='constant')
+                else:
+                    actions_padded = actions[:self.max_seq_len]
+                actions_tensor = torch.tensor(actions_padded, dtype=torch.float32)
+                action_real_len = min(L, self.max_seq_len)
         else:
-            actions_padded = actions[:self.max_seq_len]
-
-        actions_tensor = torch.tensor(actions_padded, dtype=torch.float32)
+            # Vision-only: dummy action tensor, no variable-length actions
+            actions_tensor = torch.zeros(self.max_seq_len, ACTION_DIM)
+            action_real_len = 0
 
         label_id = self.verb_to_id.get(verb, self.verb_to_id.get("unknown", 0))
         label = torch.tensor(label_id, dtype=torch.long)
 
-        # Total real tokens: [CLS](1) + [start patches](P) + [end patches](P) + [actions](L)
-        actual_seq_len = 1 + 2 * self.num_patches + min(L, self.max_seq_len)
+        # Compute actual sequence length for padding mask
+        seq_len = 1  # CLS
+        if self.modality != "action_only":
+            seq_len += 2 * self.num_patches
+        if self.modality != "vision_only":
+            seq_len += action_real_len
 
-        return first_frame, last_frame, actions_tensor, label, actual_seq_len
+        return first_frame, last_frame, actions_tensor, label, seq_len
 
 
 def main(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Training on device: {device}")
+    print(f"Modality: {args.modality} | Action rep: {args.action_rep}")
 
     transform = transforms.Compose([
         transforms.Resize(IMAGE_SIZE),
         transforms.ToTensor(),
         transforms.Normalize(mean=IMG_MEAN, std=IMG_STD)
     ])
+
+    # --- Load FAST tokenizer if needed ---
+    fast_tok = None
+    if args.action_rep == "fast":
+        from fast_tokenizer import load_fast_tokenizer
+        fast_tok = load_fast_tokenizer(args.fast_tokenizer_path)
+        print(f"Loaded FAST tokenizer from {args.fast_tokenizer_path}")
 
     # --- Load dataframes ---
     print(f"Loading training data from {args.data_dir}...")
@@ -219,12 +278,16 @@ def main(args):
 
     # --- Build datasets ---
     dataset = CalvinVerbDataset(df, args.data_dir, transform=transform,
-                                max_seq_len=args.max_seq_len)
+                                max_seq_len=args.max_seq_len,
+                                modality=args.modality,
+                                fast_tokenizer=fast_tok)
     dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True,
                             num_workers=args.num_workers)
 
     val_dataset = CalvinVerbDataset(val_df, args.val_dir, transform=transform,
-                                    max_seq_len=args.max_seq_len)
+                                    max_seq_len=args.max_seq_len,
+                                    modality=args.modality,
+                                    fast_tokenizer=fast_tok)
     val_dataset.verb_to_id = dataset.verb_to_id
     val_dataset.id_to_verb = dataset.id_to_verb
     valid_mask = val_df['primary_verb'].isin(dataset.verb_to_id.keys())
@@ -237,7 +300,8 @@ def main(args):
     # --- Model, optimizer, scheduler ---
     num_verbs = len(dataset.verb_to_id)
     model = ActionToVerbTransformer(
-        num_verbs=num_verbs, max_action_len=args.max_seq_len).to(device)
+        num_verbs=num_verbs, max_action_len=args.max_seq_len,
+        modality=args.modality, action_rep=args.action_rep).to(device)
 
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.AdamW(model.parameters(), lr=args.lr)
@@ -324,6 +388,8 @@ def main(args):
             'patch_size': PATCH_SIZE,
             'img_size': IMAGE_SIZE[0],
             'max_action_len': args.max_seq_len,
+            'modality': args.modality,
+            'action_rep': args.action_rep,
         }
         torch.save(checkpoint, args.save_path)
         print(f"\nCheckpoint saved to {args.save_path}")
@@ -346,6 +412,14 @@ if __name__ == "__main__":
                         help="Path to save checkpoint (e.g., model.pth)")
     parser.add_argument("--debug", type=int, default=0, metavar="N",
                         help="Debug mode: use only N samples for quick smoke testing")
+    parser.add_argument("--modality", type=str, default="full",
+                        choices=["full", "action_only", "vision_only"],
+                        help="Which input modalities to use")
+    parser.add_argument("--action_rep", type=str, default="native",
+                        choices=["native", "fast"],
+                        help="Action representation: native continuous or FAST tokens")
+    parser.add_argument("--fast_tokenizer_path", type=str, default=FAST_TOKENIZER_PATH,
+                        help="Path to fitted FAST tokenizer")
 
     args = parser.parse_args()
     main(args)

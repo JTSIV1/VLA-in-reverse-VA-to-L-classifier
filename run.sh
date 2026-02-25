@@ -54,6 +54,7 @@ python test_transformer.py \
     --model_path ./checkpoints/model.pth \
     --max_seq_len 64 \
     --save_cm ./checkpoints/confusion_matrix.png \
+    --save_metrics ./checkpoints/full_native_metrics.json \
     $DEBUG_FLAG
 
 echo ""

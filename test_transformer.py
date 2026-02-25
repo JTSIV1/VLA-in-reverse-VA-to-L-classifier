@@ -1,4 +1,5 @@
 import os
+import json
 import argparse
 import torch
 from torch.utils.data import DataLoader
@@ -11,7 +12,7 @@ from utils import load_calvin_to_dataframe
 from config import (
     VAL_DIR, D_MODEL, NHEAD, NUM_LAYERS, ACTION_DIM, PATCH_SIZE,
     IMAGE_SIZE, IMG_MEAN, IMG_STD,
-    BATCH_SIZE, MAX_SEQ_LEN, NUM_WORKERS,
+    BATCH_SIZE, MAX_SEQ_LEN, NUM_WORKERS, FAST_TOKENIZER_PATH,
 )
 
 
@@ -22,7 +23,7 @@ def main(args):
     if not os.path.exists(args.model_path):
         raise FileNotFoundError(f"Could not find model weights at {args.model_path}")
 
-    # --- Load checkpoint (supports both new dict and legacy bare state_dict) ---
+    # --- Load checkpoint ---
     print(f"Loading weights from {args.model_path}...")
     raw = torch.load(args.model_path, map_location=device, weights_only=False)
 
@@ -38,10 +39,13 @@ def main(args):
         patch_size = raw.get('patch_size', PATCH_SIZE)
         img_size = raw.get('img_size', IMAGE_SIZE[0])
         max_action_len = raw.get('max_action_len', args.max_seq_len)
+        # Read modality/action_rep from checkpoint, with CLI override
+        modality = raw.get('modality', args.modality)
+        action_rep = raw.get('action_rep', args.action_rep)
         print(f"Loaded checkpoint: {num_verbs} verbs, d_model={d_model}, "
-              f"patch_size={patch_size}, img_size={img_size}")
+              f"modality={modality}, action_rep={action_rep}")
     else:
-        # Legacy bare state_dict — infer num_verbs from classifier bias
+        # Legacy bare state_dict
         state_dict = raw
         classifier_bias_keys = [
             k for k in state_dict
@@ -59,13 +63,24 @@ def main(args):
         patch_size = PATCH_SIZE
         img_size = IMAGE_SIZE[0]
         max_action_len = args.max_seq_len
+        modality = args.modality
+        action_rep = args.action_rep
         print(f"Loaded legacy state_dict: {num_verbs} verbs (from '{last_bias_key}')")
+
+    print(f"Modality: {modality} | Action rep: {action_rep}")
 
     transform = transforms.Compose([
         transforms.Resize(IMAGE_SIZE),
         transforms.ToTensor(),
         transforms.Normalize(mean=IMG_MEAN, std=IMG_STD)
     ])
+
+    # --- Load FAST tokenizer if needed ---
+    fast_tok = None
+    if action_rep == "fast":
+        from fast_tokenizer import load_fast_tokenizer
+        fast_tok = load_fast_tokenizer(args.fast_tokenizer_path)
+        print(f"Loaded FAST tokenizer from {args.fast_tokenizer_path}")
 
     # --- Load test dataset ---
     print(f"Loading test dataset from {args.data_dir}...")
@@ -76,8 +91,11 @@ def main(args):
         df = df.head(n).copy()
         print(f"[DEBUG] Using {n} test samples")
 
+    # Use max_action_len from checkpoint so dataset padding matches model's action_pos size
     dataset = CalvinVerbDataset(df, args.data_dir, transform=transform,
-                                max_seq_len=args.max_seq_len)
+                                max_seq_len=max_action_len,
+                                modality=modality,
+                                fast_tokenizer=fast_tok)
 
     # Override vocab from checkpoint if available
     if verb_to_id is not None:
@@ -96,7 +114,8 @@ def main(args):
         num_verbs=num_verbs, d_model=d_model, nhead=nhead,
         num_layers=num_layers, action_dim=action_dim,
         img_size=img_size, patch_size=patch_size,
-        max_action_len=max_action_len)
+        max_action_len=max_action_len,
+        modality=modality, action_rep=action_rep)
     model.load_state_dict(state_dict)
     model.to(device)
     model.eval()
@@ -131,29 +150,50 @@ def main(args):
     target_names = [label_map[i] for i in present_labels]
 
     print("\n" + "=" * 60)
-    print(f"EVALUATION COMPLETE")
+    print(f"EVALUATION COMPLETE  [{modality} / {action_rep}]")
     print(f"Total examples: {len(all_preds)}")
     print(f"Overall accuracy: {accuracy:.2f}%")
     print("=" * 60)
 
     # Per-class metrics
+    report_str = classification_report(all_labels, all_preds,
+                                       labels=present_labels,
+                                       target_names=target_names,
+                                       digits=3)
     print("\nPer-class metrics:")
-    print(classification_report(all_labels, all_preds,
-                                labels=present_labels,
-                                target_names=target_names,
-                                digits=3))
+    print(report_str)
+
+    # Save metrics JSON for programmatic comparison
+    if args.save_metrics:
+        report_dict = classification_report(all_labels, all_preds,
+                                            labels=present_labels,
+                                            target_names=target_names,
+                                            digits=4, output_dict=True)
+        metrics = {
+            "modality": modality,
+            "action_rep": action_rep,
+            "accuracy": accuracy,
+            "num_examples": len(all_preds),
+            "per_class": report_dict,
+        }
+        metrics_dir = os.path.dirname(args.save_metrics)
+        if metrics_dir:
+            os.makedirs(metrics_dir, exist_ok=True)
+        with open(args.save_metrics, "w") as f:
+            json.dump(metrics, f, indent=2)
+        print(f"\nMetrics saved to {args.save_metrics}")
 
     # Confusion matrix
     cm = confusion_matrix(all_labels, all_preds, labels=present_labels)
     fig, ax = plt.subplots(figsize=(14, 12))
     disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=target_names)
     disp.plot(ax=ax, xticks_rotation=45, cmap='Blues', values_format='d')
-    ax.set_title("Confusion Matrix")
+    ax.set_title(f"Confusion Matrix [{modality} / {action_rep}]")
     plt.tight_layout()
 
     if args.save_cm:
         plt.savefig(args.save_cm, dpi=150, bbox_inches='tight')
-        print(f"\nConfusion matrix saved to {args.save_cm}")
+        print(f"Confusion matrix saved to {args.save_cm}")
     else:
         plt.show()
 
@@ -169,8 +209,18 @@ if __name__ == "__main__":
     parser.add_argument("--num_workers", type=int, default=NUM_WORKERS)
     parser.add_argument("--save_cm", type=str, default=None,
                         help="Path to save confusion matrix image (e.g., cm.png)")
+    parser.add_argument("--save_metrics", type=str, default=None,
+                        help="Path to save metrics JSON (e.g., metrics.json)")
     parser.add_argument("--debug", type=int, default=0, metavar="N",
                         help="Debug mode: use only N samples for quick smoke testing")
+    parser.add_argument("--modality", type=str, default="full",
+                        choices=["full", "action_only", "vision_only"],
+                        help="Fallback if not in checkpoint")
+    parser.add_argument("--action_rep", type=str, default="native",
+                        choices=["native", "fast"],
+                        help="Fallback if not in checkpoint")
+    parser.add_argument("--fast_tokenizer_path", type=str, default=FAST_TOKENIZER_PATH,
+                        help="Path to fitted FAST tokenizer")
 
     args = parser.parse_args()
     main(args)
