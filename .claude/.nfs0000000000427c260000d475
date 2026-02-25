@@ -1,0 +1,24 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 -c \":*)",
+      "Bash(conda run -n mmml python -c \"import sys; print\\(sys.version\\)\")",
+      "Bash(conda run -n mmml python3 -c \"import sys; print\\(sys.version\\)\")",
+      "Bash(conda run -n mmml python3 -c \":*)",
+      "Bash(conda run -n mmml pip3 install pandas spacy)",
+      "Bash(conda run -n mmml pip3 install torch torchvision)",
+      "Bash(conda run -n mmml python3 -c \"import pandas; print\\(''pandas'', pandas.__version__\\)\")",
+      "Bash(conda run -n mmml which python3)",
+      "Bash(conda env list)",
+      "Bash(conda install -n mmml python=3.9 -y)",
+      "Bash(conda run -n mmml python --version)",
+      "Bash(conda run -n mmml pip install torch torchvision pandas spacy matplotlib ipykernel pillow)",
+      "Bash(pip install torch torchvision pandas spacy matplotlib ipykernel pillow)",
+      "Bash(python3 -m spacy download en_core_web_sm)",
+      "Bash(pip install scikit-learn)",
+      "Bash(ls -1 /data/user_data/yashagar/task_D_D/training/episode_*.npz)",
+      "Bash(ls -1 /data/user_data/yashagar/task_D_D/validation/episode_*.npz)",
+      "Bash(python3:*)"
+    ]
+  }
+}
