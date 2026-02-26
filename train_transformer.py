@@ -18,9 +18,17 @@ from config import (
     ACTION_DIM, D_MODEL, NHEAD, NUM_LAYERS, CROSS_LAYERS, DROPOUT_RATE, PATCH_SIZE,
     IMAGE_SIZE, IMG_MEAN, IMG_STD,
     BATCH_SIZE, EPOCHS, LEARNING_RATE, MAX_SEQ_LEN, NUM_WORKERS,
-    WARMUP_EPOCHS, GRAD_CLIP_NORM, FAST_VOCAB_SIZE, FAST_TOKENIZER_PATH,
-    IMAGE_ENCODER,
+    WARMUP_EPOCHS, GRAD_CLIP_NORM, ACTION_VOCAB_SIZE, FAST_TOKENIZER_PATH, IMAGE_ENCODER
 )
+
+from config import (
+    ACTION_TOKEN_MAX_SEQ_LEN,
+    QUEST_TOKENIZER_CKPT,
+    OAT_TOKENIZER_CKPT,
+    TOKENIZER_HORIZON,
+    TOKENIZER_FIT_NORM_MAX_TRAJS,
+)
+from action_tokenizers import load_action_tokenizer
 
 
 
@@ -30,8 +38,10 @@ class ActionToVerbTransformer(nn.Module):
                  dropout=DROPOUT_RATE, img_size=IMAGE_SIZE[0],
                  patch_size=PATCH_SIZE, max_action_len=MAX_SEQ_LEN,
                  modality="full", action_rep="native",
-                 fast_vocab_size=FAST_VOCAB_SIZE,
-                 cross_layers=CROSS_LAYERS, image_encoder="scratch"):
+                 action_vocab_size=ACTION_VOCAB_SIZE,
+                 cross_layers=CROSS_LAYERS,
+                 image_encoder="scratch",
+                 ):
         super().__init__()
         self.modality = modality
         self.action_rep = action_rep
@@ -51,8 +61,8 @@ class ActionToVerbTransformer(nn.Module):
             if action_rep == "native":
                 self.action_proj = nn.Linear(action_dim, d_model)
             else:
-                # FAST: discrete token IDs -> learned embeddings
-                self.action_embed = nn.Embedding(fast_vocab_size, d_model)
+                # Tokenized: discrete token IDs -> learned embeddings
+                self.action_embed = nn.Embedding(action_vocab_size, d_model)
             # Temporal position for action sequence
             self.action_pos = nn.Parameter(torch.zeros(1, max_action_len, d_model))
             self.type_action = nn.Parameter(torch.zeros(1, 1, d_model))
@@ -152,7 +162,7 @@ class ActionToVerbTransformer(nn.Module):
 
 class CalvinVerbDataset(Dataset):
     def __init__(self, df, data_dir, transform=None, max_seq_len=MAX_SEQ_LEN,
-                 modality="full", fast_tokenizer=None, num_patches=64):
+                 modality="full", action_tokenizer=None, num_patches=64):
         """CALVIN dataset loader with modality ablation support.
         Args:
             modality: "full", "action_only", or "vision_only"
@@ -164,7 +174,7 @@ class CalvinVerbDataset(Dataset):
         self.transform = transform
         self.max_seq_len = max_seq_len
         self.modality = modality
-        self.fast_tokenizer = fast_tokenizer
+        self.action_tokenizer = action_tokenizer
         self.num_patches = num_patches
 
         unique_verbs = sorted(list(set(df['primary_verb'].unique())))
@@ -211,18 +221,18 @@ class CalvinVerbDataset(Dataset):
             actions = np.array(all_actions)  # (T, 7)
             L = actions.shape[0]
 
-            if self.fast_tokenizer is not None:
-                # FAST tokenization: (T, 7) -> list[int] token IDs
-                token_ids = self.fast_tokenizer(actions[np.newaxis])
-                if isinstance(token_ids, list) and len(token_ids) > 0:
-                    if isinstance(token_ids[0], list):
-                        token_ids = token_ids[0]
+            if self.action_tokenizer is not None:
+                token_ids = self.action_tokenizer(actions[np.newaxis])  # List[List[int]]
+                if isinstance(token_ids, list) and len(token_ids) > 0 and isinstance(token_ids[0], list):
+                    token_ids = token_ids[0]
                 token_ids = list(token_ids)
+
                 L_tok = len(token_ids)
                 if L_tok < self.max_seq_len:
                     token_ids = token_ids + [0] * (self.max_seq_len - L_tok)
                 else:
                     token_ids = token_ids[:self.max_seq_len]
+
                 actions_tensor = torch.tensor(token_ids, dtype=torch.long)
                 action_real_len = min(L_tok, self.max_seq_len)
             else:
@@ -265,14 +275,20 @@ def main(args):
     ])
 
     # --- Load FAST tokenizer if needed ---
-    fast_tok = None
-    fast_vocab_size = FAST_VOCAB_SIZE
-    if args.action_rep == "fast":
-        from fast_tokenizer import load_fast_tokenizer
-        fast_tok = load_fast_tokenizer(args.fast_tokenizer_path)
-        fast_vocab_size = fast_tok.bpe_tokenizer.vocab_size
-        print(f"Loaded FAST tokenizer from {args.fast_tokenizer_path} "
-              f"(vocab_size={fast_vocab_size})")
+    tok = None
+    action_vocab_size = ACTION_VOCAB_SIZE  # default
+    if args.action_rep in ("fast", "bin", "quest", "oat"):
+        tok = load_action_tokenizer(
+            args.action_rep,
+            train_dir=args.data_dir,
+            horizon=TOKENIZER_HORIZON,
+            max_tokens=args.max_seq_len,
+            quest_ckpt=args.quest_ckpt,
+            oat_ckpt=args.oat_ckpt,
+            fit_norm_max_trajs=TOKENIZER_FIT_NORM_MAX_TRAJS,
+        )
+        action_vocab_size = tok.vocab_size
+        print(f"Loaded {args.action_rep} tokenizer (vocab_size={action_vocab_size})")
 
     # --- Load dataframes ---
     print(f"Loading training data from {args.data_dir}...")
@@ -293,14 +309,14 @@ def main(args):
     dataset = CalvinVerbDataset(df, args.data_dir, transform=transform,
                                 max_seq_len=args.max_seq_len,
                                 modality=args.modality,
-                                fast_tokenizer=fast_tok)
+                                action_tokenizer=tok)
     dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True,
                             num_workers=args.num_workers)
 
     val_dataset = CalvinVerbDataset(val_df, args.val_dir, transform=transform,
                                     max_seq_len=args.max_seq_len,
                                     modality=args.modality,
-                                    fast_tokenizer=fast_tok)
+                                    action_tokenizer=tok)
     val_dataset.verb_to_id = dataset.verb_to_id
     val_dataset.id_to_verb = dataset.id_to_verb
     valid_mask = val_df['primary_verb'].isin(dataset.verb_to_id.keys())
@@ -315,9 +331,9 @@ def main(args):
     model = ActionToVerbTransformer(
         num_verbs=num_verbs, max_action_len=args.max_seq_len,
         modality=args.modality, action_rep=args.action_rep,
-        fast_vocab_size=fast_vocab_size,
         cross_layers=args.cross_layers,
-        image_encoder=args.image_encoder).to(device)
+        image_encoder=args.image_encoder,
+        action_vocab_size=action_vocab_size,).to(device)
 
     # Update datasets with the actual token count from the encoder
     if args.modality != "action_only":
@@ -489,7 +505,7 @@ def main(args):
             'max_action_len': args.max_seq_len,
             'modality': args.modality,
             'action_rep': args.action_rep,
-            'fast_vocab_size': fast_vocab_size,
+            'action_vocab_size': action_vocab_size,
             'cross_layers': args.cross_layers,
             'image_encoder': args.image_encoder,
         }
@@ -520,8 +536,11 @@ if __name__ == "__main__":
                         choices=["full", "action_only", "vision_only"],
                         help="Which input modalities to use")
     parser.add_argument("--action_rep", type=str, default="native",
-                        choices=["native", "fast"],
+                        choices=["native", "fast", "quest", "oat", "bin"],
                         help="Action representation: native continuous or FAST tokens")
+    parser.add_argument("--max_seq_len", type=int, default=ACTION_TOKEN_MAX_SEQ_LEN)
+    parser.add_argument("--quest_ckpt", type=str, default=QUEST_TOKENIZER_CKPT)
+    parser.add_argument("--oat_ckpt", type=str, default=OAT_TOKENIZER_CKPT)
     parser.add_argument("--fast_tokenizer_path", type=str, default=FAST_TOKENIZER_PATH,
                         help="Path to fitted FAST tokenizer")
     parser.add_argument("--cross_layers", type=int, default=CROSS_LAYERS,

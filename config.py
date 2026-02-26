@@ -40,9 +40,25 @@ NUM_WORKERS = 4
 WARMUP_EPOCHS = 2
 GRAD_CLIP_NORM = 1.0
 
-# ─── FAST tokenization ───────────────────────────────────────────────────────
-FAST_VOCAB_SIZE = 1024
+# ─── Action tokenization ───────────────────────────────────────────────────────
+ACTION_VOCAB_SIZE = 1024
 FAST_TOKENIZER_PATH = "./checkpoints/fast_tokenizer"
+
+CHECKPOINT_DIR = "./checkpoints"
+QUEST_TOKENIZER_CKPT = f"{CHECKPOINT_DIR}/quest_tok.pt"
+OAT_TOKENIZER_CKPT   = f"{CHECKPOINT_DIR}/oat_tok.pt"
+
+# action chunking
+TOKENIZER_HORIZON = 32
+TOKENIZER_DOWNSAMPLE_FACTOR = 4         # QueST
+OAT_NUM_REGISTERS = 8                   # OAT latent_horizon (register tokens)
+
+# token sequence length cap used by your LM training (pad/truncate)
+ACTION_TOKEN_MAX_SEQ_LEN = 128          # e.g. 128 for FAST/quest/oat; 256 if using BIN
+
+# normalizer fit speed/coverage
+TOKENIZER_FIT_NORM_MAX_TRAJS = 2000     # how many trajectories used to fit normalizer
+TOKENIZER_FIT_NORM_BATCHED = True       # optional if you later optimize
 
 # ─── NLP ──────────────────────────────────────────────────────────────────────
 SPACY_MODEL = "en_core_web_sm"

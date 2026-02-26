@@ -8,3 +8,11 @@ scikit-learn
 spacy
 ipykernel
 timm
+tqdm
+scipy
+transformers
+tokenizers
+vector-quantize-pytorch
+einops
+dill
+hydra-core
