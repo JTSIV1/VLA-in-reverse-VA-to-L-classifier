@@ -1,10 +1,9 @@
 import os
 import numpy as np
 import torch
-from tqdm import tqdm
 
-from utils import load_calvin_to_dataframe
 from config import ACTION_KEY, EPISODE_TEMPLATE
+from action_tokenizers_training import train_tokenizer, fit_calvin_normalizer
 
 from config import (
     MAX_SEQ_LEN,
@@ -25,42 +24,7 @@ from oat.tokenizer.oat.tokenizer import OATTok
 from oat.tokenizer.oat.encoder.register_encoder import RegisterEncoder
 from oat.tokenizer.oat.decoder.single_pass_decoder import SinglePassDecoder
 from oat.tokenizer.oat.quantizer.fsq import FSQ
-from oat.model.common.normalizer import LinearNormalizer
 
-
-def _iter_all_actions(df, data_dir):
-    """Yields (T, D) numpy arrays."""
-    for _, row in df.iterrows():
-        acts = []
-        for i in range(row["start_idx"], row["end_idx"] + 1):
-            path = os.path.join(data_dir, EPISODE_TEMPLATE.format(i))
-            step = np.load(path, mmap_mode="r")
-            acts.append(np.array(step[ACTION_KEY], dtype=np.float32))
-        yield np.stack(acts, axis=0)
-
-
-def fit_calvin_normalizer(data_dir, max_trajs=None):
-    """Fit oat LinearNormalizer on all CALVIN actions in data_dir."""
-    print("Fitting tokenizer normalizer on actions from trajectories in", data_dir)
-    df = load_calvin_to_dataframe(data_dir)
-    if max_trajs:
-        df = df.head(min(max_trajs, len(df))).copy()
-
-    print("Reading actions...")
-    all_actions = []
-    for k, traj in tqdm(enumerate(_iter_all_actions(df, data_dir))):
-        all_actions.append(traj)
-        if max_trajs and (k + 1) >= max_trajs:
-            break
-
-    # concatenate over time
-    actions = np.concatenate(all_actions, axis=0)  # (sum_T, D)
-    actions_t = torch.from_numpy(actions)
-
-    print("Fitting normalizer...")
-    normalizer = LinearNormalizer()
-    normalizer.fit({"action": actions_t}, last_n_dims=1, mode="limits", output_min=-1.0, output_max=1.0)
-    return normalizer
 
 
 class TokenizerAdapter:
@@ -155,10 +119,15 @@ def load_action_tokenizer(
         # need weights; if not present you’ll train (next section)
         tok = QueSTTok(action_dim=ACTION_DIM, horizon=horizon, vq_type="fsq", fsq_level=[8, 5, 5, 5], downsample_factor=TOKENIZER_DOWNSAMPLE_FACTOR)
         tok.set_normalizer(normalizer)
-        if os.path.exists(quest_ckpt):
-            sd = torch.load(quest_ckpt, map_location="cpu")
-            tok.load_state_dict(sd["model"])
-            tok.set_normalizer(sd["normalizer"])
+        if not os.path.exists(quest_ckpt):
+            print(f"No checkpoint found for QueST tokenizer at {quest_ckpt}, starting training")
+            train_tokenizer(name, train_dir, quest_ckpt)
+            assert os.path.exists(quest_ckpt), "Tokenizer training did not produce checkpoint!"
+
+        sd = torch.load(quest_ckpt, map_location="cpu", weights_only=False)
+        tok.load_state_dict(sd["model"])
+        tok.set_normalizer(sd["normalizer"])
+            
         return TokenizerAdapter(tok, "quest", horizon=horizon, max_tokens=max_tokens)
 
     if name == "oat":
@@ -182,10 +151,14 @@ def load_action_tokenizer(
         tok = OATTok(encoder=encoder, decoder=decoder, quantizer=quantizer)
         tok.set_normalizer(normalizer)
 
-        if os.path.exists(oat_ckpt):
-            sd = torch.load(oat_ckpt, map_location="cpu")
-            tok.load_state_dict(sd["model"])
-            tok.set_normalizer(sd["normalizer"])
+        if not os.path.exists(oat_ckpt):
+            print(f"No checkpoint found for OAT tokenizer at {oat_ckpt}, starting training")
+            train_tokenizer(name, train_dir, oat_ckpt)
+            assert os.path.exists(oat_ckpt), "Tokenizer training did not produce checkpoint!"
+
+        sd = torch.load(oat_ckpt, map_location="cpu", weights_only=False)
+        tok.load_state_dict(sd["model"])
+        tok.set_normalizer(sd["normalizer"])
         return TokenizerAdapter(tok, "oat", horizon=horizon, max_tokens=max_tokens)
 
     raise ValueError(f"Unknown tokenizer name {name}")
