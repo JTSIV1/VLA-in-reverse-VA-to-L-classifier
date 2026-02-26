@@ -151,11 +151,12 @@ class ActionToVerbTransformer(nn.Module):
 
 class CalvinVerbDataset(Dataset):
     def __init__(self, df, data_dir, transform=None, max_seq_len=MAX_SEQ_LEN,
-                 modality="full", fast_tokenizer=None):
+                 modality="full", fast_tokenizer=None, num_patches=64):
         """CALVIN dataset loader with modality ablation support.
         Args:
             modality: "full", "action_only", or "vision_only"
             fast_tokenizer: if provided, tokenize actions into FAST token IDs
+            num_patches: number of image tokens per frame (from encoder.num_tokens)
         """
         self.df = df
         self.data_dir = data_dir
@@ -163,7 +164,7 @@ class CalvinVerbDataset(Dataset):
         self.max_seq_len = max_seq_len
         self.modality = modality
         self.fast_tokenizer = fast_tokenizer
-        self.num_patches = (IMAGE_SIZE[0] // PATCH_SIZE) ** 2
+        self.num_patches = num_patches
 
         unique_verbs = sorted(list(set(df['primary_verb'].unique())))
         self.verb_to_id = {v: i for i, v in enumerate(unique_verbs)}
@@ -314,7 +315,13 @@ def main(args):
         num_verbs=num_verbs, max_action_len=args.max_seq_len,
         modality=args.modality, action_rep=args.action_rep,
         fast_vocab_size=fast_vocab_size,
-        cross_layers=args.cross_layers).to(device)
+        cross_layers=args.cross_layers,
+        image_encoder=args.image_encoder).to(device)
+
+    # Update datasets with the actual token count from the encoder
+    if args.modality != "action_only":
+        dataset.num_patches = model.num_patches
+        val_dataset.num_patches = model.num_patches
 
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.AdamW(model.parameters(), lr=args.lr)
