@@ -3,6 +3,7 @@ import argparse
 import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader
+from tqdm import tqdm
 
 from utils import load_calvin_to_dataframe
 from config import ACTION_KEY, EPISODE_TEMPLATE, ACTION_DIM, DATA_DIR
@@ -15,14 +16,47 @@ from config import (
     ACTION_DIM,
     TOKENIZER_DOWNSAMPLE_FACTOR,
     OAT_NUM_REGISTERS,
-)
-from action_tokenizers import fit_calvin_normalizer  # from the file above
+)  # from the file above
 
 from oat.tokenizer.quest.tokenizer import QueSTTok
 from oat.tokenizer.oat.tokenizer import OATTok
 from oat.tokenizer.oat.encoder.register_encoder import RegisterEncoder
 from oat.tokenizer.oat.decoder.single_pass_decoder import SinglePassDecoder
 from oat.tokenizer.oat.quantizer.fsq import FSQ
+from oat.model.common.normalizer import LinearNormalizer
+
+def _iter_all_actions(df, data_dir):
+    """Yields (T, D) numpy arrays."""
+    for _, row in df.iterrows():
+        acts = []
+        for i in range(row["start_idx"], row["end_idx"] + 1):
+            path = os.path.join(data_dir, EPISODE_TEMPLATE.format(i))
+            step = np.load(path, mmap_mode="r")
+            acts.append(np.array(step[ACTION_KEY], dtype=np.float32))
+        yield np.stack(acts, axis=0)
+
+def fit_calvin_normalizer(data_dir, max_trajs=None):
+    """Fit oat LinearNormalizer on all CALVIN actions in data_dir."""
+    print("Fitting tokenizer normalizer on actions from trajectories in", data_dir)
+    df = load_calvin_to_dataframe(data_dir)
+    if max_trajs:
+        df = df.head(min(max_trajs, len(df))).copy()
+
+    print("Reading actions...")
+    all_actions = []
+    for k, traj in tqdm(enumerate(_iter_all_actions(df, data_dir))):
+        all_actions.append(traj)
+        if max_trajs and (k + 1) >= max_trajs:
+            break
+
+    # concatenate over time
+    actions = np.concatenate(all_actions, axis=0)  # (sum_T, D)
+    actions_t = torch.from_numpy(actions)
+
+    print("Fitting normalizer...")
+    normalizer = LinearNormalizer()
+    normalizer.fit({"action": actions_t}, last_n_dims=1, mode="limits", output_min=-1.0, output_max=1.0)
+    return normalizer
 
 
 class CalvinActionChunkDataset(Dataset):
@@ -77,7 +111,47 @@ def build_oat(horizon):
     return OATTok(encoder=enc, decoder=dec, quantizer=q)
 
 
-def main():
+def train_tokenizer(kind, data_dir, out_path, horizon=TOKENIZER_HORIZON, batch=256, epochs=50, lr=5e-5, max_trajs=2000):
+    print(f"Training {kind} tokenizer on data from {data_dir} for {epochs}")
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    ds = CalvinActionChunkDataset(data_dir, horizon=horizon, max_trajs=max_trajs)
+    dl = DataLoader(ds, batch_size=batch, shuffle=True, num_workers=4, drop_last=True)
+
+    normalizer = fit_calvin_normalizer(data_dir, max_trajs=max_trajs)
+
+    if kind == "quest":
+        tok = QueSTTok(action_dim=ACTION_DIM, horizon=horizon, vq_type="fsq", fsq_level=[8,5,5,5], downsample_factor=TOKENIZER_DOWNSAMPLE_FACTOR)
+    else:
+        tok = build_oat(horizon)
+
+    tok.set_normalizer(normalizer)
+    tok = tok.to(device)
+
+    opt = torch.optim.AdamW(tok.parameters(), lr=lr, betas=(0.9, 0.95), weight_decay=0.0)
+
+    tok.train()
+    for ep in range(epochs):
+        tot = 0.0
+        n = 0
+        for batch in dl:
+            batch = {k: v.to(device) for k, v in batch.items()}
+            loss = tok(batch)   # both tokenizers implement forward() returning recon loss
+            opt.zero_grad()
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(tok.parameters(), 1.0)
+            opt.step()
+            tot += loss.item()
+            n += 1
+        print(f"epoch {ep}: loss={tot/max(n,1):.6f}")
+
+    # save checkpoint
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    torch.save({"model": tok.state_dict(), "normalizer": normalizer}, out_path)
+    print("saved:", out_path)
+
+
+if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--kind", choices=["quest", "oat"], required=True)
     ap.add_argument("--data_dir", default=DATA_DIR)
@@ -93,43 +167,4 @@ def main():
         args.out = QUEST_TOKENIZER_CKPT if args.kind == "quest" else OAT_TOKENIZER_CKPT
         os.makedirs(os.path.dirname(args.out), exist_ok=True)
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-
-    ds = CalvinActionChunkDataset(args.data_dir, horizon=args.horizon, max_trajs=args.max_trajs)
-    dl = DataLoader(ds, batch_size=args.batch, shuffle=True, num_workers=4, drop_last=True)
-
-    normalizer = fit_calvin_normalizer(args.data_dir, max_trajs=args.max_trajs)
-
-    if args.kind == "quest":
-        tok = QueSTTok(action_dim=ACTION_DIM, horizon=args.horizon, vq_type="fsq", fsq_level=[8,5,5,5], downsample_factor=TOKENIZER_DOWNSAMPLE_FACTOR)
-    else:
-        tok = build_oat(args.horizon)
-
-    tok.set_normalizer(normalizer)
-    tok = tok.to(device)
-
-    opt = torch.optim.AdamW(tok.parameters(), lr=args.lr, betas=(0.9, 0.95), weight_decay=0.0)
-
-    tok.train()
-    for ep in range(args.epochs):
-        tot = 0.0
-        n = 0
-        for batch in dl:
-            batch = {k: v.to(device) for k, v in batch.items()}
-            loss = tok(batch)   # both tokenizers implement forward() returning recon loss
-            opt.zero_grad()
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(tok.parameters(), 1.0)
-            opt.step()
-            tot += loss.item()
-            n += 1
-        print(f"epoch {ep}: loss={tot/max(n,1):.6f}")
-
-    # save checkpoint
-    os.makedirs(os.path.dirname(args.out), exist_ok=True)
-    torch.save({"model": tok.state_dict(), "normalizer": normalizer}, args.out)
-    print("saved:", args.out)
-
-
-if __name__ == "__main__":
-    main()
+    train_tokenizer(args.kind, args.data_dir, args.out, args.horizon, args.batch, args.epochs, args.lr, args.max_trajs)
