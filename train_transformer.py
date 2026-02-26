@@ -12,6 +12,7 @@ from torchvision import transforms
 from PIL import Image
 
 from utils import load_calvin_to_dataframe
+from image_encoders import build_image_encoder
 from config import (
     DATA_DIR, VAL_DIR, IMAGE_KEY, ACTION_KEY, EPISODE_TEMPLATE,
     ACTION_DIM, D_MODEL, NHEAD, NUM_LAYERS, CROSS_LAYERS, DROPOUT_RATE, PATCH_SIZE,
@@ -21,21 +22,6 @@ from config import (
 )
 
 
-class PatchEmbed(nn.Module):
-    """ViT-style patch embedding: split image into non-overlapping patches and
-    linearly project each to d_model via Conv2d (equivalent to flatten + linear,
-    but fused into a single GPU op)."""
-
-    def __init__(self, img_size=200, patch_size=25, in_channels=3, embed_dim=128):
-        super().__init__()
-        self.num_patches = (img_size // patch_size) ** 2
-        self.proj = nn.Conv2d(in_channels, embed_dim,
-                              kernel_size=patch_size, stride=patch_size)
-
-    def forward(self, x):
-        # x: (B, 3, H, W) -> (B, num_patches, embed_dim)
-        return self.proj(x).flatten(2).transpose(1, 2)
-
 
 class ActionToVerbTransformer(nn.Module):
     def __init__(self, num_verbs, d_model=D_MODEL, nhead=NHEAD,
@@ -44,23 +30,18 @@ class ActionToVerbTransformer(nn.Module):
                  patch_size=PATCH_SIZE, max_action_len=MAX_SEQ_LEN,
                  modality="full", action_rep="native",
                  fast_vocab_size=FAST_VOCAB_SIZE,
-                 cross_layers=CROSS_LAYERS):
+                 cross_layers=CROSS_LAYERS, image_encoder="scratch"):
         super().__init__()
         self.modality = modality
         self.action_rep = action_rep
-        self.num_patches = (img_size // patch_size) ** 2
         self.num_layers = num_layers
         self.cross_layers = cross_layers
 
         # -- Vision branch (skip for action_only) --
         if modality != "action_only":
-            # ViT-style patch embedding: no pretrained CNN needed for
-            # 200x200 synthetic CALVIN images; preserves spatial info unlike
-            # ResNet global avg pool which collapses each image to a single token
-            self.patch_embed = PatchEmbed(img_size, patch_size, 3, d_model)
-            # Spatial position shared between start/end images
+            self.patch_embed = build_image_encoder(image_encoder, d_model, img_size, patch_size)
+            self.num_patches = self.patch_embed.num_tokens
             self.patch_pos = nn.Parameter(torch.zeros(1, self.num_patches, d_model))
-            # Token type: lets transformer distinguish start vs end frame patches
             self.type_img_start = nn.Parameter(torch.zeros(1, 1, d_model))
             self.type_img_end = nn.Parameter(torch.zeros(1, 1, d_model))
 
