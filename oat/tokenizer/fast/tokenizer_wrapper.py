@@ -14,7 +14,7 @@ class FASTTok(BaseTokenizer):
     def __init__(self, fast_tokenizer_path: str = "physical-intelligence/fast"):
         super().__init__()
         self.fast_tok = AutoProcessor.from_pretrained(
-            fast_tokenizer_path, trust_remote_code=True)
+            fast_tokenizer_path, trust_remote_code=True, use_fast=False)
         self.vocab_size = self.fast_tok.vocab_size
         self.normalizer = LinearNormalizer()
 
@@ -31,7 +31,7 @@ class FASTTok(BaseTokenizer):
             os.path.dirname(checkpoint), cfg.checkpoint.fast_save_name
         )
         tok.fast_tok = AutoProcessor.from_pretrained(
-            fast_path, trust_remote_code=True)
+            fast_path, trust_remote_code=True, use_fast=False)
         tok.vocab_size = tok.fast_tok.vocab_size
         
         if return_configuration:

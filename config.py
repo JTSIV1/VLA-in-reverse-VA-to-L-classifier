@@ -54,7 +54,8 @@ TOKENIZER_DOWNSAMPLE_FACTOR = 4         # QueST
 OAT_NUM_REGISTERS = 8                   # OAT latent_horizon (register tokens)
 
 # token sequence length cap used by your LM training (pad/truncate)
-ACTION_TOKEN_MAX_SEQ_LEN = 128          # e.g. 128 for FAST/quest/oat; 256 if using BIN
+
+#ACTION_TOKEN_MAX_SEQ_LEN = MAX_SEQ_LEN          # e.g. 128 for FAST/quest/oat; 256 if using BIN
 
 # normalizer fit speed/coverage
 TOKENIZER_FIT_NORM_MAX_TRAJS = 2000     # how many trajectories used to fit normalizer
