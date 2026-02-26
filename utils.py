@@ -30,6 +30,24 @@ def extract_verb(text):
 
     return actions
 
+def extract_sentence_elements(text):
+    doc = nlp(text.lower())
+    verbs = []
+    objects = []
+    
+    for token in doc:
+        # verbs + verb particles
+        if token.pos_ == "VERB" and (token.dep_ in ("ROOT", "conj", "xcomp", "advcl")):
+            parts = [t.text for t in token.children if t.dep_ == "prt"]
+            full_verb = " ".join([token.text] + parts)
+            verbs.append(full_verb)
+            
+        # nouns - direct objects
+        if token.dep_ == "dobj":
+            objects.append(token.text)
+       
+    return {"verbs": verbs, "objects": objects}
+
 def load_calvin_to_dataframe(data_dir):
     """
     Reads the CALVIN auto_lang_ann.npy file and structures the
