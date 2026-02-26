@@ -490,6 +490,7 @@ def main(args):
             'action_rep': args.action_rep,
             'fast_vocab_size': fast_vocab_size,
             'cross_layers': args.cross_layers,
+            'image_encoder': args.image_encoder,
         }
         torch.save(checkpoint, args.save_path)
         print(f"\nCheckpoint saved to {args.save_path}")
