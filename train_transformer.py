@@ -22,7 +22,6 @@ from config import (
 )
 
 from config import (
-    ACTION_TOKEN_MAX_SEQ_LEN,
     QUEST_TOKENIZER_CKPT,
     OAT_TOKENIZER_CKPT,
     TOKENIZER_HORIZON,
@@ -538,7 +537,6 @@ if __name__ == "__main__":
     parser.add_argument("--action_rep", type=str, default="native",
                         choices=["native", "fast", "quest", "oat", "bin"],
                         help="Action representation: native continuous or FAST tokens")
-    parser.add_argument("--max_seq_len", type=int, default=ACTION_TOKEN_MAX_SEQ_LEN)
     parser.add_argument("--quest_ckpt", type=str, default=QUEST_TOKENIZER_CKPT)
     parser.add_argument("--oat_ckpt", type=str, default=OAT_TOKENIZER_CKPT)
     parser.add_argument("--fast_tokenizer_path", type=str, default=FAST_TOKENIZER_PATH,

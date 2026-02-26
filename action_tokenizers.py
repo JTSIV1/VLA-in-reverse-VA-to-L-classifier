@@ -1,13 +1,14 @@
 import os
 import numpy as np
 import torch
+from tqdm import tqdm
 
 from utils import load_calvin_to_dataframe
 from config import ACTION_KEY, EPISODE_TEMPLATE
 
 from config import (
+    MAX_SEQ_LEN,
     TOKENIZER_HORIZON,
-    ACTION_TOKEN_MAX_SEQ_LEN,
     QUEST_TOKENIZER_CKPT,
     OAT_TOKENIZER_CKPT,
     TOKENIZER_FIT_NORM_MAX_TRAJS,
@@ -40,12 +41,14 @@ def _iter_all_actions(df, data_dir):
 
 def fit_calvin_normalizer(data_dir, max_trajs=None):
     """Fit oat LinearNormalizer on all CALVIN actions in data_dir."""
+    print("Fitting tokenizer normalizer on actions from trajectories in", data_dir)
     df = load_calvin_to_dataframe(data_dir)
     if max_trajs:
         df = df.head(min(max_trajs, len(df))).copy()
 
+    print("Reading actions...")
     all_actions = []
-    for k, traj in enumerate(_iter_all_actions(df, data_dir)):
+    for k, traj in tqdm(enumerate(_iter_all_actions(df, data_dir))):
         all_actions.append(traj)
         if max_trajs and (k + 1) >= max_trajs:
             break
@@ -54,6 +57,7 @@ def fit_calvin_normalizer(data_dir, max_trajs=None):
     actions = np.concatenate(all_actions, axis=0)  # (sum_T, D)
     actions_t = torch.from_numpy(actions)
 
+    print("Fitting normalizer...")
     normalizer = LinearNormalizer()
     normalizer.fit({"action": actions_t}, last_n_dims=1, mode="limits", output_min=-1.0, output_max=1.0)
     return normalizer
@@ -124,7 +128,7 @@ def load_action_tokenizer(
     train_dir: str,
     *,
     horizon: int = TOKENIZER_HORIZON,
-    max_tokens: int = ACTION_TOKEN_MAX_SEQ_LEN,
+    max_tokens: int = MAX_SEQ_LEN,  # max tokens your LM can take (after which you truncate/pad)
     quest_ckpt: str = QUEST_TOKENIZER_CKPT,
     oat_ckpt: str = OAT_TOKENIZER_CKPT,
     fit_norm_max_trajs: int = TOKENIZER_FIT_NORM_MAX_TRAJS,
