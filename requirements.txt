@@ -7,3 +7,4 @@ torchvision
 scikit-learn
 spacy
 ipykernel
+timm
