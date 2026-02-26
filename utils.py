@@ -30,7 +30,25 @@ def extract_verb(text):
 
     return actions
 
-def load_calvin_to_dataframe(data_dir):
+def extract_sentence_elements(text):
+    doc = nlp(text.lower())
+    verbs = []
+    objects = []
+    
+    for token in doc:
+        # verbs + verb particles
+        if token.pos_ == "VERB" and (token.dep_ in ("ROOT", "conj", "xcomp", "advcl")):
+            parts = [t.text for t in token.children if t.dep_ == "prt"]
+            full_verb = " ".join([token.text] + parts)
+            verbs.append(full_verb)
+            
+        # nouns - direct objects
+        if token.dep_ == "dobj":
+            objects.append(token.text)
+       
+    return {"verbs": verbs, "objects": objects}
+
+def load_calvin_to_dataframe(data_dir, target="verb"):
     """
     Reads the CALVIN auto_lang_ann.npy file and structures the
     episodes into a Pandas DataFrame for easier filtering/access.
@@ -50,17 +68,17 @@ def load_calvin_to_dataframe(data_dir):
         'instruction': instructions
     })
     
-    # Extract verbs and add them as columns
+    # Extract targets and add them as columns
     print("Processing language instructions with spaCy...")
-    df['verbs'] = df['instruction'].apply(extract_verb)
+    df[f'{target}s'] = df['instruction'].apply(lambda text: extract_sentence_elements(text)[f'{target}s'])
     
-    # Filter out rows that don't have exactly 1 verb
+    # Filter out rows that don't have exactly 1 target
     initial_count = len(df)
-    df = df[df['verbs'].apply(len) == 1].copy()
-    print(f"Filtered out {initial_count - len(df)} examples that had 0 or >1 verbs.")
+    df = df[df[f'{target}s'].apply(len) == 1].copy()
+    print(f"Filtered out {initial_count - len(df)} examples that had 0 or >1 {target}s.")
     
-    # Use the single extracted verb as the primary label
-    df['primary_verb'] = df['verbs'].apply(lambda x: x[0])
+    # Use the single extracted target as the primary label
+    df[f'primary_{target}'] = df[f'{target}s'].apply(lambda x: x[0])
     
     return df
 
