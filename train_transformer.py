@@ -12,29 +12,16 @@ from torchvision import transforms
 from PIL import Image
 
 from utils import load_calvin_to_dataframe
+from image_encoders import build_image_encoder
 from config import (
     DATA_DIR, VAL_DIR, IMAGE_KEY, ACTION_KEY, EPISODE_TEMPLATE,
     ACTION_DIM, D_MODEL, NHEAD, NUM_LAYERS, CROSS_LAYERS, DROPOUT_RATE, PATCH_SIZE,
     IMAGE_SIZE, IMG_MEAN, IMG_STD,
     BATCH_SIZE, EPOCHS, LEARNING_RATE, MAX_SEQ_LEN, NUM_WORKERS,
     WARMUP_EPOCHS, GRAD_CLIP_NORM, FAST_VOCAB_SIZE, FAST_TOKENIZER_PATH,
+    IMAGE_ENCODER,
 )
 
-
-class PatchEmbed(nn.Module):
-    """ViT-style patch embedding: split image into non-overlapping patches and
-    linearly project each to d_model via Conv2d (equivalent to flatten + linear,
-    but fused into a single GPU op)."""
-
-    def __init__(self, img_size=200, patch_size=25, in_channels=3, embed_dim=128):
-        super().__init__()
-        self.num_patches = (img_size // patch_size) ** 2
-        self.proj = nn.Conv2d(in_channels, embed_dim,
-                              kernel_size=patch_size, stride=patch_size)
-
-    def forward(self, x):
-        # x: (B, 3, H, W) -> (B, num_patches, embed_dim)
-        return self.proj(x).flatten(2).transpose(1, 2)
 
 
 class ActionToVerbTransformer(nn.Module):
@@ -44,23 +31,18 @@ class ActionToVerbTransformer(nn.Module):
                  patch_size=PATCH_SIZE, max_action_len=MAX_SEQ_LEN,
                  modality="full", action_rep="native",
                  fast_vocab_size=FAST_VOCAB_SIZE,
-                 cross_layers=CROSS_LAYERS):
+                 cross_layers=CROSS_LAYERS, image_encoder="scratch"):
         super().__init__()
         self.modality = modality
         self.action_rep = action_rep
-        self.num_patches = (img_size // patch_size) ** 2
         self.num_layers = num_layers
         self.cross_layers = cross_layers
 
         # -- Vision branch (skip for action_only) --
         if modality != "action_only":
-            # ViT-style patch embedding: no pretrained CNN needed for
-            # 200x200 synthetic CALVIN images; preserves spatial info unlike
-            # ResNet global avg pool which collapses each image to a single token
-            self.patch_embed = PatchEmbed(img_size, patch_size, 3, d_model)
-            # Spatial position shared between start/end images
+            self.patch_embed = build_image_encoder(image_encoder, d_model, img_size, patch_size)
+            self.num_patches = self.patch_embed.num_tokens
             self.patch_pos = nn.Parameter(torch.zeros(1, self.num_patches, d_model))
-            # Token type: lets transformer distinguish start vs end frame patches
             self.type_img_start = nn.Parameter(torch.zeros(1, 1, d_model))
             self.type_img_end = nn.Parameter(torch.zeros(1, 1, d_model))
 
@@ -170,11 +152,12 @@ class ActionToVerbTransformer(nn.Module):
 
 class CalvinVerbDataset(Dataset):
     def __init__(self, df, data_dir, transform=None, max_seq_len=MAX_SEQ_LEN,
-                 modality="full", fast_tokenizer=None):
+                 modality="full", fast_tokenizer=None, num_patches=64):
         """CALVIN dataset loader with modality ablation support.
         Args:
             modality: "full", "action_only", or "vision_only"
             fast_tokenizer: if provided, tokenize actions into FAST token IDs
+            num_patches: number of image tokens per frame (from encoder.num_tokens)
         """
         self.df = df
         self.data_dir = data_dir
@@ -182,7 +165,7 @@ class CalvinVerbDataset(Dataset):
         self.max_seq_len = max_seq_len
         self.modality = modality
         self.fast_tokenizer = fast_tokenizer
-        self.num_patches = (IMAGE_SIZE[0] // PATCH_SIZE) ** 2
+        self.num_patches = num_patches
 
         unique_verbs = sorted(list(set(df['primary_verb'].unique())))
         self.verb_to_id = {v: i for i, v in enumerate(unique_verbs)}
@@ -333,7 +316,13 @@ def main(args):
         num_verbs=num_verbs, max_action_len=args.max_seq_len,
         modality=args.modality, action_rep=args.action_rep,
         fast_vocab_size=fast_vocab_size,
-        cross_layers=args.cross_layers).to(device)
+        cross_layers=args.cross_layers,
+        image_encoder=args.image_encoder).to(device)
+
+    # Update datasets with the actual token count from the encoder
+    if args.modality != "action_only":
+        dataset.num_patches = model.num_patches
+        val_dataset.num_patches = model.num_patches
 
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.AdamW(model.parameters(), lr=args.lr)
@@ -502,6 +491,7 @@ def main(args):
             'action_rep': args.action_rep,
             'fast_vocab_size': fast_vocab_size,
             'cross_layers': args.cross_layers,
+            'image_encoder': args.image_encoder,
         }
         torch.save(checkpoint, args.save_path)
         print(f"\nCheckpoint saved to {args.save_path}")
@@ -537,6 +527,9 @@ if __name__ == "__main__":
     parser.add_argument("--cross_layers", type=int, default=CROSS_LAYERS,
                         help="Number of final layers with cross-modal attention "
                              "(default=NUM_LAYERS for early fusion)")
+    parser.add_argument("--image_encoder", type=str, default=IMAGE_ENCODER,
+                        choices=["scratch", "resnet18", "dinov2", "r3m"],
+                        help="Image encoder backbone (default: scratch)")
 
     args = parser.parse_args()
     main(args)
