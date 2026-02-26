@@ -157,14 +157,14 @@ def collect_trajectories(df, data_dir):
     return trajectories
 
 
-def fit_fast_tokenizer(df, data_dir, save_path):
+def fit_fast_tokenizer(df, data_dir, save_path, vocab_size=1024):
     """Collect CALVIN training trajectories, fit FAST tokenizer, save."""
     trajectories = collect_trajectories(df, data_dir)
 
     print(f"Fitting FAST tokenizer on {len(trajectories)} trajectories "
           f"(max_T={max(a.shape[0] for a in trajectories)}, "
-          f"action_dim={trajectories[0].shape[1]})...")
-    tokenizer = FASTTokenizer.fit(trajectories)
+          f"action_dim={trajectories[0].shape[1]}, vocab_size={vocab_size})...")
+    tokenizer = FASTTokenizer.fit(trajectories, vocab_size=vocab_size)
 
     tokenizer.save_pretrained(save_path)
     print(f"FAST tokenizer saved to {save_path}")
@@ -191,6 +191,8 @@ if __name__ == "__main__":
     parser.add_argument("--data_dir", type=str, default=DATA_DIR,
                         help="Path to CALVIN training split")
     parser.add_argument("--save_path", type=str, default=FAST_TOKENIZER_PATH)
+    parser.add_argument("--vocab_size", type=int, default=1024,
+                        help="BPE vocabulary size for FAST tokenizer")
     parser.add_argument("--debug", type=int, default=0, metavar="N",
                         help="Use only N samples for quick testing")
     args = parser.parse_args()
@@ -200,4 +202,4 @@ if __name__ == "__main__":
         df = df.head(min(args.debug, len(df))).copy()
         print(f"[DEBUG] Using {len(df)} samples")
 
-    fit_fast_tokenizer(df, args.data_dir, args.save_path)
+    fit_fast_tokenizer(df, args.data_dir, args.save_path, vocab_size=args.vocab_size)

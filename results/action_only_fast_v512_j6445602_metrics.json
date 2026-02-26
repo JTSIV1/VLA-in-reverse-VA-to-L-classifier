@@ -1,0 +1,183 @@
+{
+  "modality": "action_only",
+  "action_rep": "fast",
+  "accuracy": 23.279648609077597,
+  "num_examples": 683,
+  "per_class": {
+    "close": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1-score": 0.0,
+      "support": 7.0
+    },
+    "collapse": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1-score": 0.0,
+      "support": 5.0
+    },
+    "go": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1-score": 0.0,
+      "support": 2.0
+    },
+    "grasp": {
+      "precision": 0.22580645161290322,
+      "recall": 0.2692307692307692,
+      "f1-score": 0.24561403508771928,
+      "support": 104.0
+    },
+    "left": {
+      "precision": 0.10714285714285714,
+      "recall": 0.1,
+      "f1-score": 0.10344827586206896,
+      "support": 30.0
+    },
+    "lift": {
+      "precision": 0.1,
+      "recall": 0.03125,
+      "f1-score": 0.047619047619047616,
+      "support": 32.0
+    },
+    "lift up": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1-score": 0.0,
+      "support": 11.0
+    },
+    "move": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1-score": 0.0,
+      "support": 22.0
+    },
+    "move up": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1-score": 0.0,
+      "support": 2.0
+    },
+    "open": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1-score": 0.0,
+      "support": 7.0
+    },
+    "pick up": {
+      "precision": 0.2670807453416149,
+      "recall": 0.5584415584415584,
+      "f1-score": 0.36134453781512604,
+      "support": 77.0
+    },
+    "place": {
+      "precision": 0.23880597014925373,
+      "recall": 0.5161290322580645,
+      "f1-score": 0.32653061224489793,
+      "support": 31.0
+    },
+    "pull": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1-score": 0.0,
+      "support": 4.0
+    },
+    "push": {
+      "precision": 0.22012578616352202,
+      "recall": 0.3977272727272727,
+      "f1-score": 0.2834008097165992,
+      "support": 88.0
+    },
+    "put": {
+      "precision": 0.23529411764705882,
+      "recall": 0.16,
+      "f1-score": 0.19047619047619047,
+      "support": 25.0
+    },
+    "remove": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1-score": 0.0,
+      "support": 8.0
+    },
+    "rotate": {
+      "precision": 0.29,
+      "recall": 0.5087719298245614,
+      "f1-score": 0.36942675159235666,
+      "support": 57.0
+    },
+    "slide": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1-score": 0.0,
+      "support": 59.0
+    },
+    "slide down": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1-score": 0.0,
+      "support": 4.0
+    },
+    "slide up": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1-score": 0.0,
+      "support": 2.0
+    },
+    "stack": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1-score": 0.0,
+      "support": 13.0
+    },
+    "store": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1-score": 0.0,
+      "support": 6.0
+    },
+    "sweep": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1-score": 0.0,
+      "support": 26.0
+    },
+    "take off": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1-score": 0.0,
+      "support": 8.0
+    },
+    "turn": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1-score": 0.0,
+      "support": 33.0
+    },
+    "turn off": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1-score": 0.0,
+      "support": 17.0
+    },
+    "unstack": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1-score": 0.0,
+      "support": 3.0
+    },
+    "accuracy": 0.232796486090776,
+    "macro avg": {
+      "precision": 0.062379849187304076,
+      "recall": 0.09413150231415653,
+      "f1-score": 0.07140223186718542,
+      "support": 683.0
+    },
+    "weighted avg": {
+      "precision": 0.1459001189919843,
+      "recall": 0.232796486090776,
+      "f1-score": 0.17404918989440815,
+      "support": 683.0
+    }
+  }
+}

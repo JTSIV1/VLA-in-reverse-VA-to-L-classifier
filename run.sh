@@ -4,7 +4,7 @@
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G
-#SBATCH --time=04:00:00
+#SBATCH --time=08:00:00
 #SBATCH --output=logs/slurm-%j.out
 #SBATCH --error=logs/slurm-%j.err
 
@@ -21,14 +21,21 @@ fi
 # --- Setup ---
 PROJECT_DIR="/data/user_data/wenjiel2/Code/VLA-in-reverse-VA-to-L-classifier"
 cd "$PROJECT_DIR"
-mkdir -p logs checkpoints
+mkdir -p logs checkpoints results figures
 
 # Activate conda environment
 source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate mmml
 
+# Build tag: full_native_j{JOB_ID}[_debug]
+TAG="full_native_j${SLURM_JOB_ID:-local}"
+if [[ -n "$DEBUG_FLAG" ]]; then
+    TAG="${TAG}_debug"
+fi
+
 echo "===== Job Info ====="
 echo "Job ID:    $SLURM_JOB_ID"
+echo "Tag:       $TAG"
 echo "Node:      $(hostname)"
 echo "GPU:       $(nvidia-smi --query-gpu=name --format=csv,noheader | head -1)"
 echo "Python:    $(python --version)"
@@ -40,21 +47,22 @@ echo "==================="
 echo ""
 echo "===== Starting Training ====="
 python train_transformer.py \
-    --epochs 10 \
+    --epochs 30 \
     --batch_size 16 \
-    --lr 1e-4 \
+    --lr 5e-4 \
     --max_seq_len 64 \
-    --save_path ./checkpoints/model.pth \
+    --save_path "./checkpoints/${TAG}.pth" \
+    --log_path "./results/${TAG}_log.json" \
     $DEBUG_FLAG
 
 # --- Test ---
 echo ""
 echo "===== Starting Testing ====="
 python test_transformer.py \
-    --model_path ./checkpoints/model.pth \
+    --model_path "./checkpoints/${TAG}.pth" \
     --max_seq_len 64 \
-    --save_cm ./checkpoints/confusion_matrix.png \
-    --save_metrics ./checkpoints/full_native_metrics.json \
+    --save_cm "./figures/${TAG}_cm.png" \
+    --save_metrics "./results/${TAG}_metrics.json" \
     $DEBUG_FLAG
 
 echo ""

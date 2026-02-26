@@ -10,9 +10,9 @@ import matplotlib.pyplot as plt
 from train_transformer import ActionToVerbTransformer, CalvinVerbDataset
 from utils import load_calvin_to_dataframe
 from config import (
-    VAL_DIR, D_MODEL, NHEAD, NUM_LAYERS, ACTION_DIM, PATCH_SIZE,
+    VAL_DIR, D_MODEL, NHEAD, NUM_LAYERS, CROSS_LAYERS, ACTION_DIM, PATCH_SIZE,
     IMAGE_SIZE, IMG_MEAN, IMG_STD,
-    BATCH_SIZE, MAX_SEQ_LEN, NUM_WORKERS, FAST_TOKENIZER_PATH,
+    BATCH_SIZE, MAX_SEQ_LEN, NUM_WORKERS, FAST_TOKENIZER_PATH, FAST_VOCAB_SIZE,
 )
 
 
@@ -42,8 +42,11 @@ def main(args):
         # Read modality/action_rep from checkpoint, with CLI override
         modality = raw.get('modality', args.modality)
         action_rep = raw.get('action_rep', args.action_rep)
+        fast_vocab_size = raw.get('fast_vocab_size', FAST_VOCAB_SIZE)
+        cross_layers = raw.get('cross_layers', num_layers)
         print(f"Loaded checkpoint: {num_verbs} verbs, d_model={d_model}, "
-              f"modality={modality}, action_rep={action_rep}")
+              f"modality={modality}, action_rep={action_rep}, "
+              f"cross_layers={cross_layers}")
     else:
         # Legacy bare state_dict
         state_dict = raw
@@ -65,6 +68,8 @@ def main(args):
         max_action_len = args.max_seq_len
         modality = args.modality
         action_rep = args.action_rep
+        fast_vocab_size = FAST_VOCAB_SIZE
+        cross_layers = args.cross_layers
         print(f"Loaded legacy state_dict: {num_verbs} verbs (from '{last_bias_key}')")
 
     print(f"Modality: {modality} | Action rep: {action_rep}")
@@ -115,7 +120,12 @@ def main(args):
         num_layers=num_layers, action_dim=action_dim,
         img_size=img_size, patch_size=patch_size,
         max_action_len=max_action_len,
-        modality=modality, action_rep=action_rep)
+        modality=modality, action_rep=action_rep,
+        fast_vocab_size=fast_vocab_size,
+        cross_layers=cross_layers)
+    # Backward compat: handle old nn.TransformerEncoder key prefix
+    state_dict = {k.replace("transformer.layers.", "layers."): v
+                  for k, v in state_dict.items()}
     model.load_state_dict(state_dict)
     model.to(device)
     model.eval()
@@ -221,6 +231,8 @@ if __name__ == "__main__":
                         help="Fallback if not in checkpoint")
     parser.add_argument("--fast_tokenizer_path", type=str, default=FAST_TOKENIZER_PATH,
                         help="Path to fitted FAST tokenizer")
+    parser.add_argument("--cross_layers", type=int, default=CROSS_LAYERS,
+                        help="Fallback if not in checkpoint")
 
     args = parser.parse_args()
     main(args)

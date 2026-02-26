@@ -21,6 +21,7 @@ ACTION_DIM = 7
 D_MODEL = 128          # 128 / 8 heads = 16 dims per head (64 was too small at 8 dims/head)
 NHEAD = 8
 NUM_LAYERS = 4
+CROSS_LAYERS = NUM_LAYERS  # how many final layers use cross-modal attention (= NUM_LAYERS means early fusion)
 DROPOUT_RATE = 0.1
 PATCH_SIZE = 25        # 200/25 = 8x8 = 64 patches per image, balances with ~64-step actions
 

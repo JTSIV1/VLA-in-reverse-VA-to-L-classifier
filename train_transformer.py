@@ -1,5 +1,7 @@
 import os
+import json
 import argparse
+from collections import defaultdict
 import numpy as np
 import pandas as pd
 import torch
@@ -12,7 +14,7 @@ from PIL import Image
 from utils import load_calvin_to_dataframe
 from config import (
     DATA_DIR, VAL_DIR, IMAGE_KEY, ACTION_KEY, EPISODE_TEMPLATE,
-    ACTION_DIM, D_MODEL, NHEAD, NUM_LAYERS, DROPOUT_RATE, PATCH_SIZE,
+    ACTION_DIM, D_MODEL, NHEAD, NUM_LAYERS, CROSS_LAYERS, DROPOUT_RATE, PATCH_SIZE,
     IMAGE_SIZE, IMG_MEAN, IMG_STD,
     BATCH_SIZE, EPOCHS, LEARNING_RATE, MAX_SEQ_LEN, NUM_WORKERS,
     WARMUP_EPOCHS, GRAD_CLIP_NORM, FAST_VOCAB_SIZE, FAST_TOKENIZER_PATH,
@@ -41,11 +43,14 @@ class ActionToVerbTransformer(nn.Module):
                  dropout=DROPOUT_RATE, img_size=IMAGE_SIZE[0],
                  patch_size=PATCH_SIZE, max_action_len=MAX_SEQ_LEN,
                  modality="full", action_rep="native",
-                 fast_vocab_size=FAST_VOCAB_SIZE):
+                 fast_vocab_size=FAST_VOCAB_SIZE,
+                 cross_layers=CROSS_LAYERS):
         super().__init__()
         self.modality = modality
         self.action_rep = action_rep
         self.num_patches = (img_size // patch_size) ** 2
+        self.num_layers = num_layers
+        self.cross_layers = cross_layers
 
         # -- Vision branch (skip for action_only) --
         if modality != "action_only":
@@ -84,11 +89,13 @@ class ActionToVerbTransformer(nn.Module):
             if 'type_' in name or '_pos' in name or 'cls_token' in name:
                 nn.init.trunc_normal_(p, std=0.02)
 
-        # -- Transformer encoder --
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=d_model, nhead=nhead, batch_first=True, activation='gelu'
-        )
-        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        # -- Transformer encoder (ModuleList for per-layer attention masks) --
+        self.layers = nn.ModuleList([
+            nn.TransformerEncoderLayer(
+                d_model=d_model, nhead=nhead, batch_first=True, activation='gelu'
+            )
+            for _ in range(num_layers)
+        ])
 
         # -- Classification head --
         self.classifier = nn.Sequential(
@@ -128,18 +135,37 @@ class ActionToVerbTransformer(nn.Module):
         # Start/end patches adjacent for cross-attention; variable-length
         # actions at the end so padding is contiguous.
         full_seq = torch.cat(parts, dim=1)
+        total_len = full_seq.size(1)
 
         # Padding mask: True = padded position to ignore
         src_key_padding_mask = None
         if seq_lengths is not None:
-            total_len = full_seq.size(1)
             positions = torch.arange(total_len, device=full_seq.device).unsqueeze(0)
             src_key_padding_mask = positions >= seq_lengths.unsqueeze(1)
 
-        output = self.transformer(full_seq, src_key_padding_mask=src_key_padding_mask)
+        # Build block-diagonal self-only mask for early layers (full modality only)
+        self_mask = None
+        num_self_layers = self.num_layers - self.cross_layers
+        if num_self_layers > 0 and self.modality == "full":
+            # Additive mask: -inf blocks attention, 0.0 allows it
+            self_mask = torch.full((total_len, total_len), float('-inf'),
+                                   device=full_seq.device)
+            # CLS attends only to itself
+            self_mask[0, 0] = 0.0
+            # Vision block: positions [1, 1+2*num_patches)
+            v_start, v_end = 1, 1 + 2 * self.num_patches
+            self_mask[v_start:v_end, v_start:v_end] = 0.0
+            # Action block: positions [v_end, total_len)
+            self_mask[v_end:, v_end:] = 0.0
+
+        # Forward through layers with per-layer masking
+        x = full_seq
+        for i, layer in enumerate(self.layers):
+            mask = self_mask if i < num_self_layers else None
+            x = layer(x, src_mask=mask, src_key_padding_mask=src_key_padding_mask)
 
         # Classify from CLS token
-        return self.classifier(output[:, 0, :])
+        return self.classifier(x[:, 0, :])
 
 
 class CalvinVerbDataset(Dataset):
@@ -246,7 +272,8 @@ class CalvinVerbDataset(Dataset):
 def main(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Training on device: {device}")
-    print(f"Modality: {args.modality} | Action rep: {args.action_rep}")
+    print(f"Modality: {args.modality} | Action rep: {args.action_rep} | "
+          f"Cross layers: {args.cross_layers}/{NUM_LAYERS}")
 
     transform = transforms.Compose([
         transforms.Resize(IMAGE_SIZE),
@@ -256,10 +283,13 @@ def main(args):
 
     # --- Load FAST tokenizer if needed ---
     fast_tok = None
+    fast_vocab_size = FAST_VOCAB_SIZE
     if args.action_rep == "fast":
         from fast_tokenizer import load_fast_tokenizer
         fast_tok = load_fast_tokenizer(args.fast_tokenizer_path)
-        print(f"Loaded FAST tokenizer from {args.fast_tokenizer_path}")
+        fast_vocab_size = fast_tok.bpe_tokenizer.vocab_size
+        print(f"Loaded FAST tokenizer from {args.fast_tokenizer_path} "
+              f"(vocab_size={fast_vocab_size})")
 
     # --- Load dataframes ---
     print(f"Loading training data from {args.data_dir}...")
@@ -301,7 +331,9 @@ def main(args):
     num_verbs = len(dataset.verb_to_id)
     model = ActionToVerbTransformer(
         num_verbs=num_verbs, max_action_len=args.max_seq_len,
-        modality=args.modality, action_rep=args.action_rep).to(device)
+        modality=args.modality, action_rep=args.action_rep,
+        fast_vocab_size=fast_vocab_size,
+        cross_layers=args.cross_layers).to(device)
 
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.AdamW(model.parameters(), lr=args.lr)
@@ -313,11 +345,18 @@ def main(args):
 
     # --- Training loop ---
     print("Starting training...")
+    id_to_verb = dataset.id_to_verb
+    training_log = []  # per-epoch metrics saved to JSON
+
     for epoch in range(args.epochs):
         model.train()
         total_loss = 0
         correct = 0
         total = 0
+        # Per-class accumulators for train
+        class_correct = defaultdict(int)
+        class_total = defaultdict(int)
+        class_loss_sum = defaultdict(float)
 
         for batch_idx, (first, last, actions, labels, seq_lengths) in enumerate(dataloader):
             first, last = first.to(device), last.to(device)
@@ -338,20 +377,36 @@ def main(args):
             correct += (preds == labels).sum().item()
             total += labels.size(0)
 
+            # Per-class stats (using per-sample loss)
+            with torch.no_grad():
+                per_sample_loss = nn.functional.cross_entropy(
+                    logits, labels, reduction='none')
+                for lbl, pred, sl in zip(labels.cpu().tolist(),
+                                         preds.cpu().tolist(),
+                                         per_sample_loss.cpu().tolist()):
+                    class_total[lbl] += 1
+                    class_correct[lbl] += int(pred == lbl)
+                    class_loss_sum[lbl] += sl
+
             if batch_idx % 10 == 0:
                 print(f"Epoch {epoch+1} | Batch {batch_idx} | "
                       f"Loss: {loss.item():.4f} | Acc: {100*correct/total:.2f}%")
 
         avg_loss = total_loss / len(dataloader)
+        train_acc = 100 * correct / total
         current_lr = scheduler.get_last_lr()[0]
         print(f"--- Epoch {epoch+1}: Train Loss: {avg_loss:.4f} | "
-              f"Train Acc: {100*correct/total:.2f}% | LR: {current_lr:.2e} ---")
+              f"Train Acc: {train_acc:.2f}% | LR: {current_lr:.2e} ---")
 
         # --- Validation ---
         model.eval()
         val_loss = 0
         val_correct = 0
         val_total = 0
+        val_class_correct = defaultdict(int)
+        val_class_total = defaultdict(int)
+        val_class_loss_sum = defaultdict(float)
+
         with torch.no_grad():
             for first, last, actions, labels, seq_lengths in val_dataloader:
                 first, last = first.to(device), last.to(device)
@@ -360,15 +415,70 @@ def main(args):
 
                 logits = model(first, last, actions, seq_lengths=seq_lengths)
                 loss = criterion(logits, labels)
+                per_sample_loss = nn.functional.cross_entropy(
+                    logits, labels, reduction='none')
 
                 val_loss += loss.item()
                 preds = torch.argmax(logits, dim=1)
                 val_correct += (preds == labels).sum().item()
                 val_total += labels.size(0)
 
+                for lbl, pred, sl in zip(labels.cpu().tolist(),
+                                         preds.cpu().tolist(),
+                                         per_sample_loss.cpu().tolist()):
+                    val_class_total[lbl] += 1
+                    val_class_correct[lbl] += int(pred == lbl)
+                    val_class_loss_sum[lbl] += sl
+
         val_avg = val_loss / len(val_dataloader)
         val_acc = 100 * val_correct / val_total if val_total > 0 else 0
         print(f"    Val Loss: {val_avg:.4f} | Val Acc: {val_acc:.2f}%")
+
+        # Build per-class metrics dict
+        per_class_train = {}
+        for cid in sorted(set(list(class_total.keys()) + list(val_class_total.keys()))):
+            verb = id_to_verb.get(cid, str(cid))
+            t = class_total.get(cid, 0)
+            per_class_train[verb] = {
+                "loss": class_loss_sum.get(cid, 0) / t if t > 0 else 0,
+                "acc": 100 * class_correct.get(cid, 0) / t if t > 0 else 0,
+                "count": t,
+            }
+        per_class_val = {}
+        for cid in sorted(set(list(class_total.keys()) + list(val_class_total.keys()))):
+            verb = id_to_verb.get(cid, str(cid))
+            vt = val_class_total.get(cid, 0)
+            per_class_val[verb] = {
+                "loss": val_class_loss_sum.get(cid, 0) / vt if vt > 0 else 0,
+                "acc": 100 * val_class_correct.get(cid, 0) / vt if vt > 0 else 0,
+                "count": vt,
+            }
+
+        epoch_metrics = {
+            "epoch": epoch + 1,
+            "lr": current_lr,
+            "train_loss": avg_loss,
+            "train_acc": train_acc,
+            "val_loss": val_avg,
+            "val_acc": val_acc,
+            "per_class_train": per_class_train,
+            "per_class_val": per_class_val,
+        }
+        training_log.append(epoch_metrics)
+
+        # Write log after each epoch so partial results are available
+        if args.log_path:
+            log_dir = os.path.dirname(args.log_path)
+            if log_dir:
+                os.makedirs(log_dir, exist_ok=True)
+            with open(args.log_path, "w") as f:
+                json.dump({"config": {"modality": args.modality,
+                                      "action_rep": args.action_rep,
+                                      "cross_layers": args.cross_layers,
+                                      "lr": args.lr, "batch_size": args.batch_size,
+                                      "max_seq_len": args.max_seq_len},
+                           "epochs": training_log}, f, indent=2)
+            print(f"    Training log saved to {args.log_path}")
 
     # --- Save checkpoint ---
     if args.save_path:
@@ -390,6 +500,8 @@ def main(args):
             'max_action_len': args.max_seq_len,
             'modality': args.modality,
             'action_rep': args.action_rep,
+            'fast_vocab_size': fast_vocab_size,
+            'cross_layers': args.cross_layers,
         }
         torch.save(checkpoint, args.save_path)
         print(f"\nCheckpoint saved to {args.save_path}")
@@ -410,6 +522,8 @@ if __name__ == "__main__":
                         help="Number of warmup epochs for LR scheduler")
     parser.add_argument("--save_path", type=str, default=None,
                         help="Path to save checkpoint (e.g., model.pth)")
+    parser.add_argument("--log_path", type=str, default=None,
+                        help="Path to save training log JSON (e.g., training_log.json)")
     parser.add_argument("--debug", type=int, default=0, metavar="N",
                         help="Debug mode: use only N samples for quick smoke testing")
     parser.add_argument("--modality", type=str, default="full",
@@ -420,6 +534,9 @@ if __name__ == "__main__":
                         help="Action representation: native continuous or FAST tokens")
     parser.add_argument("--fast_tokenizer_path", type=str, default=FAST_TOKENIZER_PATH,
                         help="Path to fitted FAST tokenizer")
+    parser.add_argument("--cross_layers", type=int, default=CROSS_LAYERS,
+                        help="Number of final layers with cross-modal attention "
+                             "(default=NUM_LAYERS for early fusion)")
 
     args = parser.parse_args()
     main(args)
