@@ -19,6 +19,7 @@ from config import (
     IMAGE_SIZE, IMG_MEAN, IMG_STD,
     BATCH_SIZE, EPOCHS, LEARNING_RATE, MAX_SEQ_LEN, NUM_WORKERS,
     WARMUP_EPOCHS, GRAD_CLIP_NORM, FAST_VOCAB_SIZE, FAST_TOKENIZER_PATH,
+    IMAGE_ENCODER,
 )
 
 
@@ -526,6 +527,9 @@ if __name__ == "__main__":
     parser.add_argument("--cross_layers", type=int, default=CROSS_LAYERS,
                         help="Number of final layers with cross-modal attention "
                              "(default=NUM_LAYERS for early fusion)")
+    parser.add_argument("--image_encoder", type=str, default=IMAGE_ENCODER,
+                        choices=["scratch", "resnet18", "dinov2", "r3m"],
+                        help="Image encoder backbone (default: scratch)")
 
     args = parser.parse_args()
     main(args)

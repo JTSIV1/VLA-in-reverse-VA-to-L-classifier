@@ -13,6 +13,7 @@ from config import (
     VAL_DIR, D_MODEL, NHEAD, NUM_LAYERS, CROSS_LAYERS, ACTION_DIM, PATCH_SIZE,
     IMAGE_SIZE, IMG_MEAN, IMG_STD,
     BATCH_SIZE, MAX_SEQ_LEN, NUM_WORKERS, FAST_TOKENIZER_PATH, FAST_VOCAB_SIZE,
+    IMAGE_ENCODER,
 )
 
 
@@ -239,6 +240,9 @@ if __name__ == "__main__":
     parser.add_argument("--fast_tokenizer_path", type=str, default=FAST_TOKENIZER_PATH,
                         help="Path to fitted FAST tokenizer")
     parser.add_argument("--cross_layers", type=int, default=CROSS_LAYERS,
+                        help="Fallback if not in checkpoint")
+    parser.add_argument("--image_encoder", type=str, default=IMAGE_ENCODER,
+                        choices=["scratch", "resnet18", "dinov2", "r3m"],
                         help="Fallback if not in checkpoint")
 
     args = parser.parse_args()
