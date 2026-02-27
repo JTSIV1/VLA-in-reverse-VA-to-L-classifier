@@ -20,6 +20,7 @@ from sklearn.metrics import adjusted_rand_score, normalized_mutual_info_score
 from collections import Counter
 from multiprocessing import Pool
 from functools import partial
+from tqdm import tqdm
 
 from config import TRAIN_DIR, ACTION_KEY, EPISODE_TEMPLATE, ACTION_DIM
 from utils import load_calvin_to_dataframe
@@ -31,8 +32,7 @@ def _load_action(idx, data_dir, action_key, template):
     return np.load(path)[action_key].astype(np.float32)
 
 
-def build_features(df, max_len, num_workers):
-    """Load action trajectories in parallel and build fixed-length feature matrix."""
+def load_all_actions(df, num_workers=8):
     # Collect all unique frame indices we actually need
     needed_indices = set()
     for s, e in zip(df['start_idx'].values, df['end_idx'].values):
@@ -41,17 +41,29 @@ def build_features(df, max_len, num_workers):
     print(f"Need to load {len(needed_indices)} unique frames using {num_workers} workers ...")
 
     t0 = time.time()
-    load_fn = partial(_load_action,
-                      data_dir=TRAIN_DIR,
-                      action_key=ACTION_KEY,
-                      template=EPISODE_TEMPLATE)
+    load_fn = partial(
+        _load_action,
+        data_dir=TRAIN_DIR,
+        action_key=ACTION_KEY,
+        template=EPISODE_TEMPLATE,
+    )
 
     with Pool(num_workers) as pool:
-        actions_list = pool.map(load_fn, needed_indices, chunksize=1024)
+        # imap_unordered yields results as they finish -> tqdm can update
+        it = pool.imap_unordered(load_fn, needed_indices, chunksize=1024)
+        actions_list = list(tqdm(it, total=len(needed_indices), desc="Loading actions"))
 
-    all_actions = np.array(actions_list)  # (num_unique_frames, 7)
+    all_actions = np.asarray(actions_list, dtype=np.float32)
     elapsed = time.time() - t0
+    print(f"Loaded {len(all_actions)} actions in {elapsed:.1f}s")
     print(f"Loaded {all_actions.shape} in {elapsed:.1f}s ({len(needed_indices)/elapsed:.0f} frames/s)")
+    return all_actions, needed_indices
+
+
+def build_features(df, max_len, num_workers=8):
+    """Load action trajectories in parallel and build fixed-length feature matrix."""
+    
+    all_actions, needed_indices = load_all_actions(df, num_workers=num_workers)
 
     # Build index mapping
     idx_to_pos = {idx: i for i, idx in enumerate(needed_indices)}

@@ -10,6 +10,7 @@ import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
 from PIL import Image
+from tqdm import tqdm
 
 from utils import load_calvin_to_dataframe
 from image_encoders import build_image_encoder
@@ -18,7 +19,7 @@ from config import (
     ACTION_DIM, D_MODEL, NHEAD, NUM_LAYERS, CROSS_LAYERS, DROPOUT_RATE, PATCH_SIZE,
     IMAGE_SIZE, IMG_MEAN, IMG_STD,
     BATCH_SIZE, EPOCHS, LEARNING_RATE, MAX_SEQ_LEN, NUM_WORKERS,
-    WARMUP_EPOCHS, GRAD_CLIP_NORM, ACTION_VOCAB_SIZE, FAST_TOKENIZER_PATH, IMAGE_ENCODER
+    WARMUP_EPOCHS, GRAD_CLIP_NORM, FAST_TOKENIZER_PATH, IMAGE_ENCODER
 )
 
 from config import (
@@ -32,12 +33,11 @@ from action_tokenizers import load_action_tokenizer
 
 
 class ActionToVerbTransformer(nn.Module):
-    def __init__(self, num_verbs, d_model=D_MODEL, nhead=NHEAD,
+    def __init__(self, num_verbs, action_vocab_size, d_model=D_MODEL, nhead=NHEAD,
                  num_layers=NUM_LAYERS, action_dim=ACTION_DIM,
                  dropout=DROPOUT_RATE, img_size=IMAGE_SIZE[0],
                  patch_size=PATCH_SIZE, max_action_len=MAX_SEQ_LEN,
                  modality="full", action_rep="native",
-                 action_vocab_size=ACTION_VOCAB_SIZE,
                  cross_layers=CROSS_LAYERS,
                  image_encoder="scratch",
                  ):
@@ -61,6 +61,7 @@ class ActionToVerbTransformer(nn.Module):
                 self.action_proj = nn.Linear(action_dim, d_model)
             else:
                 # Tokenized: discrete token IDs -> learned embeddings
+                assert action_vocab_size is not None, "Must provide action_vocab_size for tokenized action representation"
                 self.action_embed = nn.Embedding(action_vocab_size, d_model)
             # Temporal position for action sequence
             self.action_pos = nn.Parameter(torch.zeros(1, max_action_len, d_model))
@@ -98,6 +99,7 @@ class ActionToVerbTransformer(nn.Module):
         )
 
     def forward(self, first_frame, last_frame, trajectories, seq_lengths=None):
+        #print("Doing model forward")
         batch_size = trajectories.size(0)
 
         # CLS token + position + type
@@ -112,12 +114,15 @@ class ActionToVerbTransformer(nn.Module):
                            + self.patch_pos + self.type_img_end)
             parts.extend([start_patches, end_patches])
 
+        #print("Vision tokens prepared")
+
         # Action embeddings + temporal position + type
         if self.modality != "vision_only":
             action_len = trajectories.size(1)
             if self.action_rep == "native":
                 action_emb = self.action_proj(trajectories)
             else:
+                #print("Calling embedding forward with trajectories: ", trajectories)
                 action_emb = self.action_embed(trajectories)
             action_emb = action_emb + self.action_pos[:, :action_len, :] + self.type_action
             parts.append(action_emb)
@@ -275,7 +280,7 @@ def main(args):
 
     # --- Load FAST tokenizer if needed ---
     tok = None
-    action_vocab_size = ACTION_VOCAB_SIZE  # default
+    action_vocab_size = None  # native doesnt use vocab
     if args.action_rep in ("fast", "bin", "quest", "oat"):
         tok = load_action_tokenizer(
             args.action_rep,
@@ -362,12 +367,14 @@ def main(args):
         class_total = defaultdict(int)
         class_loss_sum = defaultdict(float)
 
-        for batch_idx, (first, last, actions, labels, seq_lengths) in enumerate(dataloader):
+        pbar = tqdm(enumerate(dataloader), total=len(dataloader), desc=f"Epoch {epoch+1}/{args.epochs}")
+        for batch_idx, (first, last, actions, labels, seq_lengths) in pbar:
             first, last = first.to(device), last.to(device)
             actions, labels = actions.to(device), labels.to(device)
             seq_lengths = seq_lengths.to(device)
 
             optimizer.zero_grad()
+            
             logits = model(first, last, actions, seq_lengths=seq_lengths)
             loss = criterion(logits, labels)
 
@@ -392,9 +399,10 @@ def main(args):
                     class_correct[lbl] += int(pred == lbl)
                     class_loss_sum[lbl] += sl
 
-            if batch_idx % 10 == 0:
-                print(f"Epoch {epoch+1} | Batch {batch_idx} | "
-                      f"Loss: {loss.item():.4f} | Acc: {100*correct/total:.2f}%")
+            pbar.set_postfix(loss=f"{loss.item():.4f}", acc=f"{100*correct/total:.2f}%")
+            # if batch_idx % 10 == 0:
+            #     print(f"Epoch {epoch+1} | Batch {batch_idx} | "
+            #           f"Loss: {loss.item():.4f} | Acc: {100*correct/total:.2f}%")
 
         avg_loss = total_loss / len(dataloader)
         train_acc = 100 * correct / total
@@ -412,7 +420,7 @@ def main(args):
         val_class_loss_sum = defaultdict(float)
 
         with torch.no_grad():
-            for first, last, actions, labels, seq_lengths in val_dataloader:
+            for first, last, actions, labels, seq_lengths in tqdm(val_dataloader, desc="  Validating"):
                 first, last = first.to(device), last.to(device)
                 actions, labels = actions.to(device), labels.to(device)
                 seq_lengths = seq_lengths.to(device)

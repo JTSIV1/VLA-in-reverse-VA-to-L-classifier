@@ -41,7 +41,7 @@ WARMUP_EPOCHS = 2
 GRAD_CLIP_NORM = 1.0
 
 # ─── Action tokenization ───────────────────────────────────────────────────────
-ACTION_VOCAB_SIZE = 1024
+BINNING_VOCAB_SIZE = 1024
 FAST_TOKENIZER_PATH = "./checkpoints/fast_tokenizer"
 
 CHECKPOINT_DIR = "./checkpoints"
