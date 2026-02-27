@@ -260,6 +260,100 @@ def tokenize_trajectory_vqvae(model, actions_np, batch_size=1024):
     return torch.cat(all_indices).numpy().astype(np.int64)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# VQ-VLA: published pretrained causal-VAE + ResidualVQ tokenizer
+#   Architecture: causal conv VAE encoder, ResidualVQ (4 quantizers, codebook=256)
+#   Output: 4 integer codes per trajectory (whole trajectory → 4 tokens)
+#   Pretrained on Open X-Embodiment + LIBERO + RH20T + ManiSkill + RLBench
+#   Paper: "Improving VLA Models via Scaling Vector-Quantized Action Tokenizers"
+#   Repo:  https://github.com/xiaoxiao0406/VQ-VLA
+#   Weights: HuggingFace VQ-VLA/vq-vla-weight (action_tokenizer_weight/all_data_vq.pth)
+#
+# The vendored module lives in vqvla/ (copied from prismatic/action_vqvae/).
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Number of tokens and vocab size are fixed by the VQ-VLA architecture:
+VQVLA_NUM_TOKENS = 4    # vqvae_groups = 4  (tokens per trajectory)
+VQVLA_VOCAB_SIZE = 256  # vqvae_n_embed = 256 (hardcoded in modeling_causal_vae.py)
+
+# Default paths
+VQVLA_CONFIG_DIR = os.path.join(os.path.dirname(__file__), "vqvla_config")
+VQVLA_CHECKPOINT_PATH = "./checkpoints/vqvla_pretrained/action_tokenizer_weight/all_data_vq.pth"
+
+
+def download_pretrained_vqvla(save_dir="./checkpoints/vqvla_pretrained"):
+    """Download VQ-VLA pretrained action tokenizer weights from HuggingFace.
+
+    Downloads action_tokenizer_weight/all_data_vq.pth (~1.4 GB) from
+    VQ-VLA/vq-vla-weight into save_dir, preserving the subdirectory structure.
+
+    Returns the path to the downloaded .pth file.
+    """
+    from huggingface_hub import hf_hub_download
+    os.makedirs(save_dir, exist_ok=True)
+    print(f"Downloading VQ-VLA pretrained weights to {save_dir} ...")
+    path = hf_hub_download(
+        repo_id="VQ-VLA/vq-vla-weight",
+        filename="action_tokenizer_weight/all_data_vq.pth",
+        local_dir=save_dir,
+    )
+    print(f"Downloaded to {path}")
+    return path
+
+
+def load_vqvla_tokenizer(config_dir=VQVLA_CONFIG_DIR, checkpoint_path=VQVLA_CHECKPOINT_PATH):
+    """Load VQ-VLA ActionVQVAELossWrapper on CPU in eval/frozen mode.
+
+    Args:
+        config_dir:       Directory containing config.json (default: ./vqvla_config/)
+        checkpoint_path:  Path to all_data_vq.pth pretrained weights.
+                          Pass None to get an untrained model (for smoke-testing).
+    Returns:
+        ActionVQVAELossWrapper in eval mode, parameters frozen, on CPU.
+    """
+    # Ensure the vendored vqvla package is importable from this project
+    import sys
+    _pkg_dir = os.path.dirname(__file__)
+    if _pkg_dir not in sys.path:
+        sys.path.insert(0, _pkg_dir)
+
+    from vqvla import ActionVQVAELossWrapper
+
+    ckpt = checkpoint_path if (checkpoint_path and os.path.isfile(checkpoint_path)) else None
+    if checkpoint_path and not ckpt:
+        print(f"[WARNING] VQ-VLA checkpoint not found at {checkpoint_path}. "
+              f"Run download_pretrained_vqvla() first.")
+
+    wrapper = ActionVQVAELossWrapper(
+        model_path=config_dir,
+        checkpoint_path=ckpt,
+        is_eval=True,
+        freeze=True,
+    )
+    wrapper.eval()
+    # Move to CPU explicitly (preprocess() uses self.device which follows parameters)
+    wrapper = wrapper.cpu()
+    print(f"Loaded VQ-VLA tokenizer from {config_dir} "
+          f"(checkpoint={'pretrained' if ckpt else 'random'}, "
+          f"tokens={VQVLA_NUM_TOKENS}, vocab={VQVLA_VOCAB_SIZE})")
+    return wrapper
+
+
+def tokenize_trajectory_vqvla(wrapper, actions_np):
+    """Tokenize a single trajectory with the VQ-VLA tokenizer.
+
+    Args:
+        wrapper:     ActionVQVAELossWrapper (from load_vqvla_tokenizer, CPU, eval)
+        actions_np:  (T, action_dim) numpy float32 array
+    Returns:
+        np.ndarray of shape (VQVLA_NUM_TOKENS,) = (4,) with int64 code indices,
+        each in {0 .. VQVLA_VOCAB_SIZE-1} = {0..255}.
+    """
+    actions_t = torch.from_numpy(actions_np.astype(np.float32)).unsqueeze(0)  # (1, T, 7)
+    vq_codes = wrapper.get_code(actions_t)   # (1, 4)
+    return vq_codes[0].cpu().numpy().astype(np.int64)                          # (4,)
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Fit a VQ-VAE chunk tokenizer on CALVIN training trajectories")

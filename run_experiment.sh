@@ -35,6 +35,7 @@ NUM_LAYERS_FLAG=""
 SEQ_LEN_OVERRIDE=""
 VQVAE_TOK_FLAG=""
 VQVAE_CHUNK_FLAG=""
+VQVLA_TOK_FLAG=""
 MODAL_DROPOUT_FLAG=""
 AUX_LOSS_FLAG=""
 while [[ $# -gt 0 ]]; do
@@ -91,6 +92,10 @@ while [[ $# -gt 0 ]]; do
             VQVAE_CHUNK_FLAG="--vqvae_chunk_size $2"
             shift 2
             ;;
+        --vqvla_checkpoint_path)
+            VQVLA_TOK_FLAG="--vqvla_checkpoint_path $2"
+            shift 2
+            ;;
         --modal_dropout)
             MODAL_DROPOUT_FLAG="--modal_dropout $2"
             shift 2
@@ -135,14 +140,14 @@ python train_transformer.py \
     --modality "$MODALITY" --action_rep "$ACTION_REP" \
     --save_path "./checkpoints/${TAG}.pth" \
     --log_path "./results/${TAG}_log.json" \
-    $COMMON $FAST_TOK_FLAG $VQVAE_TOK_FLAG $VQVAE_CHUNK_FLAG $CROSS_FLAG $VISION_FLAG $FREEZE_FLAG $FRAMES_FLAG $WEIGHT_FLAG $MIN_CLASS_FLAG $DELTA_FLAG $D_MODEL_FLAG $NUM_LAYERS_FLAG $MODAL_DROPOUT_FLAG $AUX_LOSS_FLAG $DEBUG_FLAG
+    $COMMON $FAST_TOK_FLAG $VQVAE_TOK_FLAG $VQVAE_CHUNK_FLAG $VQVLA_TOK_FLAG $CROSS_FLAG $VISION_FLAG $FREEZE_FLAG $FRAMES_FLAG $WEIGHT_FLAG $MIN_CLASS_FLAG $DELTA_FLAG $D_MODEL_FLAG $NUM_LAYERS_FLAG $MODAL_DROPOUT_FLAG $AUX_LOSS_FLAG $DEBUG_FLAG
 
 # --- Test (final epoch) ---
 python test_transformer.py \
     --model_path "./checkpoints/${TAG}.pth" \
     --save_cm "./figures/${TAG}_cm.png" \
     --save_metrics "./results/${TAG}_metrics.json" \
-    $FAST_TOK_FLAG $VQVAE_TOK_FLAG $VQVAE_CHUNK_FLAG $DEBUG_FLAG
+    $FAST_TOK_FLAG $VQVAE_TOK_FLAG $VQVAE_CHUNK_FLAG $VQVLA_TOK_FLAG $DEBUG_FLAG
 
 # --- Test (best val checkpoint, if exists) ---
 if [[ -f "./checkpoints/${TAG}_best.pth" ]]; then
@@ -151,7 +156,7 @@ if [[ -f "./checkpoints/${TAG}_best.pth" ]]; then
         --model_path "./checkpoints/${TAG}_best.pth" \
         --save_cm "./figures/${TAG}_best_cm.png" \
         --save_metrics "./results/${TAG}_best_metrics.json" \
-        $FAST_TOK_FLAG $VQVAE_TOK_FLAG $VQVAE_CHUNK_FLAG $DEBUG_FLAG
+        $FAST_TOK_FLAG $VQVAE_TOK_FLAG $VQVAE_CHUNK_FLAG $VQVLA_TOK_FLAG $DEBUG_FLAG
 fi
 
 echo ">>> ${NAME} done — checkpoint: checkpoints/${TAG}.pth | results: results/${TAG}_metrics.json"

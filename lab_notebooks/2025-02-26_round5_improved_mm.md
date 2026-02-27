@@ -85,8 +85,8 @@ All: VC-1, native actions, cross_layers=2 (late2), 21 sparse classes, weighted C
 
 | Job ID | Experiment | Status |
 |--------|-----------|--------|
-| TBD | full_vc1_d256_k16_late2 | submitted |
-| TBD | full_vc1_k49_late2 | submitted |
-| TBD | full_vc1_mdrop_late2 | submitted |
-| TBD | full_vc1_aux_late2 | submitted |
-| TBD | full_vc1_d256_k49_mdrop_aux_late2 | submitted |
+| 6461237 | full_vc1_d256_k16_late2 | running |
+| 6461238 | full_vc1_k49_late2 | running |
+| 6461239 | full_vc1_mdrop_late2 | running |
+| 6461240 | full_vc1_aux_late2 | running |
+| 6461241 | full_vc1_d256_k49_mdrop_aux_late2 | running |

@@ -421,7 +421,8 @@ class CalvinVerbDataset(Dataset):
                  modality="full", fast_tokenizer=None,
                  vision_encoder="patch", img_size=IMAGE_SIZE[0],
                  num_frames=2, delta_patches=0,
-                 vqvae_tokenizer=None, vqvae_chunk_size=4):
+                 vqvae_tokenizer=None, vqvae_chunk_size=4,
+                 vqvla_tokenizer=None):
         """CALVIN dataset loader with modality ablation support.
         Args:
             modality: "full", "action_only", or "vision_only"
@@ -432,6 +433,7 @@ class CalvinVerbDataset(Dataset):
             delta_patches: if >0, use top-K changed patches between frame pairs
             vqvae_tokenizer: if provided, tokenize actions into VQ-VAE chunk codes
             vqvae_chunk_size: number of timesteps per VQ-VAE chunk
+            vqvla_tokenizer: if provided, tokenize using VQ-VLA pretrained model (4 tokens/traj)
         """
         self.df = df
         self.data_dir = data_dir
@@ -441,6 +443,7 @@ class CalvinVerbDataset(Dataset):
         self.fast_tokenizer = fast_tokenizer
         self.vqvae_tokenizer = vqvae_tokenizer
         self.vqvae_chunk_size = vqvae_chunk_size
+        self.vqvla_tokenizer = vqvla_tokenizer
         self.img_size = img_size
         self.num_frames = num_frames
         self.delta_patches = delta_patches
@@ -526,6 +529,18 @@ class CalvinVerbDataset(Dataset):
                     token_ids = token_ids[:self.max_seq_len]
                 actions_tensor = torch.tensor(token_ids, dtype=torch.long)
                 action_real_len = min(L_tok, self.max_seq_len)
+            elif self.vqvla_tokenizer is not None:
+                # VQ-VLA tokenization: (T, 7) -> (4,) int64 codes (whole traj → 4 tokens)
+                from vqvae_tokenizer import tokenize_trajectory_vqvla
+                token_ids = tokenize_trajectory_vqvla(
+                    self.vqvla_tokenizer, actions).tolist()
+                L_tok = len(token_ids)  # always 4
+                if L_tok < self.max_seq_len:
+                    token_ids = token_ids + [0] * (self.max_seq_len - L_tok)
+                else:
+                    token_ids = token_ids[:self.max_seq_len]
+                actions_tensor = torch.tensor(token_ids, dtype=torch.long)
+                action_real_len = min(L_tok, self.max_seq_len)
             else:
                 # Native continuous actions
                 if L < self.max_seq_len:
@@ -575,9 +590,10 @@ def main(args):
         transforms.Normalize(mean=IMG_MEAN, std=IMG_STD)
     ])
 
-    # --- Load FAST tokenizer if needed ---
+    # --- Load tokenizer if needed ---
     fast_tok = None
     vqvae_tok = None
+    vqvla_tok = None
     fast_vocab_size = FAST_VOCAB_SIZE
     if args.action_rep == "fast":
         from fast_tokenizer import load_fast_tokenizer
@@ -591,6 +607,12 @@ def main(args):
         fast_vocab_size = vqvae_tok.num_codes
         print(f"Loaded VQ-VAE tokenizer from {args.vqvae_tokenizer_path} "
               f"(num_codes={fast_vocab_size}, chunk_size={vqvae_tok.chunk_size})")
+    elif args.action_rep == "vqvla":
+        from vqvae_tokenizer import load_vqvla_tokenizer, VQVLA_VOCAB_SIZE
+        vqvla_tok = load_vqvla_tokenizer(
+            config_dir=args.vqvla_config_dir,
+            checkpoint_path=args.vqvla_checkpoint_path)
+        fast_vocab_size = VQVLA_VOCAB_SIZE  # 256
 
     # --- Load dataframes ---
     print(f"Loading training data from {args.data_dir}...")
@@ -633,7 +655,8 @@ def main(args):
                                 num_frames=args.num_frames,
                                 delta_patches=delta_patches,
                                 vqvae_tokenizer=vqvae_tok,
-                                vqvae_chunk_size=vqvae_chunk_size)
+                                vqvae_chunk_size=vqvae_chunk_size,
+                                vqvla_tokenizer=vqvla_tok)
     dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True,
                             num_workers=args.num_workers)
 
@@ -646,7 +669,8 @@ def main(args):
                                     num_frames=args.num_frames,
                                     delta_patches=delta_patches,
                                     vqvae_tokenizer=vqvae_tok,
-                                    vqvae_chunk_size=vqvae_chunk_size)
+                                    vqvae_chunk_size=vqvae_chunk_size,
+                                    vqvla_tokenizer=vqvla_tok)
     val_dataset.verb_to_id = dataset.verb_to_id
     val_dataset.id_to_verb = dataset.id_to_verb
     valid_mask = val_df['primary_verb'].isin(dataset.verb_to_id.keys())
@@ -934,14 +958,19 @@ if __name__ == "__main__":
                         choices=["full", "action_only", "vision_only"],
                         help="Which input modalities to use")
     parser.add_argument("--action_rep", type=str, default="native",
-                        choices=["native", "fast", "vq_vae"],
-                        help="Action representation: native continuous, FAST tokens, or VQ-VAE chunk codes")
+                        choices=["native", "fast", "vq_vae", "vqvla"],
+                        help="Action representation: native, FAST, VQ-VAE chunks, or VQ-VLA pretrained")
     parser.add_argument("--fast_tokenizer_path", type=str, default=FAST_TOKENIZER_PATH,
                         help="Path to fitted FAST tokenizer")
     parser.add_argument("--vqvae_tokenizer_path", type=str, default=VQVAE_TOKENIZER_PATH,
                         help="Path to fitted VQ-VAE tokenizer")
     parser.add_argument("--vqvae_chunk_size", type=int, default=4,
                         help="Chunk size K used when fitting the VQ-VAE tokenizer")
+    parser.add_argument("--vqvla_config_dir", type=str, default="./vqvla_config",
+                        help="Directory containing VQ-VLA config.json")
+    parser.add_argument("--vqvla_checkpoint_path", type=str,
+                        default="./checkpoints/vqvla_pretrained/action_tokenizer_weight/all_data_vq.pth",
+                        help="Path to VQ-VLA pretrained weights (all_data_vq.pth)")
     parser.add_argument("--cross_layers", type=int, default=CROSS_LAYERS,
                         help="Number of final layers with cross-modal attention "
                              "(default=NUM_LAYERS for early fusion)")

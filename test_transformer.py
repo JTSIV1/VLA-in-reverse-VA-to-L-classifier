@@ -102,9 +102,10 @@ def main(args):
         transforms.Normalize(mean=IMG_MEAN, std=IMG_STD)
     ])
 
-    # --- Load FAST / VQ-VAE tokenizer if needed ---
+    # --- Load tokenizer if needed ---
     fast_tok = None
     vqvae_tok = None
+    vqvla_tok = None
     if action_rep == "fast":
         from fast_tokenizer import load_fast_tokenizer
         fast_tok = load_fast_tokenizer(args.fast_tokenizer_path)
@@ -114,6 +115,11 @@ def main(args):
         vqvae_tok = load_vqvae_tokenizer(args.vqvae_tokenizer_path)
         print(f"Loaded VQ-VAE tokenizer from {args.vqvae_tokenizer_path} "
               f"(num_codes={vqvae_tok.num_codes}, chunk_size={vqvae_tok.chunk_size})")
+    elif action_rep == "vqvla":
+        from vqvae_tokenizer import load_vqvla_tokenizer
+        vqvla_tok = load_vqvla_tokenizer(
+            config_dir=args.vqvla_config_dir,
+            checkpoint_path=args.vqvla_checkpoint_path)
 
     # --- Load test dataset ---
     print(f"Loading test dataset from {args.data_dir}...")
@@ -134,7 +140,8 @@ def main(args):
                                 num_frames=num_frames,
                                 delta_patches=delta_patches,
                                 vqvae_tokenizer=vqvae_tok,
-                                vqvae_chunk_size=vqvae_chunk_size)
+                                vqvae_chunk_size=vqvae_chunk_size,
+                                vqvla_tokenizer=vqvla_tok)
 
     # Override vocab from checkpoint if available
     if verb_to_id is not None:
@@ -279,7 +286,7 @@ if __name__ == "__main__":
                         choices=["full", "action_only", "vision_only"],
                         help="Fallback if not in checkpoint")
     parser.add_argument("--action_rep", type=str, default="native",
-                        choices=["native", "fast", "vq_vae"],
+                        choices=["native", "fast", "vq_vae", "vqvla"],
                         help="Fallback if not in checkpoint")
     parser.add_argument("--fast_tokenizer_path", type=str, default=FAST_TOKENIZER_PATH,
                         help="Path to fitted FAST tokenizer")
@@ -287,6 +294,11 @@ if __name__ == "__main__":
                         help="Path to fitted VQ-VAE tokenizer")
     parser.add_argument("--vqvae_chunk_size", type=int, default=4,
                         help="Fallback chunk size if not in checkpoint")
+    parser.add_argument("--vqvla_config_dir", type=str, default="./vqvla_config",
+                        help="Directory containing VQ-VLA config.json")
+    parser.add_argument("--vqvla_checkpoint_path", type=str,
+                        default="./checkpoints/vqvla_pretrained/action_tokenizer_weight/all_data_vq.pth",
+                        help="Path to VQ-VLA pretrained weights (all_data_vq.pth)")
     parser.add_argument("--cross_layers", type=int, default=CROSS_LAYERS,
                         help="Fallback if not in checkpoint")
     parser.add_argument("--vision_encoder", type=str, default="patch",
