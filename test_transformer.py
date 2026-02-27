@@ -11,8 +11,9 @@ from train_transformer import ActionToVerbTransformer, CalvinVerbDataset
 from utils import load_calvin_to_dataframe
 from config import (
     VAL_DIR, D_MODEL, NHEAD, NUM_LAYERS, CROSS_LAYERS, ACTION_DIM, PATCH_SIZE,
-    IMAGE_SIZE, IMG_MEAN, IMG_STD,
+    IMAGE_SIZE, IMG_MEAN, IMG_STD, R3M_IMG_SIZE,
     BATCH_SIZE, MAX_SEQ_LEN, NUM_WORKERS, FAST_TOKENIZER_PATH, FAST_VOCAB_SIZE,
+    VQVAE_TOKENIZER_PATH,
 )
 
 
@@ -44,9 +45,18 @@ def main(args):
         action_rep = raw.get('action_rep', args.action_rep)
         fast_vocab_size = raw.get('fast_vocab_size', FAST_VOCAB_SIZE)
         cross_layers = raw.get('cross_layers', num_layers)
+        vision_encoder = raw.get('vision_encoder', 'patch')
+        freeze_vision = raw.get('freeze_vision', True)
+        num_frames = raw.get('num_frames', 2)
+        delta_patches = raw.get('delta_patches', 0)
+        vqvae_chunk_size = raw.get('vqvae_chunk_size', args.vqvae_chunk_size)
+        modal_dropout = raw.get('modal_dropout', 0.0)
+        aux_loss_weight = raw.get('aux_loss_weight', 0.0)
         print(f"Loaded checkpoint: {num_verbs} verbs, d_model={d_model}, "
               f"modality={modality}, action_rep={action_rep}, "
-              f"cross_layers={cross_layers}")
+              f"vision_encoder={vision_encoder}, num_frames={num_frames}, "
+              f"delta_patches={delta_patches}, cross_layers={cross_layers}, "
+              f"modal_dropout={modal_dropout}, aux_loss_weight={aux_loss_weight}")
     else:
         # Legacy bare state_dict
         state_dict = raw
@@ -70,22 +80,40 @@ def main(args):
         action_rep = args.action_rep
         fast_vocab_size = FAST_VOCAB_SIZE
         cross_layers = args.cross_layers
+        vision_encoder = args.vision_encoder
+        freeze_vision = True
+        num_frames = args.num_frames
+        delta_patches = 0
+        vqvae_chunk_size = args.vqvae_chunk_size
+        modal_dropout = 0.0
+        aux_loss_weight = 0.0
         print(f"Loaded legacy state_dict: {num_verbs} verbs (from '{last_bias_key}')")
 
-    print(f"Modality: {modality} | Action rep: {action_rep}")
+    print(f"Modality: {modality} | Action rep: {action_rep} | Vision: {vision_encoder}")
 
+    # Image size depends on vision encoder
+    if vision_encoder in ("r3m", "dinov2_s", "dinov2_b", "vc1"):
+        effective_img_size = 224
+    else:
+        effective_img_size = img_size
     transform = transforms.Compose([
-        transforms.Resize(IMAGE_SIZE),
+        transforms.Resize((effective_img_size, effective_img_size)),
         transforms.ToTensor(),
         transforms.Normalize(mean=IMG_MEAN, std=IMG_STD)
     ])
 
-    # --- Load FAST tokenizer if needed ---
+    # --- Load FAST / VQ-VAE tokenizer if needed ---
     fast_tok = None
+    vqvae_tok = None
     if action_rep == "fast":
         from fast_tokenizer import load_fast_tokenizer
         fast_tok = load_fast_tokenizer(args.fast_tokenizer_path)
         print(f"Loaded FAST tokenizer from {args.fast_tokenizer_path}")
+    elif action_rep == "vq_vae":
+        from vqvae_tokenizer import load_vqvae_tokenizer
+        vqvae_tok = load_vqvae_tokenizer(args.vqvae_tokenizer_path)
+        print(f"Loaded VQ-VAE tokenizer from {args.vqvae_tokenizer_path} "
+              f"(num_codes={vqvae_tok.num_codes}, chunk_size={vqvae_tok.chunk_size})")
 
     # --- Load test dataset ---
     print(f"Loading test dataset from {args.data_dir}...")
@@ -100,7 +128,13 @@ def main(args):
     dataset = CalvinVerbDataset(df, args.data_dir, transform=transform,
                                 max_seq_len=max_action_len,
                                 modality=modality,
-                                fast_tokenizer=fast_tok)
+                                fast_tokenizer=fast_tok,
+                                vision_encoder=vision_encoder,
+                                img_size=effective_img_size,
+                                num_frames=num_frames,
+                                delta_patches=delta_patches,
+                                vqvae_tokenizer=vqvae_tok,
+                                vqvae_chunk_size=vqvae_chunk_size)
 
     # Override vocab from checkpoint if available
     if verb_to_id is not None:
@@ -118,14 +152,32 @@ def main(args):
     model = ActionToVerbTransformer(
         num_verbs=num_verbs, d_model=d_model, nhead=nhead,
         num_layers=num_layers, action_dim=action_dim,
-        img_size=img_size, patch_size=patch_size,
+        img_size=effective_img_size, patch_size=patch_size,
         max_action_len=max_action_len,
         modality=modality, action_rep=action_rep,
         fast_vocab_size=fast_vocab_size,
-        cross_layers=cross_layers)
+        cross_layers=cross_layers,
+        vision_encoder=vision_encoder,
+        freeze_vision=freeze_vision,
+        num_frames=num_frames,
+        delta_patches=delta_patches,
+        modal_dropout=modal_dropout,
+        aux_loss_weight=aux_loss_weight)
     # Backward compat: handle old nn.TransformerEncoder key prefix
     state_dict = {k.replace("transformer.layers.", "layers."): v
                   for k, v in state_dict.items()}
+    # Backward compat: old checkpoints used type_img_start/type_img_end instead of frame_pos/type_img
+    if "type_img_start" in state_dict and "frame_pos" not in state_dict:
+        d = state_dict["type_img_start"].shape[-1]
+        # Use type_img_start as the shared type_img
+        state_dict["type_img"] = state_dict.pop("type_img_start")
+        type_end = state_dict.pop("type_img_end")
+        # Construct frame_pos: frame 0 gets zeros, frame 1 gets (end - start) difference
+        import torch as _torch
+        frame_pos = _torch.zeros(1, num_frames, 1, d)
+        if num_frames >= 2:
+            frame_pos[0, 1, 0, :] = type_end.squeeze() - state_dict["type_img"].squeeze()
+        state_dict["frame_pos"] = frame_pos
     model.load_state_dict(state_dict)
     model.to(device)
     model.eval()
@@ -137,12 +189,12 @@ def main(args):
     all_labels = []
 
     with torch.no_grad():
-        for batch_idx, (first, last, actions, labels, seq_lengths) in enumerate(dataloader):
-            first, last = first.to(device), last.to(device)
+        for batch_idx, (frames, actions, labels, seq_lengths) in enumerate(dataloader):
+            frames = frames.to(device)
             actions, labels = actions.to(device), labels.to(device)
             seq_lengths = seq_lengths.to(device)
 
-            logits = model(first, last, actions, seq_lengths=seq_lengths)
+            logits = model(frames, actions, seq_lengths=seq_lengths)
             preds = torch.argmax(logits, dim=1)
 
             all_preds.extend(preds.cpu().tolist())
@@ -227,11 +279,20 @@ if __name__ == "__main__":
                         choices=["full", "action_only", "vision_only"],
                         help="Fallback if not in checkpoint")
     parser.add_argument("--action_rep", type=str, default="native",
-                        choices=["native", "fast"],
+                        choices=["native", "fast", "vq_vae"],
                         help="Fallback if not in checkpoint")
     parser.add_argument("--fast_tokenizer_path", type=str, default=FAST_TOKENIZER_PATH,
                         help="Path to fitted FAST tokenizer")
+    parser.add_argument("--vqvae_tokenizer_path", type=str, default=VQVAE_TOKENIZER_PATH,
+                        help="Path to fitted VQ-VAE tokenizer")
+    parser.add_argument("--vqvae_chunk_size", type=int, default=4,
+                        help="Fallback chunk size if not in checkpoint")
     parser.add_argument("--cross_layers", type=int, default=CROSS_LAYERS,
+                        help="Fallback if not in checkpoint")
+    parser.add_argument("--vision_encoder", type=str, default="patch",
+                        choices=["patch", "r3m", "dinov2_s", "dinov2_b", "vc1"],
+                        help="Fallback if not in checkpoint")
+    parser.add_argument("--num_frames", type=int, default=2,
                         help="Fallback if not in checkpoint")
 
     args = parser.parse_args()

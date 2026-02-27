@@ -39,9 +39,17 @@ NUM_WORKERS = 4
 WARMUP_EPOCHS = 2
 GRAD_CLIP_NORM = 1.0
 
+# ─── Pretrained vision encoder ───────────────────────────────────────────
+R3M_IMG_SIZE = 224
+R3M_VARIANT = "resnet50"  # resnet18 (512-d), resnet34 (512-d), resnet50 (2048-d)
+
 # ─── FAST tokenization ───────────────────────────────────────────────────────
 FAST_VOCAB_SIZE = 1024
 FAST_TOKENIZER_PATH = "./checkpoints/fast_tokenizer"
+
+# ─── VQ-VAE action tokenization ──────────────────────────────────────────────
+VQVAE_TOKENIZER_PATH = "./checkpoints/vqvae_tokenizer"
+VQVAE_VOCAB_SIZE = 512
 
 # ─── NLP ──────────────────────────────────────────────────────────────────────
 SPACY_MODEL = "en_core_web_sm"

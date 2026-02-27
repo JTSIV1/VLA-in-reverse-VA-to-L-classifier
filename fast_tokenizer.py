@@ -157,14 +157,14 @@ def collect_trajectories(df, data_dir):
     return trajectories
 
 
-def fit_fast_tokenizer(df, data_dir, save_path, vocab_size=1024):
+def fit_fast_tokenizer(df, data_dir, save_path, vocab_size=1024, scale=10):
     """Collect CALVIN training trajectories, fit FAST tokenizer, save."""
     trajectories = collect_trajectories(df, data_dir)
 
     print(f"Fitting FAST tokenizer on {len(trajectories)} trajectories "
           f"(max_T={max(a.shape[0] for a in trajectories)}, "
-          f"action_dim={trajectories[0].shape[1]}, vocab_size={vocab_size})...")
-    tokenizer = FASTTokenizer.fit(trajectories, vocab_size=vocab_size)
+          f"action_dim={trajectories[0].shape[1]}, vocab_size={vocab_size}, scale={scale})...")
+    tokenizer = FASTTokenizer.fit(trajectories, vocab_size=vocab_size, scale=scale)
 
     tokenizer.save_pretrained(save_path)
     print(f"FAST tokenizer saved to {save_path}")
@@ -174,6 +174,38 @@ def fit_fast_tokenizer(df, data_dir, save_path, vocab_size=1024):
 def load_fast_tokenizer(path=FAST_TOKENIZER_PATH):
     """Load a previously fitted FAST tokenizer."""
     return FASTTokenizer.from_pretrained(path)
+
+
+def download_pretrained_fast(save_path="./checkpoints/fast_pretrained"):
+    """Download the pretrained FAST+ tokenizer from HuggingFace and save in our format."""
+    import shutil
+    from huggingface_hub import hf_hub_download
+
+    os.makedirs(save_path, exist_ok=True)
+    repo_id = "physical-intelligence/fast"
+
+    for fname in ["tokenizer.json", "tokenizer_config.json",
+                  "special_tokens_map.json", "processor_config.json"]:
+        src = hf_hub_download(repo_id, fname)
+        shutil.copy2(src, os.path.join(save_path, fname))
+
+    # Read processor_config to extract FAST-specific params
+    with open(os.path.join(save_path, "processor_config.json")) as f:
+        proc_config = json.load(f)
+
+    # Save in our format (fast_config.json)
+    meta = {
+        "scale": proc_config.get("scale", 10),
+        "vocab_size": proc_config.get("vocab_size", 2048),
+        "min_token": proc_config.get("min_token", 0),
+    }
+    with open(os.path.join(save_path, "fast_config.json"), "w") as f:
+        json.dump(meta, f)
+
+    print(f"Pretrained FAST+ saved to {save_path} "
+          f"(scale={meta['scale']}, vocab={meta['vocab_size']}, "
+          f"min_token={meta['min_token']})")
+    return save_path
 
 
 def tokenize_trajectory(tokenizer, actions_np):
@@ -193,6 +225,8 @@ if __name__ == "__main__":
     parser.add_argument("--save_path", type=str, default=FAST_TOKENIZER_PATH)
     parser.add_argument("--vocab_size", type=int, default=1024,
                         help="BPE vocabulary size for FAST tokenizer")
+    parser.add_argument("--scale", type=float, default=10,
+                        help="DCT quantization scale (higher = finer quantization, larger alphabet)")
     parser.add_argument("--debug", type=int, default=0, metavar="N",
                         help="Use only N samples for quick testing")
     args = parser.parse_args()
@@ -202,4 +236,5 @@ if __name__ == "__main__":
         df = df.head(min(args.debug, len(df))).copy()
         print(f"[DEBUG] Using {len(df)} samples")
 
-    fit_fast_tokenizer(df, args.data_dir, args.save_path, vocab_size=args.vocab_size)
+    fit_fast_tokenizer(df, args.data_dir, args.save_path,
+                       vocab_size=args.vocab_size, scale=args.scale)
