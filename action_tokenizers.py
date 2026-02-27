@@ -4,6 +4,7 @@ import torch
 
 from config import ACTION_KEY, EPISODE_TEMPLATE
 from action_tokenizers_training import train_tokenizer, fit_calvin_normalizer
+from cluster_analysis import build_features
 
 from config import (
     MAX_SEQ_LEN,
@@ -14,6 +15,7 @@ from config import (
     TOKENIZER_DOWNSAMPLE_FACTOR,
     OAT_NUM_REGISTERS,
     ACTION_DIM,
+    BINNING_VOCAB_SIZE
 )
 
 # oat tokenizers
@@ -104,24 +106,25 @@ def load_action_tokenizer(
 
     # normalizer for everything except raw HF FAST (FASTTok expects normalized [-1,1], and wraps a normalizer too)
     normalizer = fit_calvin_normalizer(train_dir, max_trajs=fit_norm_max_trajs)
-
+  
     if name == "fast":
         tok = FASTTok("physical-intelligence/fast")  # pretrained from HF
         tok.set_normalizer(normalizer)
         return TokenizerAdapter(tok, "fast", horizon=horizon, max_tokens=max_tokens)
 
     if name == "bin":
-        tok = BinTok(num_bins=256, min_val=-1.0, max_val=1.0)
+        tok = BinTok(num_bins=BINNING_VOCAB_SIZE, min_val=-1.0, max_val=1.0)
         tok.set_normalizer(normalizer)
         return TokenizerAdapter(tok, "bin", horizon=horizon, max_tokens=max_tokens)
 
     if name == "quest":
+        # vocab size is product of fsq levels.
         # need weights; if not present you’ll train (next section)
         tok = QueSTTok(action_dim=ACTION_DIM, horizon=horizon, vq_type="fsq", fsq_level=[8, 5, 5, 5], downsample_factor=TOKENIZER_DOWNSAMPLE_FACTOR)
         tok.set_normalizer(normalizer)
         if not os.path.exists(quest_ckpt):
             print(f"No checkpoint found for QueST tokenizer at {quest_ckpt}, starting training")
-            train_tokenizer(name, train_dir, quest_ckpt)
+            train_tokenizer(name, train_dir, quest_ckpt, normalizer=normalizer)
             assert os.path.exists(quest_ckpt), "Tokenizer training did not produce checkpoint!"
 
         sd = torch.load(quest_ckpt, map_location="cpu", weights_only=False)
@@ -131,6 +134,7 @@ def load_action_tokenizer(
         return TokenizerAdapter(tok, "quest", horizon=horizon, max_tokens=max_tokens)
 
     if name == "oat":
+        # vocab size is product of latent_levels
         # need weights; if not present you’ll train
         latent_levels = [8, 5, 5, 5]
         latent_dim = len(latent_levels)
@@ -153,7 +157,7 @@ def load_action_tokenizer(
 
         if not os.path.exists(oat_ckpt):
             print(f"No checkpoint found for OAT tokenizer at {oat_ckpt}, starting training")
-            train_tokenizer(name, train_dir, oat_ckpt)
+            train_tokenizer(name, train_dir, oat_ckpt, normalizer=normalizer)
             assert os.path.exists(oat_ckpt), "Tokenizer training did not produce checkpoint!"
 
         sd = torch.load(oat_ckpt, map_location="cpu", weights_only=False)

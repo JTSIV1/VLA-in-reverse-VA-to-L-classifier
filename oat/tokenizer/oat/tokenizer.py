@@ -39,6 +39,9 @@ class OATTok(BaseTokenizer):
         self.normalizer = LinearNormalizer()
         self.latent_horizon = self.decoder.latent_horizon
 
+        self.vocab_size = self.quantizer.codebook_size
+
+
     def get_optimizer(
         self, 
         learning_rate: float,
