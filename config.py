@@ -24,6 +24,7 @@ NUM_LAYERS = 4
 CROSS_LAYERS = NUM_LAYERS  # how many final layers use cross-modal attention (= NUM_LAYERS means early fusion)
 DROPOUT_RATE = 0.1
 PATCH_SIZE = 25        # 200/25 = 8x8 = 64 patches per image, balances with ~64-step actions
+IMAGE_ENCODER = "scratch"  # "scratch" | "resnet18" | "dinov2" | "r3m"
 
 # ─── Image preprocessing ─────────────────────────────────────────────────────
 IMAGE_SIZE = (200, 200) # native CALVIN resolution, no unnecessary upscale
@@ -43,13 +44,9 @@ GRAD_CLIP_NORM = 1.0
 R3M_IMG_SIZE = 224
 R3M_VARIANT = "resnet50"  # resnet18 (512-d), resnet34 (512-d), resnet50 (2048-d)
 
-# ─── FAST tokenization ───────────────────────────────────────────────────────
-FAST_VOCAB_SIZE = 1024
+# ─── Action tokenization ───────────────────────────────────────────────────────
+BINNING_VOCAB_SIZE = 1024
 FAST_TOKENIZER_PATH = "./checkpoints/fast_tokenizer"
-
-# ─── VQ-VAE action tokenization ──────────────────────────────────────────────
-VQVAE_TOKENIZER_PATH = "./checkpoints/vqvae_tokenizer"
-VQVAE_VOCAB_SIZE = 512
 
 # ─── NLP ──────────────────────────────────────────────────────────────────────
 SPACY_MODEL = "en_core_web_sm"

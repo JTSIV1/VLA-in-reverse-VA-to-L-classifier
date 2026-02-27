@@ -7,3 +7,17 @@ torchvision
 scikit-learn
 spacy
 ipykernel
+timm
+tqdm
+scipy
+transformers<5
+tokenizers==0.20.3
+vector-quantize-pytorch
+einops
+dill
+hydra-core
+zarr
+numcodecs
+pip
+protobuf
+sentencepiece

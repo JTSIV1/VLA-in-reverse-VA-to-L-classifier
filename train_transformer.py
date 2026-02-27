@@ -10,32 +10,26 @@ import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
 from PIL import Image
+from tqdm import tqdm
 
 from utils import load_calvin_to_dataframe
+from image_encoders import build_image_encoder
 from config import (
     DATA_DIR, VAL_DIR, IMAGE_KEY, ACTION_KEY, EPISODE_TEMPLATE,
     ACTION_DIM, D_MODEL, NHEAD, NUM_LAYERS, CROSS_LAYERS, DROPOUT_RATE, PATCH_SIZE,
     IMAGE_SIZE, IMG_MEAN, IMG_STD, R3M_IMG_SIZE, R3M_VARIANT,
     BATCH_SIZE, EPOCHS, LEARNING_RATE, MAX_SEQ_LEN, NUM_WORKERS,
-    WARMUP_EPOCHS, GRAD_CLIP_NORM, FAST_VOCAB_SIZE, FAST_TOKENIZER_PATH,
-    VQVAE_TOKENIZER_PATH, VQVAE_VOCAB_SIZE,
+    WARMUP_EPOCHS, GRAD_CLIP_NORM, FAST_TOKENIZER_PATH, IMAGE_ENCODER
 )
 
+from config import (
+    QUEST_TOKENIZER_CKPT,
+    OAT_TOKENIZER_CKPT,
+    TOKENIZER_HORIZON,
+    TOKENIZER_FIT_NORM_MAX_TRAJS,
+)
+from action_tokenizers import load_action_tokenizer
 
-class PatchEmbed(nn.Module):
-    """ViT-style patch embedding: split image into non-overlapping patches and
-    linearly project each to d_model via Conv2d (equivalent to flatten + linear,
-    but fused into a single GPU op)."""
-
-    def __init__(self, img_size=200, patch_size=25, in_channels=3, embed_dim=128):
-        super().__init__()
-        self.num_patches = (img_size // patch_size) ** 2
-        self.proj = nn.Conv2d(in_channels, embed_dim,
-                              kernel_size=patch_size, stride=patch_size)
-
-    def forward(self, x):
-        # x: (B, 3, H, W) -> (B, num_patches, embed_dim)
-        return self.proj(x).flatten(2).transpose(1, 2)
 
 
 class R3MEncoder(nn.Module):
@@ -162,14 +156,13 @@ class ViTEncoder(nn.Module):
 
 
 class ActionToVerbTransformer(nn.Module):
-    def __init__(self, num_verbs, d_model=D_MODEL, nhead=NHEAD,
+    def __init__(self, num_verbs, action_vocab_size, d_model=D_MODEL, nhead=NHEAD,
                  num_layers=NUM_LAYERS, action_dim=ACTION_DIM,
                  dropout=DROPOUT_RATE, img_size=IMAGE_SIZE[0],
                  patch_size=PATCH_SIZE, max_action_len=MAX_SEQ_LEN,
                  modality="full", action_rep="native",
-                 fast_vocab_size=FAST_VOCAB_SIZE,
                  cross_layers=CROSS_LAYERS,
-                 vision_encoder="patch", freeze_vision=True,
+                 image_encoder="scratch", freeze_vision=True,
                  num_frames=2, delta_patches=0,
                  modal_dropout=0.0, aux_loss_weight=0.0):
         super().__init__()
@@ -177,7 +170,7 @@ class ActionToVerbTransformer(nn.Module):
         self.action_rep = action_rep
         self.num_layers = num_layers
         self.cross_layers = cross_layers
-        self.vision_encoder_type = vision_encoder
+        self.image_encoder_type = image_encoder
         self.num_frames = num_frames
         self.delta_patches = delta_patches  # 0 = use all patches; >0 = top-K changed
         self.modal_dropout = modal_dropout
@@ -185,24 +178,14 @@ class ActionToVerbTransformer(nn.Module):
 
         # -- Vision branch (skip for action_only) --
         if modality != "action_only":
-            if vision_encoder == "r3m":
-                self.vision_enc = R3MEncoder(d_model, freeze=freeze_vision)
-                self.num_patches = self.vision_enc.num_patches  # 1 per image
-            elif vision_encoder in ("dinov2_s", "dinov2_b", "vc1"):
-                self.vision_enc = ViTEncoder(d_model, variant=vision_encoder)
-                if delta_patches > 0:
-                    # Delta mode: top-K changed patches per frame pair
-                    self.num_patches = delta_patches
-                else:
-                    self.num_patches = self.vision_enc.num_patches  # 49 (7x7 pooled)
+            self.patch_embed = build_image_encoder(image_encoder, d_model, img_size, patch_size)
+            full_num_patches = self.patch_embed.num_tokens
+            if delta_patches > 0:
+                self.num_patches = delta_patches
             else:
-                self.patch_embed = PatchEmbed(img_size, patch_size, 3, d_model)
-                self.num_patches = (img_size // patch_size) ** 2
+                self.num_patches = full_num_patches
             # Spatial position: need full grid size for delta gather
-            full_num_patches = (self.vision_enc.num_patches
-                                if hasattr(self, 'vision_enc') else self.num_patches)
-            self.patch_pos = nn.Parameter(
-                torch.zeros(1, full_num_patches, d_model))
+            self.patch_pos = nn.Parameter(torch.zeros(1, full_num_patches, d_model))
             # Temporal position per frame (or per frame-pair for delta mode)
             n_temporal = max(num_frames - 1, 1) if delta_patches > 0 else num_frames
             self.frame_pos = nn.Parameter(torch.zeros(1, n_temporal, 1, d_model))
@@ -216,8 +199,9 @@ class ActionToVerbTransformer(nn.Module):
             if action_rep == "native":
                 self.action_proj = nn.Linear(action_dim, d_model)
             else:
-                # FAST: discrete token IDs -> learned embeddings
-                self.action_embed = nn.Embedding(fast_vocab_size, d_model)
+                # Tokenized: discrete token IDs -> learned embeddings
+                assert action_vocab_size is not None, "Must provide action_vocab_size for tokenized action representation"
+                self.action_embed = nn.Embedding(action_vocab_size, d_model)
             # Temporal position for action sequence
             self.action_pos = nn.Parameter(torch.zeros(1, max_action_len, d_model))
             self.type_action = nn.Parameter(torch.zeros(1, 1, d_model))
@@ -293,7 +277,7 @@ class ActionToVerbTransformer(nn.Module):
                 # Delta mode: extract patches for all frames, then compute diffs
                 all_patches = []
                 for fi in range(nf):
-                    all_patches.append(self.vision_enc(frames[:, fi]))  # (B, P, d)
+                    all_patches.append(self.patch_embed(frames[:, fi]))  # (B, P, d)
                 K = self.delta_patches
                 d = all_patches[0].size(-1)
                 for pi in range(nf - 1):
@@ -311,13 +295,12 @@ class ActionToVerbTransformer(nn.Module):
             else:
                 for fi in range(nf):
                     frame_i = frames[:, fi]  # (B, C, H, W)
-                    if self.vision_encoder_type in ("r3m", "dinov2_s", "dinov2_b", "vc1"):
-                        patches = self.vision_enc(frame_i)
-                    else:
-                        patches = self.patch_embed(frame_i)
+                    patches = self.patch_embed(frame_i)
                     # spatial pos + temporal pos for this frame + vision type
                     patches = patches + self.patch_pos + self.frame_pos[:, fi] + self.type_img
                     parts.append(patches)
+
+        #print("Vision tokens prepared")
 
         # Action embeddings + temporal position + type
         if self.modality != "vision_only":
@@ -325,6 +308,7 @@ class ActionToVerbTransformer(nn.Module):
             if self.action_rep == "native":
                 action_emb = self.action_proj(trajectories)
             else:
+                #print("Calling embedding forward with trajectories: ", trajectories)
                 action_emb = self.action_embed(trajectories)
             action_emb = action_emb + self.action_pos[:, :action_len, :] + self.type_action
             parts.append(action_emb)
@@ -418,41 +402,47 @@ class ActionToVerbTransformer(nn.Module):
 
 class CalvinVerbDataset(Dataset):
     def __init__(self, df, data_dir, transform=None, max_seq_len=MAX_SEQ_LEN,
-                 modality="full", fast_tokenizer=None,
-                 vision_encoder="patch", img_size=IMAGE_SIZE[0],
+                 modality="full", action_tokenizer=None,
+                 image_encoder="scratch", img_size=IMAGE_SIZE[0],
                  num_frames=2, delta_patches=0,
-                 vqvae_tokenizer=None, vqvae_chunk_size=4,
-                 vqvla_tokenizer=None):
+                 vqvae_chunk_size=4, vqvla_tokenizer=None, num_patches=64):
         """CALVIN dataset loader with modality ablation support.
         Args:
             modality: "full", "action_only", or "vision_only"
-            fast_tokenizer: if provided, tokenize actions into FAST token IDs
-            vision_encoder: "patch" or "r3m"
-            img_size: image size for the vision encoder
-            num_frames: number of frames to sample (2 = first+last, >2 = uniformly spaced)
+            action_tokenizer: unified tokenizer (FAST/BIN/QueST/OAT/VQ-VAE)
+            image_encoder: name used to set default num_patches
+            img_size: image size for dummy tensors in action_only mode
+            num_frames: number of frames to sample (2=first+last, >2=uniformly spaced)
             delta_patches: if >0, use top-K changed patches between frame pairs
-            vqvae_tokenizer: if provided, tokenize actions into VQ-VAE chunk codes
-            vqvae_chunk_size: number of timesteps per VQ-VAE chunk
-            vqvla_tokenizer: if provided, tokenize using VQ-VLA pretrained model (4 tokens/traj)
+            vqvae_chunk_size: kept for legacy checkpoint compat
+            vqvla_tokenizer: optional VQ-VLA tokenizer (separate from action_tokenizer)
+            num_patches: overrides computed num_patches after model is built
         """
         self.df = df
         self.data_dir = data_dir
         self.transform = transform
         self.max_seq_len = max_seq_len
         self.modality = modality
-        self.fast_tokenizer = fast_tokenizer
-        self.vqvae_tokenizer = vqvae_tokenizer
-        self.vqvae_chunk_size = vqvae_chunk_size
+        self.action_tokenizer = action_tokenizer
         self.vqvla_tokenizer = vqvla_tokenizer
+        self.vqvae_chunk_size = vqvae_chunk_size
         self.img_size = img_size
         self.num_frames = num_frames
         self.delta_patches = delta_patches
-        if vision_encoder == "r3m":
-            self.num_patches = 1  # R3M: global feature per image
-        elif vision_encoder in ("dinov2_s", "dinov2_b", "vc1"):
+        # Set default num_patches based on encoder; caller can override via num_patches param
+        if image_encoder in ("r3m",):
+            self.num_patches = 49   # R3M repeats global feat to 49 tokens (image_encoders.py)
+        elif image_encoder in ("dinov2_s", "dinov2_b", "vc1"):
             self.num_patches = 49 if delta_patches == 0 else delta_patches  # 7x7 pooled
-        else:
+        elif image_encoder == "dinov2":
+            self.num_patches = 64   # DINOv2Encoder pools to 64
+        elif image_encoder == "resnet18":
+            self.num_patches = 49   # ResNet18 7x7 grid
+        else:  # scratch / patch
             self.num_patches = (IMAGE_SIZE[0] // PATCH_SIZE) ** 2
+        # Allow explicit override (e.g., after model.num_patches is known)
+        if num_patches != 64:  # non-default means caller wants to override
+            self.num_patches = num_patches
 
         unique_verbs = sorted(list(set(df['primary_verb'].unique())))
         self.verb_to_id = {v: i for i, v in enumerate(unique_verbs)}
@@ -503,30 +493,18 @@ class CalvinVerbDataset(Dataset):
             actions = np.array(all_actions)  # (T, 7)
             L = actions.shape[0]
 
-            if self.fast_tokenizer is not None:
-                # FAST tokenization: (T, 7) -> list[int] token IDs
-                token_ids = self.fast_tokenizer(actions[np.newaxis])
-                if isinstance(token_ids, list) and len(token_ids) > 0:
-                    if isinstance(token_ids[0], list):
-                        token_ids = token_ids[0]
+            if self.action_tokenizer is not None:
+                token_ids = self.action_tokenizer(actions[np.newaxis])  # List[List[int]]
+                if isinstance(token_ids, list) and len(token_ids) > 0 and isinstance(token_ids[0], list):
+                    token_ids = token_ids[0]
                 token_ids = list(token_ids)
+
                 L_tok = len(token_ids)
                 if L_tok < self.max_seq_len:
                     token_ids = token_ids + [0] * (self.max_seq_len - L_tok)
                 else:
                     token_ids = token_ids[:self.max_seq_len]
-                actions_tensor = torch.tensor(token_ids, dtype=torch.long)
-                action_real_len = min(L_tok, self.max_seq_len)
-            elif self.vqvae_tokenizer is not None:
-                # VQ-VAE tokenization: (T, 7) -> (T//K,) int64 code indices
-                from vqvae_tokenizer import tokenize_trajectory_vqvae
-                token_ids = tokenize_trajectory_vqvae(
-                    self.vqvae_tokenizer, actions).tolist()
-                L_tok = len(token_ids)
-                if L_tok < self.max_seq_len:
-                    token_ids = token_ids + [0] * (self.max_seq_len - L_tok)
-                else:
-                    token_ids = token_ids[:self.max_seq_len]
+
                 actions_tensor = torch.tensor(token_ids, dtype=torch.long)
                 action_real_len = min(L_tok, self.max_seq_len)
             elif self.vqvla_tokenizer is not None:
@@ -576,11 +554,11 @@ def main(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Training on device: {device}")
     print(f"Modality: {args.modality} | Action rep: {args.action_rep} | "
-          f"Vision encoder: {args.vision_encoder} | "
+          f"Image encoder: {args.image_encoder} | "
           f"Cross layers: {args.cross_layers}/{NUM_LAYERS}")
 
-    # Image size depends on vision encoder
-    if args.vision_encoder in ("r3m", "dinov2_s", "dinov2_b", "vc1"):
+    # Pretrained encoders expect 224×224; scratch/resnet18 can use native 200×200
+    if args.image_encoder in ("r3m", "dinov2_s", "dinov2_b", "vc1", "dinov2"):
         img_size = 224
     else:
         img_size = IMAGE_SIZE[0]
@@ -590,29 +568,39 @@ def main(args):
         transforms.Normalize(mean=IMG_MEAN, std=IMG_STD)
     ])
 
-    # --- Load tokenizer if needed ---
-    fast_tok = None
-    vqvae_tok = None
+    # --- Load action tokenizer if needed ---
+    tok = None
     vqvla_tok = None
-    fast_vocab_size = FAST_VOCAB_SIZE
-    if args.action_rep == "fast":
-        from fast_tokenizer import load_fast_tokenizer
-        fast_tok = load_fast_tokenizer(args.fast_tokenizer_path)
-        fast_vocab_size = fast_tok.bpe_tokenizer.vocab_size
-        print(f"Loaded FAST tokenizer from {args.fast_tokenizer_path} "
-              f"(vocab_size={fast_vocab_size})")
+    action_vocab_size = None  # native doesn't use a vocab
+    if args.action_rep in ("fast", "bin", "quest", "oat"):
+        tok = load_action_tokenizer(
+            args.action_rep,
+            train_dir=args.data_dir,
+            horizon=TOKENIZER_HORIZON,
+            max_tokens=args.max_seq_len,
+            quest_ckpt=args.quest_ckpt,
+            oat_ckpt=args.oat_ckpt,
+            fit_norm_max_trajs=TOKENIZER_FIT_NORM_MAX_TRAJS,
+        )
+        action_vocab_size = tok.vocab_size
+        print(f"Loaded {args.action_rep} tokenizer (vocab_size={action_vocab_size})")
     elif args.action_rep == "vq_vae":
         from vqvae_tokenizer import load_vqvae_tokenizer
-        vqvae_tok = load_vqvae_tokenizer(args.vqvae_tokenizer_path)
-        fast_vocab_size = vqvae_tok.num_codes
+        _vq = load_vqvae_tokenizer(args.vqvae_tokenizer_path)
+        # Wrap as an action_tokenizer-compatible callable
+        from functools import partial
+        from vqvae_tokenizer import tokenize_trajectory_vqvae
+        tok = partial(tokenize_trajectory_vqvae, _vq)
+        tok.vocab_size = _vq.num_codes
+        action_vocab_size = _vq.num_codes
         print(f"Loaded VQ-VAE tokenizer from {args.vqvae_tokenizer_path} "
-              f"(num_codes={fast_vocab_size}, chunk_size={vqvae_tok.chunk_size})")
+              f"(num_codes={action_vocab_size}, chunk_size={_vq.chunk_size})")
     elif args.action_rep == "vqvla":
         from vqvae_tokenizer import load_vqvla_tokenizer, VQVLA_VOCAB_SIZE
         vqvla_tok = load_vqvla_tokenizer(
             config_dir=args.vqvla_config_dir,
             checkpoint_path=args.vqvla_checkpoint_path)
-        fast_vocab_size = VQVLA_VOCAB_SIZE  # 256
+        action_vocab_size = VQVLA_VOCAB_SIZE  # 256
 
     # --- Load dataframes ---
     print(f"Loading training data from {args.data_dir}...")
@@ -649,12 +637,11 @@ def main(args):
     dataset = CalvinVerbDataset(df, args.data_dir, transform=transform,
                                 max_seq_len=args.max_seq_len,
                                 modality=args.modality,
-                                fast_tokenizer=fast_tok,
-                                vision_encoder=args.vision_encoder,
+                                action_tokenizer=tok,
+                                image_encoder=args.image_encoder,
                                 img_size=img_size,
                                 num_frames=args.num_frames,
                                 delta_patches=delta_patches,
-                                vqvae_tokenizer=vqvae_tok,
                                 vqvae_chunk_size=vqvae_chunk_size,
                                 vqvla_tokenizer=vqvla_tok)
     dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True,
@@ -663,12 +650,11 @@ def main(args):
     val_dataset = CalvinVerbDataset(val_df, args.val_dir, transform=transform,
                                     max_seq_len=args.max_seq_len,
                                     modality=args.modality,
-                                    fast_tokenizer=fast_tok,
-                                    vision_encoder=args.vision_encoder,
+                                    action_tokenizer=tok,
+                                    image_encoder=args.image_encoder,
                                     img_size=img_size,
                                     num_frames=args.num_frames,
                                     delta_patches=delta_patches,
-                                    vqvae_tokenizer=vqvae_tok,
                                     vqvae_chunk_size=vqvae_chunk_size,
                                     vqvla_tokenizer=vqvla_tok)
     val_dataset.verb_to_id = dataset.verb_to_id
@@ -688,14 +674,19 @@ def main(args):
         max_action_len=args.max_seq_len,
         img_size=img_size,
         modality=args.modality, action_rep=args.action_rep,
-        fast_vocab_size=fast_vocab_size,
         cross_layers=args.cross_layers,
-        vision_encoder=args.vision_encoder,
+        image_encoder=args.image_encoder,
+        action_vocab_size=action_vocab_size,
         freeze_vision=args.freeze_vision,
         num_frames=args.num_frames,
         delta_patches=delta_patches,
         modal_dropout=args.modal_dropout,
         aux_loss_weight=args.aux_loss_weight).to(device)
+
+    # Sync num_patches after model is built (handles dynamic pool sizes)
+    if args.modality != "action_only":
+        dataset.num_patches = model.num_patches
+        val_dataset.num_patches = model.num_patches
 
     # Optionally weight classes inversely by frequency
     if args.weighted_loss:
@@ -733,7 +724,8 @@ def main(args):
         class_total = defaultdict(int)
         class_loss_sum = defaultdict(float)
 
-        for batch_idx, (frames, actions, labels, seq_lengths) in enumerate(dataloader):
+        pbar = tqdm(enumerate(dataloader), total=len(dataloader), desc=f"Epoch {epoch+1}/{args.epochs}")
+        for batch_idx, (frames, actions, labels, seq_lengths) in pbar:
             frames = frames.to(device)
             actions, labels = actions.to(device), labels.to(device)
             seq_lengths = seq_lengths.to(device)
@@ -770,9 +762,10 @@ def main(args):
                     class_correct[lbl] += int(pred == lbl)
                     class_loss_sum[lbl] += sl
 
-            if batch_idx % 10 == 0:
-                print(f"Epoch {epoch+1} | Batch {batch_idx} | "
-                      f"Loss: {loss.item():.4f} | Acc: {100*correct/total:.2f}%")
+            pbar.set_postfix(loss=f"{loss.item():.4f}", acc=f"{100*correct/total:.2f}%")
+            # if batch_idx % 10 == 0:
+            #     print(f"Epoch {epoch+1} | Batch {batch_idx} | "
+            #           f"Loss: {loss.item():.4f} | Acc: {100*correct/total:.2f}%")
 
         avg_loss = total_loss / len(dataloader)
         train_acc = 100 * correct / total
@@ -790,7 +783,7 @@ def main(args):
         val_class_loss_sum = defaultdict(float)
 
         with torch.no_grad():
-            for frames, actions, labels, seq_lengths in val_dataloader:
+            for frames, actions, labels, seq_lengths in tqdm(val_dataloader, desc="  Validating"):
                 frames = frames.to(device)
                 actions, labels = actions.to(device), labels.to(device)
                 seq_lengths = seq_lengths.to(device)
@@ -855,9 +848,9 @@ def main(args):
                 'max_action_len': args.max_seq_len,
                 'modality': args.modality,
                 'action_rep': args.action_rep,
-                'fast_vocab_size': fast_vocab_size,
+                'action_vocab_size': action_vocab_size,
                 'cross_layers': args.cross_layers,
-                'vision_encoder': args.vision_encoder,
+                'image_encoder': args.image_encoder,
                 'freeze_vision': args.freeze_vision,
                 'num_frames': args.num_frames,
                 'delta_patches': delta_patches,
@@ -920,9 +913,9 @@ def main(args):
             'max_action_len': args.max_seq_len,
             'modality': args.modality,
             'action_rep': args.action_rep,
-            'fast_vocab_size': fast_vocab_size,
+            'action_vocab_size': action_vocab_size,
             'cross_layers': args.cross_layers,
-            'vision_encoder': args.vision_encoder,
+            'image_encoder': args.image_encoder,
             'freeze_vision': args.freeze_vision,
             'num_frames': args.num_frames,
             'delta_patches': delta_patches,
@@ -958,11 +951,13 @@ if __name__ == "__main__":
                         choices=["full", "action_only", "vision_only"],
                         help="Which input modalities to use")
     parser.add_argument("--action_rep", type=str, default="native",
-                        choices=["native", "fast", "vq_vae", "vqvla"],
-                        help="Action representation: native, FAST, VQ-VAE chunks, or VQ-VLA pretrained")
+                        choices=["native", "fast", "quest", "oat", "bin", "vq_vae", "vqvla"],
+                        help="Action representation: native, FAST, QueST, OAT, BIN, VQ-VAE, or VQ-VLA")
+    parser.add_argument("--quest_ckpt", type=str, default=QUEST_TOKENIZER_CKPT)
+    parser.add_argument("--oat_ckpt", type=str, default=OAT_TOKENIZER_CKPT)
     parser.add_argument("--fast_tokenizer_path", type=str, default=FAST_TOKENIZER_PATH,
                         help="Path to fitted FAST tokenizer")
-    parser.add_argument("--vqvae_tokenizer_path", type=str, default=VQVAE_TOKENIZER_PATH,
+    parser.add_argument("--vqvae_tokenizer_path", type=str, default="./checkpoints/vqvae_tokenizer",
                         help="Path to fitted VQ-VAE tokenizer")
     parser.add_argument("--vqvae_chunk_size", type=int, default=4,
                         help="Chunk size K used when fitting the VQ-VAE tokenizer")
@@ -974,9 +969,10 @@ if __name__ == "__main__":
     parser.add_argument("--cross_layers", type=int, default=CROSS_LAYERS,
                         help="Number of final layers with cross-modal attention "
                              "(default=NUM_LAYERS for early fusion)")
-    parser.add_argument("--vision_encoder", type=str, default="patch",
-                        choices=["patch", "r3m", "dinov2_s", "dinov2_b", "vc1"],
-                        help="Vision encoder: patch, r3m, dinov2_s, dinov2_b, or vc1")
+    parser.add_argument("--image_encoder", type=str, default=IMAGE_ENCODER,
+                        choices=["scratch", "patch", "resnet18", "dinov2",
+                                 "dinov2_s", "dinov2_b", "vc1", "r3m"],
+                        help="Image encoder backbone (default: scratch)")
     parser.add_argument("--freeze_vision", action="store_true", default=True,
                         help="Freeze pretrained vision encoder weights (default: True)")
     parser.add_argument("--no_freeze_vision", dest="freeze_vision", action="store_false",

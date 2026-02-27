@@ -3,6 +3,7 @@ import spacy
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+from functools import lru_cache
 
 from config import (
     SPACY_MODEL, LANG_ANNOTATIONS_SUBDIR, LANG_ANNOTATIONS_FILE,
@@ -30,11 +31,13 @@ def extract_verb(text):
 
     return actions
 
+@lru_cache(maxsize=2)
 def load_calvin_to_dataframe(data_dir):
     """
     Reads the CALVIN auto_lang_ann.npy file and structures the
     episodes into a Pandas DataFrame for easier filtering/access.
     """
+    print("Loading CALVIN annotations from", data_dir)
     lang_path = os.path.join(data_dir, LANG_ANNOTATIONS_SUBDIR, LANG_ANNOTATIONS_FILE)
     if not os.path.exists(lang_path):
         raise FileNotFoundError(f"Annotations not found at {lang_path}")

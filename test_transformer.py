@@ -12,8 +12,8 @@ from utils import load_calvin_to_dataframe
 from config import (
     VAL_DIR, D_MODEL, NHEAD, NUM_LAYERS, CROSS_LAYERS, ACTION_DIM, PATCH_SIZE,
     IMAGE_SIZE, IMG_MEAN, IMG_STD, R3M_IMG_SIZE,
-    BATCH_SIZE, MAX_SEQ_LEN, NUM_WORKERS, FAST_TOKENIZER_PATH, FAST_VOCAB_SIZE,
-    VQVAE_TOKENIZER_PATH,
+    BATCH_SIZE, MAX_SEQ_LEN, NUM_WORKERS, FAST_TOKENIZER_PATH,
+    IMAGE_ENCODER,
 )
 
 
@@ -40,12 +40,17 @@ def main(args):
         patch_size = raw.get('patch_size', PATCH_SIZE)
         img_size = raw.get('img_size', IMAGE_SIZE[0])
         max_action_len = raw.get('max_action_len', args.max_seq_len)
-        # Read modality/action_rep from checkpoint, with CLI override
         modality = raw.get('modality', args.modality)
         action_rep = raw.get('action_rep', args.action_rep)
-        fast_vocab_size = raw.get('fast_vocab_size', FAST_VOCAB_SIZE)
+        # Support both old (fast_vocab_size) and new (action_vocab_size) checkpoint keys
+        action_vocab_size = raw.get('action_vocab_size', raw.get('fast_vocab_size', None))
         cross_layers = raw.get('cross_layers', num_layers)
-        vision_encoder = raw.get('vision_encoder', 'patch')
+        # Support both old (vision_encoder) and new (image_encoder) checkpoint keys
+        image_encoder = raw.get('image_encoder', None)
+        if image_encoder is None:
+            _venc_map = {'patch': 'scratch', 'r3m': 'r3m',
+                         'dinov2_s': 'dinov2_s', 'dinov2_b': 'dinov2_b', 'vc1': 'vc1'}
+            image_encoder = _venc_map.get(raw.get('vision_encoder', 'patch'), 'scratch')
         freeze_vision = raw.get('freeze_vision', True)
         num_frames = raw.get('num_frames', 2)
         delta_patches = raw.get('delta_patches', 0)
@@ -54,7 +59,7 @@ def main(args):
         aux_loss_weight = raw.get('aux_loss_weight', 0.0)
         print(f"Loaded checkpoint: {num_verbs} verbs, d_model={d_model}, "
               f"modality={modality}, action_rep={action_rep}, "
-              f"vision_encoder={vision_encoder}, num_frames={num_frames}, "
+              f"image_encoder={image_encoder}, num_frames={num_frames}, "
               f"delta_patches={delta_patches}, cross_layers={cross_layers}, "
               f"modal_dropout={modal_dropout}, aux_loss_weight={aux_loss_weight}")
     else:
@@ -78,9 +83,9 @@ def main(args):
         max_action_len = args.max_seq_len
         modality = args.modality
         action_rep = args.action_rep
-        fast_vocab_size = FAST_VOCAB_SIZE
+        action_vocab_size = None
         cross_layers = args.cross_layers
-        vision_encoder = args.vision_encoder
+        image_encoder = args.image_encoder
         freeze_vision = True
         num_frames = args.num_frames
         delta_patches = 0
@@ -89,10 +94,10 @@ def main(args):
         aux_loss_weight = 0.0
         print(f"Loaded legacy state_dict: {num_verbs} verbs (from '{last_bias_key}')")
 
-    print(f"Modality: {modality} | Action rep: {action_rep} | Vision: {vision_encoder}")
+    print(f"Modality: {modality} | Action rep: {action_rep} | Image encoder: {image_encoder}")
 
-    # Image size depends on vision encoder
-    if vision_encoder in ("r3m", "dinov2_s", "dinov2_b", "vc1"):
+    # Pretrained encoders need 224×224; scratch/resnet18 can use native resolution
+    if image_encoder in ("r3m", "dinov2_s", "dinov2_b", "vc1", "dinov2"):
         effective_img_size = 224
     else:
         effective_img_size = img_size
@@ -103,23 +108,38 @@ def main(args):
     ])
 
     # --- Load tokenizer if needed ---
-    fast_tok = None
-    vqvae_tok = None
+    action_tokenizer = None
     vqvla_tok = None
-    if action_rep == "fast":
+    if action_rep in ("fast", "bin", "quest", "oat"):
+        from action_tokenizers import load_action_tokenizer
+        from config import (QUEST_TOKENIZER_CKPT, OAT_TOKENIZER_CKPT,
+                            TOKENIZER_HORIZON, TOKENIZER_FIT_NORM_MAX_TRAJS)
+        action_tokenizer = load_action_tokenizer(
+            action_rep, train_dir=args.data_dir,
+            horizon=TOKENIZER_HORIZON, max_tokens=max_action_len,
+            quest_ckpt=args.quest_ckpt, oat_ckpt=args.oat_ckpt,
+            fit_norm_max_trajs=TOKENIZER_FIT_NORM_MAX_TRAJS)
+        action_vocab_size = action_tokenizer.vocab_size
+        print(f"Loaded {action_rep} tokenizer (vocab_size={action_vocab_size})")
+    elif action_rep == "fast":
         from fast_tokenizer import load_fast_tokenizer
-        fast_tok = load_fast_tokenizer(args.fast_tokenizer_path)
+        action_tokenizer = load_fast_tokenizer(args.fast_tokenizer_path)
         print(f"Loaded FAST tokenizer from {args.fast_tokenizer_path}")
     elif action_rep == "vq_vae":
-        from vqvae_tokenizer import load_vqvae_tokenizer
-        vqvae_tok = load_vqvae_tokenizer(args.vqvae_tokenizer_path)
+        from vqvae_tokenizer import load_vqvae_tokenizer, tokenize_trajectory_vqvae
+        from functools import partial
+        _vq = load_vqvae_tokenizer(args.vqvae_tokenizer_path)
+        action_tokenizer = partial(tokenize_trajectory_vqvae, _vq)
+        action_tokenizer.vocab_size = _vq.num_codes
+        action_vocab_size = _vq.num_codes
         print(f"Loaded VQ-VAE tokenizer from {args.vqvae_tokenizer_path} "
-              f"(num_codes={vqvae_tok.num_codes}, chunk_size={vqvae_tok.chunk_size})")
+              f"(num_codes={action_vocab_size}, chunk_size={_vq.chunk_size})")
     elif action_rep == "vqvla":
-        from vqvae_tokenizer import load_vqvla_tokenizer
+        from vqvae_tokenizer import load_vqvla_tokenizer, VQVLA_VOCAB_SIZE
         vqvla_tok = load_vqvla_tokenizer(
             config_dir=args.vqvla_config_dir,
             checkpoint_path=args.vqvla_checkpoint_path)
+        action_vocab_size = VQVLA_VOCAB_SIZE
 
     # --- Load test dataset ---
     print(f"Loading test dataset from {args.data_dir}...")
@@ -134,12 +154,11 @@ def main(args):
     dataset = CalvinVerbDataset(df, args.data_dir, transform=transform,
                                 max_seq_len=max_action_len,
                                 modality=modality,
-                                fast_tokenizer=fast_tok,
-                                vision_encoder=vision_encoder,
+                                action_tokenizer=action_tokenizer,
+                                image_encoder=image_encoder,
                                 img_size=effective_img_size,
                                 num_frames=num_frames,
                                 delta_patches=delta_patches,
-                                vqvae_tokenizer=vqvae_tok,
                                 vqvae_chunk_size=vqvae_chunk_size,
                                 vqvla_tokenizer=vqvla_tok)
 
@@ -162,24 +181,23 @@ def main(args):
         img_size=effective_img_size, patch_size=patch_size,
         max_action_len=max_action_len,
         modality=modality, action_rep=action_rep,
-        fast_vocab_size=fast_vocab_size,
+        action_vocab_size=action_vocab_size,
         cross_layers=cross_layers,
-        vision_encoder=vision_encoder,
+        image_encoder=image_encoder,
         freeze_vision=freeze_vision,
         num_frames=num_frames,
         delta_patches=delta_patches,
         modal_dropout=modal_dropout,
         aux_loss_weight=aux_loss_weight)
+
     # Backward compat: handle old nn.TransformerEncoder key prefix
     state_dict = {k.replace("transformer.layers.", "layers."): v
                   for k, v in state_dict.items()}
     # Backward compat: old checkpoints used type_img_start/type_img_end instead of frame_pos/type_img
     if "type_img_start" in state_dict and "frame_pos" not in state_dict:
         d = state_dict["type_img_start"].shape[-1]
-        # Use type_img_start as the shared type_img
         state_dict["type_img"] = state_dict.pop("type_img_start")
         type_end = state_dict.pop("type_img_end")
-        # Construct frame_pos: frame 0 gets zeros, frame 1 gets (end - start) difference
         import torch as _torch
         frame_pos = _torch.zeros(1, num_frames, 1, d)
         if num_frames >= 2:
@@ -188,6 +206,10 @@ def main(args):
     model.load_state_dict(state_dict)
     model.to(device)
     model.eval()
+
+    # Sync dataset num_patches with the loaded encoder
+    if modality != "action_only":
+        dataset.num_patches = model.num_patches
 
     # --- Evaluation ---
     print("\nStarting Evaluation...\n")
@@ -286,11 +308,16 @@ if __name__ == "__main__":
                         choices=["full", "action_only", "vision_only"],
                         help="Fallback if not in checkpoint")
     parser.add_argument("--action_rep", type=str, default="native",
-                        choices=["native", "fast", "vq_vae", "vqvla"],
+                        choices=["native", "fast", "quest", "oat", "bin", "vq_vae", "vqvla"],
                         help="Fallback if not in checkpoint")
     parser.add_argument("--fast_tokenizer_path", type=str, default=FAST_TOKENIZER_PATH,
                         help="Path to fitted FAST tokenizer")
-    parser.add_argument("--vqvae_tokenizer_path", type=str, default=VQVAE_TOKENIZER_PATH,
+    parser.add_argument("--quest_ckpt", type=str, default=None,
+                        help="Path to QueST tokenizer checkpoint")
+    parser.add_argument("--oat_ckpt", type=str, default=None,
+                        help="Path to OAT tokenizer checkpoint")
+    parser.add_argument("--vqvae_tokenizer_path", type=str,
+                        default="./checkpoints/vqvae_tokenizer",
                         help="Path to fitted VQ-VAE tokenizer")
     parser.add_argument("--vqvae_chunk_size", type=int, default=4,
                         help="Fallback chunk size if not in checkpoint")
@@ -301,11 +328,12 @@ if __name__ == "__main__":
                         help="Path to VQ-VLA pretrained weights (all_data_vq.pth)")
     parser.add_argument("--cross_layers", type=int, default=CROSS_LAYERS,
                         help="Fallback if not in checkpoint")
-    parser.add_argument("--vision_encoder", type=str, default="patch",
-                        choices=["patch", "r3m", "dinov2_s", "dinov2_b", "vc1"],
+    parser.add_argument("--image_encoder", type=str, default=IMAGE_ENCODER,
+                        choices=["scratch", "patch", "resnet18", "dinov2",
+                                 "dinov2_s", "dinov2_b", "vc1", "r3m"],
                         help="Fallback if not in checkpoint")
     parser.add_argument("--num_frames", type=int, default=2,
-                        help="Fallback if not in checkpoint")
+                        help="Fallback num_frames if not in checkpoint")
 
     args = parser.parse_args()
     main(args)
