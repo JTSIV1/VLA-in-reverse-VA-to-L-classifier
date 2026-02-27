@@ -18,13 +18,17 @@ except OSError:
     download(SPACY_MODEL)
     nlp = spacy.load(SPACY_MODEL)
 
+DIRECTION_WORDS = {"left", "right"}
+
 def extract_verb(text):
     """Extracts verbs and their particles (e.g. 'pick up') from text."""
     doc = nlp(text.lower())
     actions = []
-    
+
     for token in doc:
         if token.pos_ == "VERB" and (token.dep_ in ("ROOT", "conj", "xcomp", "advcl")):
+            if token.text in DIRECTION_WORDS:
+                continue
             parts = [t.text for t in token.children if t.dep_ == "prt"]
             full_verb = " ".join([token.text] + parts)
             actions.append(full_verb)
@@ -61,9 +65,22 @@ def load_calvin_to_dataframe(data_dir):
     initial_count = len(df)
     df = df[df['verbs'].apply(len) == 1].copy()
     print(f"Filtered out {initial_count - len(df)} examples that had 0 or >1 verbs.")
+
+    # Filter out multi-action instructions containing "then"
+    pre_then = len(df)
+    df = df[~df['instruction'].str.contains(r'\bthen\b', case=False)].copy()
+    print(f"Filtered out {pre_then - len(df)} examples containing 'then'.")
     
     # Use the single extracted verb as the primary label
     df['primary_verb'] = df['verbs'].apply(lambda x: x[0])
+
+    # Disambiguate "turn on ..." from "turn the block right"
+    # spaCy extracts both as "turn"; reclassify based on instruction text
+    turn_on_mask = (df['primary_verb'] == 'turn') & df['instruction'].str.contains(r'\bturn on\b', case=False)
+    df.loc[turn_on_mask, 'primary_verb'] = 'turn on'
+
+    # Collapse "slide up" / "slide down" into "slide"
+    df['primary_verb'] = df['primary_verb'].replace({'slide up': 'slide', 'slide down': 'slide', 'move up': 'move'})
     
     return df
 
