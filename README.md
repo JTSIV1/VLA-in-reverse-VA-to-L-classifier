@@ -148,3 +148,16 @@ PCA + K-Means on flattened action trajectories, with ARI/NMI metrics.
 | `--max_seq_len` | 128 | Max action sequence length (pad/truncate) |
 | `--save_path` | None | Checkpoint save path |
 | `--debug N` | 0 | Use only N samples for smoke testing |
+
+
+## Clustering
+
+Run image clustering:
+```bash
+RUN_MODE=images bash /home/istepka/11777/run_cluster.sh
+```
+
+Run action clustering:
+```bash
+RUN_MODE=actions bash /home/istepka/11777/run_cluster.sh
+```

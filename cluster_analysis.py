@@ -1,10 +1,15 @@
 """
-Cluster analysis of CALVIN action trajectories.
-Builds features from action sequences, runs PCA + K-Means,
-and saves plots + metrics to checkpoints/.
+Cluster analysis of CALVIN action trajectories and image embeddings.
+Builds features from action sequences or frozen image encoder outputs,
+runs PCA + clustering, and saves plots + metrics.
 
 Usage:
+    # Action-based clustering (existing)
     python cluster_analysis.py [--max_len 64] [--workers 8]
+
+    # Image-based clustering (new)
+    python cluster_analysis.py --feature_source images --image_encoder resnet18 --delta_patches 16
+
     sbatch run_cluster.sh
 """
 
@@ -34,10 +39,12 @@ from functools import partial
 from config import (
     TRAIN_DIR,
     ACTION_KEY,
+    IMAGE_KEY,
     EPISODE_TEMPLATE,
     ACTION_DIM,
     FAST_TOKENIZER_PATH,
     TOKENIZER_HORIZON,
+    IMAGE_SIZE,
 )
 from utils import load_calvin_to_dataframe
 from fast_tokenizer import load_fast_tokenizer, tokenize_trajectory
@@ -156,6 +163,134 @@ def build_features(df, max_len, num_workers, action_rep="native", tokenizer=None
             else:
                 traj = np.pad(traj, ((0, max_len - T), (0, 0)), mode="constant")
             features[i] = traj.ravel()
+
+    verb_labels = df["primary_verb"].tolist()
+    return features, verb_labels
+
+
+# ---------------------------------------------------------------------------
+# Image-based feature extraction (frozen encoders)
+# ---------------------------------------------------------------------------
+
+
+def _build_encoder(encoder_name):
+    """Build a frozen image encoder and return (encoder, embed_dim, num_tokens).
+
+    Uses build_image_encoder from image_encoders.py.
+    We call encoder.get_embeddings() for raw backbone features (no random proj).
+    """
+    from image_encoders import build_image_encoder
+
+    encoder = build_image_encoder(
+        encoder_name, d_model=128
+    )  # d_model irrelevant for get_embeddings
+    encoder.eval()
+    for p in encoder.parameters():
+        p.requires_grad = False
+    embed_dim = getattr(encoder, "embed_dim", 128)  # raw backbone dim
+    num_tokens = encoder.num_tokens
+    return encoder, embed_dim, num_tokens
+
+
+def build_image_features(df, encoder_name, delta_patches=16, batch_size=64):
+    """Extract frozen image-encoder features for first+last frames of each episode.
+
+    Returns:
+        features   : np.ndarray (N_episodes, feature_dim)
+        verb_labels: list[str]
+    """
+    import torch
+    from PIL import Image
+    from torchvision import transforms
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Image feature extraction on device: {device}")
+
+    encoder, embed_dim, num_tokens = _build_encoder(encoder_name)
+    encoder.to(device)
+
+    # Image transform: match what train_transformer.py uses
+    transform = transforms.Compose(
+        [
+            transforms.Resize((IMAGE_SIZE[0], IMAGE_SIZE[1])),
+            transforms.ToTensor(),
+        ]
+    )
+
+    N = len(df)
+    starts = df["start_idx"].values
+    ends = df["end_idx"].values
+
+    use_delta = delta_patches > 0 and encoder_name != "r3m"
+    if encoder_name == "r3m" and delta_patches > 0:
+        print(
+            "  [NOTE] R3M produces a global vector; ignoring delta_patches, using full mode."
+        )
+
+    if use_delta:
+        feat_dim = delta_patches * embed_dim
+        print(
+            f"  Delta mode: top-{delta_patches} patches × {embed_dim}d = {feat_dim}d per episode"
+        )
+    else:
+        # Concatenate both frames
+        feat_dim = 2 * num_tokens * embed_dim
+        print(
+            f"  Full mode: 2 frames × {num_tokens} tokens × {embed_dim}d = {feat_dim}d per episode"
+        )
+
+    features = np.zeros((N, feat_dim), dtype=np.float32)
+
+    print(f"  Extracting features for {N} episodes (batch_size={batch_size}) ...")
+    t0 = time.time()
+
+    for batch_start in range(0, N, batch_size):
+        batch_end = min(batch_start + batch_size, N)
+        first_frames = []
+        last_frames = []
+
+        for i in range(batch_start, batch_end):
+            s_idx, e_idx = int(starts[i]), int(ends[i])
+            # Load first frame
+            path_first = os.path.join(TRAIN_DIR, EPISODE_TEMPLATE.format(s_idx))
+            img_first = Image.fromarray(np.load(path_first)[IMAGE_KEY]).convert("RGB")
+            first_frames.append(transform(img_first))
+            # Load last frame
+            path_last = os.path.join(TRAIN_DIR, EPISODE_TEMPLATE.format(e_idx))
+            img_last = Image.fromarray(np.load(path_last)[IMAGE_KEY]).convert("RGB")
+            last_frames.append(transform(img_last))
+
+        first_batch = torch.stack(first_frames).to(device)  # (B,3,H,W)
+        last_batch = torch.stack(last_frames).to(device)
+
+        with torch.no_grad():
+            emb_first = encoder.get_embeddings(
+                first_batch
+            )  # (B, num_tokens, embed_dim)
+            emb_last = encoder.get_embeddings(last_batch)
+
+        if use_delta:
+            diff = emb_last - emb_first  # (B, num_tokens, embed_dim)
+            mag = diff.norm(dim=-1)  # (B, num_tokens)
+            K = min(delta_patches, diff.size(1))
+            topk_idx = mag.topk(K, dim=-1).indices  # (B, K)
+            idx_exp = topk_idx.unsqueeze(-1).expand(-1, -1, embed_dim)
+            selected = torch.gather(diff, 1, idx_exp)  # (B, K, embed_dim)
+            feat = selected.reshape(selected.size(0), -1).cpu().numpy()
+        else:
+            feat = torch.cat(
+                [emb_first, emb_last], dim=1
+            )  # (B, 2*num_tokens, embed_dim)
+            feat = feat.reshape(feat.size(0), -1).cpu().numpy()
+
+        features[batch_start:batch_end] = feat
+
+        if (batch_start // batch_size) % 10 == 0:
+            elapsed = time.time() - t0
+            print(f"    {batch_end}/{N} episodes ({elapsed:.1f}s)")
+
+    elapsed = time.time() - t0
+    print(f"  Done: {N} episodes in {elapsed:.1f}s ({N / elapsed:.0f} eps/s)")
 
     verb_labels = df["primary_verb"].tolist()
     return features, verb_labels
@@ -314,14 +449,46 @@ def main():
         "--out_dir",
         type=str,
         default="./results/clustering",
-        help="Base output dir. Results go to <out_dir>/<pca|raw>/<cluster_method>/",
+        help="Base output dir. Results go to <out_dir>/<feature_source>/<pca|raw>/<cluster_method>/",
     )
+    parser.add_argument(
+        "--feature_source",
+        type=str,
+        choices=["actions", "images"],
+        default="actions",
+        help="Feature source: 'actions' (default) or 'images' (frozen encoder embeddings)",
+    )
+    # ── Action-specific args ──
     parser.add_argument(
         "--action_rep",
         type=str,
         choices=["native", "fast", "bin", "quest", "oat"],
         default="native",
     )
+    parser.add_argument("--tokenizer_path", type=str, default=FAST_TOKENIZER_PATH)
+    parser.add_argument("--vocab_size", type=int, default=1024)
+    parser.add_argument("--scale", type=float, default=10)
+    # ── Image-specific args ──
+    parser.add_argument(
+        "--image_encoder",
+        type=str,
+        choices=["resnet18", "dinov2", "dinov2_s", "dinov2_b", "vc1", "r3m"],
+        default="resnet18",
+        help="Image encoder backbone (only used when --feature_source images)",
+    )
+    parser.add_argument(
+        "--delta_patches",
+        type=int,
+        default=16,
+        help="Top-K changed patches between first/last frame (0 = use all patches from both frames)",
+    )
+    parser.add_argument(
+        "--batch_size",
+        type=int,
+        default=64,
+        help="Batch size for image feature extraction",
+    )
+    # ── Clustering args ──
     parser.add_argument(
         "--cluster_method",
         type=str,
@@ -341,14 +508,13 @@ def main():
         action="store_false",
         help="Cluster on raw StandardScaled features instead of PCA-projected",
     )
-    parser.add_argument("--tokenizer_path", type=str, default=FAST_TOKENIZER_PATH)
-    parser.add_argument("--vocab_size", type=int, default=1024)
-    parser.add_argument("--scale", type=float, default=10)
     args = parser.parse_args()
 
-    # Build structured output dir: <base>/<pca_or_raw>/<cluster_method>/
+    # Build structured output dir: <base>/<feature_source>/<pca_or_raw>/<cluster_method>/
     pca_tag = "pca" if args.use_pca else "raw"
-    run_out_dir = os.path.join(args.out_dir, pca_tag, args.cluster_method)
+    run_out_dir = os.path.join(
+        args.out_dir, args.feature_source, pca_tag, args.cluster_method
+    )
     os.makedirs(run_out_dir, exist_ok=True)
     print(f"Output dir: {run_out_dir}")
 
@@ -356,41 +522,65 @@ def main():
     df = load_calvin_to_dataframe(TRAIN_DIR)
     print(f"Episodes: {len(df)}, Unique verbs: {df['primary_verb'].nunique()}\n")
 
-    tokenizer = None
-    if args.action_rep == "fast":
-        print(f"Loading FAST tokenizer from {args.tokenizer_path} ...")
-        tokenizer = load_fast_tokenizer(args.tokenizer_path)
-    elif args.action_rep in ("bin", "quest", "oat"):
-        from action_tokenizers import load_action_tokenizer
+    # ── Feature extraction ─────────────────────────────────────────────────
+    if args.feature_source == "images":
+        print(
+            f"Image encoder: {args.image_encoder}, delta_patches: {args.delta_patches}"
+        )
+        features, verb_labels = build_image_features(
+            df,
+            encoder_name=args.image_encoder,
+            delta_patches=args.delta_patches,
+            batch_size=args.batch_size,
+        )
+        # Build prefix for filenames
+        if args.delta_patches > 0 and args.image_encoder != "r3m":
+            prefix = f"{args.image_encoder}_delta{args.delta_patches}"
+        else:
+            prefix = f"{args.image_encoder}_full"
+    else:
+        # Existing action-based feature extraction
+        tokenizer = None
+        if args.action_rep == "fast":
+            print(f"Loading FAST tokenizer from {args.tokenizer_path} ...")
+            tokenizer = load_fast_tokenizer(args.tokenizer_path)
+        elif args.action_rep in ("bin", "quest", "oat"):
+            from action_tokenizers import load_action_tokenizer
 
-        print(f"Loading {args.action_rep} tokenizer ...")
-        tokenizer = load_action_tokenizer(
-            args.action_rep,
-            train_dir=TRAIN_DIR,
-            horizon=TOKENIZER_HORIZON,  # must match the trained checkpoint (config.TOKENIZER_HORIZON)
-            max_tokens=args.max_len,  # controls feature vector length for clustering
+            print(f"Loading {args.action_rep} tokenizer ...")
+            tokenizer = load_action_tokenizer(
+                args.action_rep,
+                train_dir=TRAIN_DIR,
+                horizon=TOKENIZER_HORIZON,
+                max_tokens=args.max_len,
+            )
+
+        features, verb_labels = build_features(
+            df,
+            args.max_len,
+            args.workers,
+            action_rep=args.action_rep,
+            tokenizer=tokenizer,
         )
 
-    features, verb_labels = build_features(
-        df, args.max_len, args.workers, action_rep=args.action_rep, tokenizer=tokenizer
-    )
+        if args.action_rep == "fast":
+            scale_str = (
+                str(int(args.scale))
+                if args.scale == int(args.scale)
+                else str(args.scale)
+            )
+            prefix = f"{args.action_rep}_v{args.vocab_size}_s{scale_str}"
+        else:
+            prefix = args.action_rep
+
     print(f"Feature matrix: {features.shape}  ({len(set(verb_labels))} unique verbs)\n")
 
-    # Build rep prefix (no cluster_method — directory encodes that)
-    if args.action_rep == "fast":
-        scale_str = (
-            str(int(args.scale)) if args.scale == int(args.scale) else str(args.scale)
-        )
-        prefix = f"{args.action_rep}_v{args.vocab_size}_s{scale_str}"
-    else:
-        prefix = args.action_rep
-
+    # ── PCA + Clustering ───────────────────────────────────────────────────
     scaled_features, pca_99_features, pca_2d, unique_verbs, cmap, pca_metrics = run_pca(
         features, verb_labels, run_out_dir, prefix=prefix
     )
     print()
 
-    # Choose feature space for clustering
     cluster_features = pca_99_features if args.use_pca else scaled_features
     print(
         f"Clustering on {'PCA-99% features' if args.use_pca else 'raw scaled features'} "
@@ -408,16 +598,24 @@ def main():
         cluster_method=args.cluster_method,
     )
 
-    # Save all metrics
+    # ── Save metrics ───────────────────────────────────────────────────────
     combined_metrics = {
-        "representation": args.action_rep,
-        "vocab_size": args.vocab_size if args.action_rep == "fast" else None,
-        "scale": args.scale if args.action_rep == "fast" else None,
+        "feature_source": args.feature_source,
         "cluster_method": args.cluster_method,
         "use_pca": args.use_pca,
         "pca": pca_metrics,
         "clustering": cluster_metrics,
     }
+    if args.feature_source == "images":
+        combined_metrics["image_encoder"] = args.image_encoder
+        combined_metrics["delta_patches"] = args.delta_patches
+        combined_metrics["representation"] = args.image_encoder
+    else:
+        combined_metrics["representation"] = args.action_rep
+        combined_metrics["vocab_size"] = (
+            args.vocab_size if args.action_rep == "fast" else None
+        )
+        combined_metrics["scale"] = args.scale if args.action_rep == "fast" else None
 
     metrics_path = os.path.join(run_out_dir, f"metrics_{prefix}.json")
     with open(metrics_path, "w") as f:
