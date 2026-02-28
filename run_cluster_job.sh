@@ -11,10 +11,7 @@
 # Required env vars (passed via --export):
 #   ACTION_REP     : native | fast | bin | quest | oat
 #   CLUSTER_METHOD : kmeans | agglomerative  (default: kmeans)
-# Optional (fast only):
-#   VOCAB_SIZE   : e.g. 256 or 2048
-#   SCALE        : e.g. 1 10 25 50
-#   TOKENIZER_PATH: path to pre-fitted tokenizer
+#   USE_PCA        : 1 | 0  (default: 1 — cluster on 99%-PCA features)
 
 set -euo pipefail
 
@@ -28,8 +25,11 @@ echo "===== Cluster Job: ACTION_REP=${ACTION_REP} ====="
 echo "Job ID: $SLURM_JOB_ID  Node: $(hostname)"
 echo "======================================="
 
-OUT_DIR="./results/clustering"
+OUT_DIR="./results/clustering"   # base dir; subdirs created by cluster_analysis.py
 CLUSTER_METHOD="${CLUSTER_METHOD:-kmeans}"
+USE_PCA="${USE_PCA:-1}"
+PCA_FLAG="--use_pca"
+[[ "${USE_PCA}" == "0" ]] && PCA_FLAG="--no_use_pca"
 
 if [[ "${ACTION_REP}" == "fast" ]]; then
     echo ">>> Fitting FAST tokenizer (vocab=${VOCAB_SIZE}, scale=${SCALE}) ..."
@@ -38,7 +38,7 @@ if [[ "${ACTION_REP}" == "fast" ]]; then
         --vocab_size "${VOCAB_SIZE}" \
         --scale "${SCALE}"
 
-    echo ">>> Running cluster analysis (fast, vocab=${VOCAB_SIZE}, scale=${SCALE}, method=${CLUSTER_METHOD}) ..."
+    echo ">>> Running cluster analysis (fast, vocab=${VOCAB_SIZE}, scale=${SCALE}, method=${CLUSTER_METHOD}, pca=${USE_PCA}) ..."
     python -u cluster_analysis.py \
         --max_len 64 \
         --out_dir "${OUT_DIR}" \
@@ -46,14 +46,16 @@ if [[ "${ACTION_REP}" == "fast" ]]; then
         --vocab_size "${VOCAB_SIZE}" \
         --scale "${SCALE}" \
         --tokenizer_path "${TOKENIZER_PATH}" \
-        --cluster_method "${CLUSTER_METHOD}"
+        --cluster_method "${CLUSTER_METHOD}" \
+        ${PCA_FLAG}
 else
-    echo ">>> Running cluster analysis (${ACTION_REP}, method=${CLUSTER_METHOD}) ..."
+    echo ">>> Running cluster analysis (${ACTION_REP}, method=${CLUSTER_METHOD}, pca=${USE_PCA}) ..."
     python -u cluster_analysis.py \
         --max_len 64 \
         --out_dir "${OUT_DIR}" \
         --action_rep "${ACTION_REP}" \
-        --cluster_method "${CLUSTER_METHOD}"
+        --cluster_method "${CLUSTER_METHOD}" \
+        ${PCA_FLAG}
 fi
 
 echo "===== Done ====="

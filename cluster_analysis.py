@@ -162,16 +162,19 @@ def build_features(df, max_len, num_workers, action_rep="native", tokenizer=None
 
 
 def run_pca(features, verb_labels, out_dir, prefix="native"):
-    """Scale data, compute full PCA for 99% variance, then run 2D PCA for scatter plot."""
+    """Scale data, compute full PCA for 99% variance, then run 2D PCA for scatter plot.
+
+    Returns scaled_features, pca_99_features, pca_2d, unique_verbs, cmap, pca_metrics.
+    """
     # Scale data (Standardization)
     print("Normalizing features via StandardScaler...")
     scaler = StandardScaler()
     scaled_features = scaler.fit_transform(features)
 
-    # Check components needed for 99% variance
+    # Check components needed for 99% variance AND project into that subspace
     print("Computing PCA components needed for 99% variance...")
     pca_99 = PCA(n_components=0.99, svd_solver="full")
-    pca_99.fit(scaled_features)
+    pca_99_features = pca_99.fit_transform(scaled_features)
     comps_99 = pca_99.n_components_
     print(f"PCA components needed for 99% variance: {comps_99}")
 
@@ -203,6 +206,7 @@ def run_pca(features, verb_labels, out_dir, prefix="native"):
 
     return (
         scaled_features,
+        pca_99_features,
         pca_2d,
         unique_verbs,
         cmap,
@@ -306,7 +310,12 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--max_len", type=int, default=64)
     parser.add_argument("--workers", type=int, default=8)
-    parser.add_argument("--out_dir", type=str, default="./results")
+    parser.add_argument(
+        "--out_dir",
+        type=str,
+        default="./results/clustering",
+        help="Base output dir. Results go to <out_dir>/<pca|raw>/<cluster_method>/",
+    )
     parser.add_argument(
         "--action_rep",
         type=str,
@@ -320,12 +329,28 @@ def main():
         default="kmeans",
         help="Clustering algorithm: 'kmeans' or 'agglomerative' (Ward linkage)",
     )
+    parser.add_argument(
+        "--use_pca",
+        action="store_true",
+        default=True,
+        help="Cluster on 99%%-variance PCA-projected features (recommended, default True)",
+    )
+    parser.add_argument(
+        "--no_use_pca",
+        dest="use_pca",
+        action="store_false",
+        help="Cluster on raw StandardScaled features instead of PCA-projected",
+    )
     parser.add_argument("--tokenizer_path", type=str, default=FAST_TOKENIZER_PATH)
     parser.add_argument("--vocab_size", type=int, default=1024)
     parser.add_argument("--scale", type=float, default=10)
     args = parser.parse_args()
 
-    os.makedirs(args.out_dir, exist_ok=True)
+    # Build structured output dir: <base>/<pca_or_raw>/<cluster_method>/
+    pca_tag = "pca" if args.use_pca else "raw"
+    run_out_dir = os.path.join(args.out_dir, pca_tag, args.cluster_method)
+    os.makedirs(run_out_dir, exist_ok=True)
+    print(f"Output dir: {run_out_dir}")
 
     print("Loading annotations ...")
     df = load_calvin_to_dataframe(TRAIN_DIR)
@@ -351,28 +376,34 @@ def main():
     )
     print(f"Feature matrix: {features.shape}  ({len(set(verb_labels))} unique verbs)\n")
 
+    # Build rep prefix (no cluster_method — directory encodes that)
     if args.action_rep == "fast":
         scale_str = (
             str(int(args.scale)) if args.scale == int(args.scale) else str(args.scale)
         )
-        rep_prefix = f"{args.action_rep}_v{args.vocab_size}_s{scale_str}"
+        prefix = f"{args.action_rep}_v{args.vocab_size}_s{scale_str}"
     else:
-        rep_prefix = args.action_rep
+        prefix = args.action_rep
 
-    # Full prefix encodes both the representation AND the clustering method
-    prefix = f"{rep_prefix}_{args.cluster_method}"
-
-    scaled_features, pca_2d, unique_verbs, cmap, pca_metrics = run_pca(
-        features, verb_labels, args.out_dir, prefix=prefix
+    scaled_features, pca_99_features, pca_2d, unique_verbs, cmap, pca_metrics = run_pca(
+        features, verb_labels, run_out_dir, prefix=prefix
     )
     print()
+
+    # Choose feature space for clustering
+    cluster_features = pca_99_features if args.use_pca else scaled_features
+    print(
+        f"Clustering on {'PCA-99% features' if args.use_pca else 'raw scaled features'} "
+        f"(shape {cluster_features.shape}) with {args.cluster_method} ..."
+    )
+
     cluster_metrics = run_clustering(
-        scaled_features,
+        cluster_features,
         verb_labels,
         pca_2d,
         unique_verbs,
         cmap,
-        args.out_dir,
+        run_out_dir,
         prefix=prefix,
         cluster_method=args.cluster_method,
     )
@@ -383,11 +414,12 @@ def main():
         "vocab_size": args.vocab_size if args.action_rep == "fast" else None,
         "scale": args.scale if args.action_rep == "fast" else None,
         "cluster_method": args.cluster_method,
+        "use_pca": args.use_pca,
         "pca": pca_metrics,
         "clustering": cluster_metrics,
     }
 
-    metrics_path = os.path.join(args.out_dir, f"metrics_{prefix}.json")
+    metrics_path = os.path.join(run_out_dir, f"metrics_{prefix}.json")
     with open(metrics_path, "w") as f:
         json.dump(combined_metrics, f, indent=4)
     print(f"\nSaved metrics to {metrics_path}")
