@@ -17,6 +17,11 @@ _actions_cache_*.npy
 checkpoints/
 logs/
 
+# Large data files
+*.csv
+calvin_abcd_d_annotations.csv
+calvin_train_annotations.csv
+
 # Environment
 .env
 .venv/

@@ -3,8 +3,11 @@ import numpy as np
 import torch
 
 from config import ACTION_KEY, EPISODE_TEMPLATE
-from action_tokenizers_training import train_tokenizer, fit_calvin_normalizer
 from cluster_analysis import build_features
+
+def _import_training_utils():
+    from action_tokenizers_training import train_tokenizer, fit_calvin_normalizer
+    return train_tokenizer, fit_calvin_normalizer
 
 from config import (
     MAX_SEQ_LEN,
@@ -18,14 +21,25 @@ from config import (
     BINNING_VOCAB_SIZE
 )
 
-# oat tokenizers
-from oat.tokenizer.bin.tokenizer import BinTok
-from oat.tokenizer.fast.tokenizer_wrapper import FASTTok
-from oat.tokenizer.quest.tokenizer import QueSTTok
-from oat.tokenizer.oat.tokenizer import OATTok
-from oat.tokenizer.oat.encoder.register_encoder import RegisterEncoder
-from oat.tokenizer.oat.decoder.single_pass_decoder import SinglePassDecoder
-from oat.tokenizer.oat.quantizer.fsq import FSQ
+# All oat tokenizer imports are lazy to avoid hard dependencies at module load time
+def _import_bin_tok():
+    from oat.tokenizer.bin.tokenizer import BinTok
+    return BinTok
+
+def _import_fast_tok():
+    from oat.tokenizer.fast.tokenizer_wrapper import FASTTok
+    return FASTTok
+
+def _import_quest_tok():
+    from oat.tokenizer.quest.tokenizer import QueSTTok
+    return QueSTTok
+
+def _import_oat_tok():
+    from oat.tokenizer.oat.tokenizer import OATTok
+    from oat.tokenizer.oat.encoder.register_encoder import RegisterEncoder
+    from oat.tokenizer.oat.decoder.single_pass_decoder import SinglePassDecoder
+    from oat.tokenizer.oat.quantizer.fsq import FSQ
+    return OATTok, RegisterEncoder, SinglePassDecoder, FSQ
 
 
 
@@ -105,14 +119,17 @@ def load_action_tokenizer(
     name = name.lower()
 
     # normalizer for everything except raw HF FAST (FASTTok expects normalized [-1,1], and wraps a normalizer too)
+    _, fit_calvin_normalizer = _import_training_utils()
     normalizer = fit_calvin_normalizer(train_dir, max_trajs=fit_norm_max_trajs)
   
     if name == "fast":
+        FASTTok = _import_fast_tok()
         tok = FASTTok("physical-intelligence/fast")  # pretrained from HF
         tok.set_normalizer(normalizer)
         return TokenizerAdapter(tok, "fast", horizon=horizon, max_tokens=max_tokens)
 
     if name == "bin":
+        BinTok = _import_bin_tok()
         tok = BinTok(num_bins=BINNING_VOCAB_SIZE, min_val=-1.0, max_val=1.0)
         tok.set_normalizer(normalizer)
         return TokenizerAdapter(tok, "bin", horizon=horizon, max_tokens=max_tokens)
@@ -120,10 +137,12 @@ def load_action_tokenizer(
     if name == "quest":
         # vocab size is product of fsq levels.
         # need weights; if not present you’ll train (next section)
+        QueSTTok = _import_quest_tok()
         tok = QueSTTok(action_dim=ACTION_DIM, horizon=horizon, vq_type="fsq", fsq_level=[8, 5, 5, 5], downsample_factor=TOKENIZER_DOWNSAMPLE_FACTOR)
         tok.set_normalizer(normalizer)
         if not os.path.exists(quest_ckpt):
             print(f"No checkpoint found for QueST tokenizer at {quest_ckpt}, starting training")
+            train_tokenizer, _ = _import_training_utils()
             train_tokenizer(name, train_dir, quest_ckpt, normalizer=normalizer)
             assert os.path.exists(quest_ckpt), "Tokenizer training did not produce checkpoint!"
 
@@ -136,6 +155,7 @@ def load_action_tokenizer(
     if name == "oat":
         # vocab size is product of latent_levels
         # need weights; if not present you’ll train
+        OATTok, RegisterEncoder, SinglePassDecoder, FSQ = _import_oat_tok()
         latent_levels = [8, 5, 5, 5]
         latent_dim = len(latent_levels)
         num_registers = OAT_NUM_REGISTERS
@@ -157,6 +177,7 @@ def load_action_tokenizer(
 
         if not os.path.exists(oat_ckpt):
             print(f"No checkpoint found for OAT tokenizer at {oat_ckpt}, starting training")
+            train_tokenizer, _ = _import_training_utils()
             train_tokenizer(name, train_dir, oat_ckpt, normalizer=normalizer)
             assert os.path.exists(oat_ckpt), "Tokenizer training did not produce checkpoint!"
 

@@ -16,11 +16,15 @@ from utils import load_calvin_to_dataframe
 from image_encoders import build_image_encoder
 from config import (
     DATA_DIR, VAL_DIR, IMAGE_KEY, ACTION_KEY, EPISODE_TEMPLATE,
+    SCENE_OBS_KEY, ROBOT_OBS_KEY, SCENE_OBS_DIM, ROBOT_OBS_DIM, SCENE_REP_DIM,
     ACTION_DIM, D_MODEL, NHEAD, NUM_LAYERS, CROSS_LAYERS, DROPOUT_RATE, PATCH_SIZE,
     IMAGE_SIZE, IMG_MEAN, IMG_STD, R3M_IMG_SIZE, R3M_VARIANT,
     BATCH_SIZE, EPOCHS, LEARNING_RATE, MAX_SEQ_LEN, NUM_WORKERS,
     WARMUP_EPOCHS, GRAD_CLIP_NORM, FAST_TOKENIZER_PATH, IMAGE_ENCODER
 )
+
+# Modalities that fuse scene_obs with action trajectories (skip vision branch)
+SCENE_FUSION_MODALITIES = ("scene_token", "scene_concat", "scene_film", "scene_mlp")
 
 from config import (
     QUEST_TOKENIZER_CKPT,
@@ -164,7 +168,8 @@ class ActionToVerbTransformer(nn.Module):
                  cross_layers=CROSS_LAYERS,
                  image_encoder="scratch", freeze_vision=True,
                  num_frames=2, delta_patches=0,
-                 modal_dropout=0.0, aux_loss_weight=0.0):
+                 modal_dropout=0.0, aux_loss_weight=0.0,
+                 scene_dim=0):
         super().__init__()
         self.modality = modality
         self.action_rep = action_rep
@@ -175,9 +180,35 @@ class ActionToVerbTransformer(nn.Module):
         self.delta_patches = delta_patches  # 0 = use all patches; >0 = top-K changed
         self.modal_dropout = modal_dropout
         self.aux_loss_weight = aux_loss_weight
+        self.scene_dim = scene_dim
 
-        # -- Vision branch (skip for action_only) --
-        if modality != "action_only":
+        # -- Scene fusion branches --
+        if modality == "scene_token" and scene_dim > 0:
+            self.scene_proj = nn.Sequential(
+                nn.Linear(scene_dim, d_model),
+                nn.ReLU(),
+                nn.Linear(d_model, d_model))
+            self.type_scene = nn.Parameter(torch.zeros(1, 1, d_model))
+        if modality == "scene_concat" and scene_dim > 0:
+            self.scene_mlp = nn.Sequential(
+                nn.Linear(scene_dim, 64),
+                nn.ReLU(),
+                nn.Linear(64, d_model))
+        if modality == "scene_film" and scene_dim > 0:
+            self.film_net = nn.Sequential(
+                nn.Linear(scene_dim, 128),
+                nn.ReLU(),
+                nn.Linear(128, 2 * d_model))
+        if modality == "scene_mlp" and scene_dim > 0:
+            self.scene_only_mlp = nn.Sequential(
+                nn.Linear(scene_dim, d_model),
+                nn.LayerNorm(d_model),
+                nn.ReLU(),
+                nn.Dropout(dropout),
+                nn.Linear(d_model, d_model))
+
+        # -- Vision branch (skip for action_only, oracle, and scene fusion modalities) --
+        if modality not in ("action_only", "scene_obs", "robot_obs") + SCENE_FUSION_MODALITIES:
             self.patch_embed = build_image_encoder(image_encoder, d_model, img_size, patch_size)
             full_num_patches = self.patch_embed.num_tokens
             if delta_patches > 0:
@@ -229,8 +260,9 @@ class ActionToVerbTransformer(nn.Module):
         ])
 
         # -- Classification head --
+        cls_input_dim = 2 * d_model if (modality == "scene_concat" and scene_dim > 0) else d_model
         self.classifier = nn.Sequential(
-            nn.Linear(d_model, d_model // 2),
+            nn.Linear(cls_input_dim, d_model // 2),
             nn.LayerNorm(d_model // 2),
             nn.ReLU(),
             nn.Dropout(dropout),
@@ -257,9 +289,10 @@ class ActionToVerbTransformer(nn.Module):
             self.aux_vision_head = None
             self.aux_action_head = None
 
-    def _forward_core(self, frames, trajectories, seq_lengths=None, training=False):
+    def _forward_core(self, frames, trajectories, seq_lengths=None, training=False,
+                      scene_vec=None):
         """Shared forward logic. Returns (x_final, v_end, x_transition).
-        v_end: index of first action token (= 1 + n_vis_tokens).
+        v_end: index of first action token (= 1 + n_vis_tokens + n_scene_tokens).
         x_transition: x snapshot at the self→cross layer boundary (for aux heads),
                       or None if aux_loss_weight == 0 or modality != 'full'."""
         batch_size = trajectories.size(0)
@@ -268,9 +301,15 @@ class ActionToVerbTransformer(nn.Module):
         cls = self.cls_token.expand(batch_size, -1, -1) + self.cls_pos + self.type_cls
         parts = [cls]
 
+        # Scene token injection: scene_obs → MLP → 1 token before action tokens
+        if self.modality == "scene_token" and self.scene_dim > 0 and scene_vec is not None:
+            scene_tok = self.scene_proj(scene_vec).unsqueeze(1)  # (B, 1, d_model)
+            scene_tok = scene_tok + self.type_scene
+            parts.append(scene_tok)
+
         # Vision: encode each frame, add spatial + temporal position + type
         nf = 0
-        if self.modality != "action_only":
+        if self.modality not in ("action_only", "scene_obs", "robot_obs") + SCENE_FUSION_MODALITIES:
             # frames: (B, num_frames, C, H, W)
             nf = frames.size(1)
             if self.delta_patches > 0:
@@ -300,16 +339,19 @@ class ActionToVerbTransformer(nn.Module):
                     patches = patches + self.patch_pos + self.frame_pos[:, fi] + self.type_img
                     parts.append(patches)
 
-        #print("Vision tokens prepared")
-
         # Action embeddings + temporal position + type
         if self.modality != "vision_only":
             action_len = trajectories.size(1)
             if self.action_rep == "native":
                 action_emb = self.action_proj(trajectories)
             else:
-                #print("Calling embedding forward with trajectories: ", trajectories)
                 action_emb = self.action_embed(trajectories)
+            # FiLM conditioning: modulate action embeddings with scene_obs
+            if self.modality == "scene_film" and self.scene_dim > 0 and scene_vec is not None:
+                film_out = self.film_net(scene_vec)  # (B, 2*d_model)
+                gamma, beta = film_out.chunk(2, dim=-1)  # each (B, d_model)
+                gamma = gamma + 1.0  # residual: initial behavior ≈ identity
+                action_emb = gamma.unsqueeze(1) * action_emb + beta.unsqueeze(1)
             action_emb = action_emb + self.action_pos[:, :action_len, :] + self.type_action
             parts.append(action_emb)
 
@@ -317,8 +359,10 @@ class ActionToVerbTransformer(nn.Module):
         full_seq = torch.cat(parts, dim=1)
         total_len = full_seq.size(1)
 
-        # Compute v_end: index of first action token (= 1 + n_vis_tokens)
-        if self.modality == "action_only":
+        # Compute v_end: index of first action token (= 1 + n_prefix_tokens)
+        if self.modality == "scene_token" and self.scene_dim > 0:
+            n_vis_tokens = 1  # the scene token
+        elif self.modality in ("action_only", "scene_obs", "robot_obs", "scene_concat", "scene_film"):
             n_vis_tokens = 0
         elif self.delta_patches > 0:
             n_vis_tokens = max(nf - 1, 1) * self.num_patches
@@ -374,20 +418,37 @@ class ActionToVerbTransformer(nn.Module):
 
         return x, v_end, x_transition
 
-    def forward(self, frames, trajectories, seq_lengths=None):
+    def forward(self, frames, trajectories, seq_lengths=None, scene_vec=None):
         """Standard forward pass. Returns main logits only (eval-compatible)."""
+        # Scene MLP-only: bypass transformer entirely
+        if self.modality == "scene_mlp" and self.scene_dim > 0 and scene_vec is not None:
+            cls_out = self.scene_only_mlp(scene_vec)  # (B, d_model)
+            return self.classifier(cls_out)
         x, _v_end, _xt = self._forward_core(
             frames, trajectories, seq_lengths=seq_lengths,
-            training=self.training)
-        return self.classifier(x[:, 0, :])
+            training=self.training, scene_vec=scene_vec)
+        cls_out = x[:, 0, :]
+        # Scene concat: concatenate CLS output with scene MLP output
+        if self.modality == "scene_concat" and self.scene_dim > 0 and scene_vec is not None:
+            scene_emb = self.scene_mlp(scene_vec)  # (B, d_model)
+            cls_out = torch.cat([cls_out, scene_emb], dim=-1)  # (B, 2*d_model)
+        return self.classifier(cls_out)
 
-    def forward_with_aux(self, frames, trajectories, seq_lengths=None):
+    def forward_with_aux(self, frames, trajectories, seq_lengths=None, scene_vec=None):
         """Training forward pass. Returns (main_logits, aux_v_logits, aux_a_logits).
         Aux logits are None when aux_loss_weight == 0 or modality != 'full'."""
+        # Scene MLP-only: bypass transformer entirely
+        if self.modality == "scene_mlp" and self.scene_dim > 0 and scene_vec is not None:
+            cls_out = self.scene_only_mlp(scene_vec)
+            return self.classifier(cls_out), None, None
         x, v_end, x_transition = self._forward_core(
             frames, trajectories, seq_lengths=seq_lengths,
-            training=self.training)
-        main_logits = self.classifier(x[:, 0, :])
+            training=self.training, scene_vec=scene_vec)
+        cls_out = x[:, 0, :]
+        if self.modality == "scene_concat" and self.scene_dim > 0 and scene_vec is not None:
+            scene_emb = self.scene_mlp(scene_vec)
+            cls_out = torch.cat([cls_out, scene_emb], dim=-1)
+        main_logits = self.classifier(cls_out)
         aux_v_logits = None
         aux_a_logits = None
         if self.aux_vision_head is not None and x_transition is not None:
@@ -399,16 +460,73 @@ class ActionToVerbTransformer(nn.Module):
                     x_transition[:, v_end:].mean(dim=1))
         return main_logits, aux_v_logits, aux_a_logits
 
+    @torch.no_grad()
+    def get_cls_attn_fracs(self, frames, trajectories, seq_lengths=None):
+        """Return CLS attention fraction to vision vs action tokens for each
+        cross-modal layer.
+
+        Uses forward pre-hooks to capture the layer-normed inputs to each
+        cross-modal self_attn, then re-runs self_attn with need_weights=True.
+
+        Returns:
+            fracs: dict {layer_idx: {"vision": float, "action": float}}
+                   where vision + action ≈ 1.0 (CLS→CLS excluded from denominator).
+            v_end: index of first action token in the sequence (for reference).
+        """
+        num_self = self.num_layers - self.cross_layers
+        v_start = 1  # position 0 is CLS
+
+        # Cache inputs to each cross-modal self_attn via pre-hook
+        input_cache = {}
+        hooks = []
+        for i in range(num_self, self.num_layers):
+            def _make_hook(li):
+                def _hook(_, args):
+                    # args = (query, key, value[, ...])
+                    input_cache[li] = tuple(
+                        a.detach() if isinstance(a, torch.Tensor) else a
+                        for a in args[:3])
+                return _hook
+            hooks.append(
+                self.layers[i].self_attn.register_forward_pre_hook(_make_hook(i)))
+
+        # Run the full forward to populate the cache
+        _, v_end, _ = self._forward_core(
+            frames, trajectories, seq_lengths=seq_lengths, training=False)
+
+        for h in hooks:
+            h.remove()
+
+        # Re-run each cross-modal self_attn with need_weights=True
+        fracs = {}
+        for i in range(num_self, self.num_layers):
+            if i not in input_cache:
+                continue
+            q, k, v = input_cache[i]
+            _, attn_w = self.layers[i].self_attn(
+                q, k, v, need_weights=True, average_attn_weights=True)
+            if attn_w is None:
+                continue
+            # attn_w: (B, seq_len, seq_len); row = query, col = key
+            # CLS token is at position 0; vision at v_start:v_end; action at v_end:
+            cls_vis = attn_w[:, 0, v_start:v_end].sum(-1).mean().item()
+            cls_act = attn_w[:, 0, v_end:].sum(-1).mean().item()
+            total = cls_vis + cls_act + 1e-9
+            fracs[i] = {"vision": cls_vis / total, "action": cls_act / total}
+
+        return fracs, v_end
+
 
 class CalvinVerbDataset(Dataset):
     def __init__(self, df, data_dir, transform=None, max_seq_len=MAX_SEQ_LEN,
                  modality="full", action_tokenizer=None,
                  image_encoder="scratch", img_size=IMAGE_SIZE[0],
                  num_frames=2, delta_patches=0,
-                 vqvae_chunk_size=4, vqvla_tokenizer=None, num_patches=64):
+                 vqvae_chunk_size=4, vqvla_tokenizer=None, num_patches=64,
+                 scene_rep=False):
         """CALVIN dataset loader with modality ablation support.
         Args:
-            modality: "full", "action_only", or "vision_only"
+            modality: "full", "action_only", "vision_only", "scene_token", "scene_concat", "scene_film", etc.
             action_tokenizer: unified tokenizer (FAST/BIN/QueST/OAT/VQ-VAE)
             image_encoder: name used to set default num_patches
             img_size: image size for dummy tensors in action_only mode
@@ -417,6 +535,7 @@ class CalvinVerbDataset(Dataset):
             vqvae_chunk_size: kept for legacy checkpoint compat
             vqvla_tokenizer: optional VQ-VLA tokenizer (separate from action_tokenizer)
             num_patches: overrides computed num_patches after model is built
+            scene_rep: if True, load scene_obs delta_start (48-d) for scene fusion modalities
         """
         self.df = df
         self.data_dir = data_dir
@@ -429,6 +548,14 @@ class CalvinVerbDataset(Dataset):
         self.img_size = img_size
         self.num_frames = num_frames
         self.delta_patches = delta_patches
+        self.scene_rep = scene_rep
+        # Oracle modalities: load scene_obs or robot_obs instead of actions
+        if modality == "scene_obs":
+            self.obs_key = SCENE_OBS_KEY
+        elif modality == "robot_obs":
+            self.obs_key = ROBOT_OBS_KEY
+        else:
+            self.obs_key = None
         # Set default num_patches based on encoder; caller can override via num_patches param
         if image_encoder in ("r3m",):
             self.num_patches = 49   # R3M repeats global feat to 49 tokens (image_encoders.py)
@@ -462,8 +589,8 @@ class CalvinVerbDataset(Dataset):
         end_idx = row['end_idx']
         verb = row['primary_verb']
 
-        # -- Load frames (skip for action_only to save I/O) --
-        if self.modality != "action_only":
+        # -- Load frames (skip for action_only, oracle, and scene fusion modalities) --
+        if self.modality not in ("action_only", "scene_obs", "robot_obs") + SCENE_FUSION_MODALITIES:
             # Sample frame indices: uniformly spaced including first and last
             total_steps = end_idx - start_idx + 1
             if self.num_frames == 2:
@@ -484,8 +611,28 @@ class CalvinVerbDataset(Dataset):
             # Dummy tensors — not used by model but keeps DataLoader shape consistent
             frames = torch.zeros(self.num_frames, 3, self.img_size, self.img_size)
 
-        # -- Load actions (skip for vision_only) --
-        if self.modality != "vision_only":
+        # -- Load oracle obs or actions --
+        if self.obs_key is not None:
+            # Oracle: sample obs vectors at frame-like indices (2f or 8f)
+            total_steps = end_idx - start_idx + 1
+            if self.num_frames == 2:
+                sample_indices = [start_idx, end_idx]
+            else:
+                positions = np.linspace(0, total_steps - 1, self.num_frames, dtype=int)
+                sample_indices = [start_idx + p for p in positions]
+            obs_list = []
+            for si in sample_indices:
+                obs_list.append(np.array(self._load_npz(si)[self.obs_key]))
+            obs = np.array(obs_list)  # (num_frames, obs_dim)
+            L = obs.shape[0]
+            if L < self.max_seq_len:
+                obs_padded = np.pad(obs, ((0, self.max_seq_len - L), (0, 0)),
+                                    mode='constant')
+            else:
+                obs_padded = obs[:self.max_seq_len]
+            actions_tensor = torch.tensor(obs_padded, dtype=torch.float32)
+            action_real_len = min(L, self.max_seq_len)
+        elif self.modality != "vision_only":
             all_actions = []
             for i in range(start_idx, end_idx + 1):
                 step_data = self._load_npz(i)
@@ -508,7 +655,7 @@ class CalvinVerbDataset(Dataset):
                 actions_tensor = torch.tensor(token_ids, dtype=torch.long)
                 action_real_len = min(L_tok, self.max_seq_len)
             elif self.vqvla_tokenizer is not None:
-                # VQ-VLA tokenization: (T, 7) -> (4,) int64 codes (whole traj → 4 tokens)
+                # VQ-VLA tokenization: (T, 7) → (T//8)*4 int64 codes (~28 for T=61)
                 from vqvae_tokenizer import tokenize_trajectory_vqvla
                 token_ids = tokenize_trajectory_vqvla(
                     self.vqvla_tokenizer, actions).tolist()
@@ -536,9 +683,22 @@ class CalvinVerbDataset(Dataset):
         label_id = self.verb_to_id.get(verb, self.verb_to_id.get("unknown", 0))
         label = torch.tensor(label_id, dtype=torch.long)
 
+        # -- Load scene_obs delta_start for scene fusion modalities --
+        if self.scene_rep:
+            start_data = self._load_npz(start_idx)
+            end_data = self._load_npz(end_idx)
+            start_obs = np.array(start_data[SCENE_OBS_KEY], dtype=np.float32)
+            end_obs = np.array(end_data[SCENE_OBS_KEY], dtype=np.float32)
+            delta = end_obs - start_obs
+            scene_vec = torch.from_numpy(np.concatenate([start_obs, delta]))  # (48,)
+        else:
+            scene_vec = torch.zeros(SCENE_REP_DIM)
+
         # Compute actual sequence length for padding mask
         seq_len = 1  # CLS
-        if self.modality != "action_only":
+        if self.modality == "scene_token":
+            seq_len += 1  # scene token in sequence
+        elif self.modality not in ("action_only", "scene_obs", "robot_obs") + SCENE_FUSION_MODALITIES:
             if self.delta_patches > 0:
                 # Delta mode: (num_frames - 1) frame pairs × K patches each
                 seq_len += max(self.num_frames - 1, 1) * self.delta_patches
@@ -547,7 +707,7 @@ class CalvinVerbDataset(Dataset):
         if self.modality != "vision_only":
             seq_len += action_real_len
 
-        return frames, actions_tensor, label, seq_len
+        return frames, actions_tensor, scene_vec, label, seq_len
 
 
 def main(args):
@@ -572,7 +732,18 @@ def main(args):
     tok = None
     vqvla_tok = None
     action_vocab_size = None  # native doesn't use a vocab
-    if args.action_rep in ("fast", "bin", "quest", "oat"):
+    if args.action_rep == "fast":
+        # Use local vendored fast_tokenizer (Python 3.9 compatible, locally fitted BPE)
+        from fast_tokenizer import load_fast_tokenizer, tokenize_trajectory
+        _fast_tok = load_fast_tokenizer(args.fast_tokenizer_path)
+        action_vocab_size = _fast_tok.vocab_size
+        # Wrap to match action_tokenizer interface: (1, T, 7) → [[int, ...]]
+        def _fast_wrapper(actions_batch):
+            return [tokenize_trajectory(_fast_tok, actions_batch[0])]
+        _fast_wrapper.vocab_size = action_vocab_size
+        tok = _fast_wrapper
+        print(f"Loaded FAST tokenizer from {args.fast_tokenizer_path} (vocab_size={action_vocab_size})")
+    elif args.action_rep in ("bin", "quest", "oat"):
         tok = load_action_tokenizer(
             args.action_rep,
             train_dir=args.data_dir,
@@ -634,6 +805,7 @@ def main(args):
     # --- Build datasets ---
     delta_patches = getattr(args, 'delta_patches', 0)
     vqvae_chunk_size = getattr(args, 'vqvae_chunk_size', 4)
+    use_scene_rep = args.modality in SCENE_FUSION_MODALITIES
     dataset = CalvinVerbDataset(df, args.data_dir, transform=transform,
                                 max_seq_len=args.max_seq_len,
                                 modality=args.modality,
@@ -643,7 +815,8 @@ def main(args):
                                 num_frames=args.num_frames,
                                 delta_patches=delta_patches,
                                 vqvae_chunk_size=vqvae_chunk_size,
-                                vqvla_tokenizer=vqvla_tok)
+                                vqvla_tokenizer=vqvla_tok,
+                                scene_rep=use_scene_rep)
     dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True,
                             num_workers=args.num_workers)
 
@@ -656,7 +829,8 @@ def main(args):
                                     num_frames=args.num_frames,
                                     delta_patches=delta_patches,
                                     vqvae_chunk_size=vqvae_chunk_size,
-                                    vqvla_tokenizer=vqvla_tok)
+                                    vqvla_tokenizer=vqvla_tok,
+                                    scene_rep=use_scene_rep)
     val_dataset.verb_to_id = dataset.verb_to_id
     val_dataset.id_to_verb = dataset.id_to_verb
     valid_mask = val_df['primary_verb'].isin(dataset.verb_to_id.keys())
@@ -668,9 +842,19 @@ def main(args):
 
     # --- Model, optimizer, scheduler ---
     num_verbs = len(dataset.verb_to_id)
+    # Determine action_dim based on modality (oracle uses obs dim)
+    if args.modality == "scene_obs":
+        action_dim = SCENE_OBS_DIM
+    elif args.modality == "robot_obs":
+        action_dim = ROBOT_OBS_DIM
+    else:
+        action_dim = ACTION_DIM
+    # Scene fusion modalities use delta_start (48-d)
+    scene_dim = SCENE_REP_DIM if args.modality in SCENE_FUSION_MODALITIES else 0
     model = ActionToVerbTransformer(
         num_verbs=num_verbs, d_model=args.d_model,
         num_layers=args.num_layers,
+        action_dim=action_dim,
         max_action_len=args.max_seq_len,
         img_size=img_size,
         modality=args.modality, action_rep=args.action_rep,
@@ -681,10 +865,11 @@ def main(args):
         num_frames=args.num_frames,
         delta_patches=delta_patches,
         modal_dropout=args.modal_dropout,
-        aux_loss_weight=args.aux_loss_weight).to(device)
+        aux_loss_weight=args.aux_loss_weight,
+        scene_dim=scene_dim).to(device)
 
     # Sync num_patches after model is built (handles dynamic pool sizes)
-    if args.modality != "action_only":
+    if args.modality not in ("action_only", "scene_obs", "robot_obs") + SCENE_FUSION_MODALITIES:
         dataset.num_patches = model.num_patches
         val_dataset.num_patches = model.num_patches
 
@@ -725,14 +910,15 @@ def main(args):
         class_loss_sum = defaultdict(float)
 
         pbar = tqdm(enumerate(dataloader), total=len(dataloader), desc=f"Epoch {epoch+1}/{args.epochs}")
-        for batch_idx, (frames, actions, labels, seq_lengths) in pbar:
+        for batch_idx, (frames, actions, scene_vecs, labels, seq_lengths) in pbar:
             frames = frames.to(device)
             actions, labels = actions.to(device), labels.to(device)
+            scene_vecs = scene_vecs.to(device)
             seq_lengths = seq_lengths.to(device)
 
             optimizer.zero_grad()
             main_logits, aux_v_logits, aux_a_logits = model.forward_with_aux(
-                frames, actions, seq_lengths=seq_lengths)
+                frames, actions, seq_lengths=seq_lengths, scene_vec=scene_vecs)
             loss = criterion(main_logits, labels)
             if args.aux_loss_weight > 0.0:
                 if aux_v_logits is not None:
@@ -763,9 +949,6 @@ def main(args):
                     class_loss_sum[lbl] += sl
 
             pbar.set_postfix(loss=f"{loss.item():.4f}", acc=f"{100*correct/total:.2f}%")
-            # if batch_idx % 10 == 0:
-            #     print(f"Epoch {epoch+1} | Batch {batch_idx} | "
-            #           f"Loss: {loss.item():.4f} | Acc: {100*correct/total:.2f}%")
 
         avg_loss = total_loss / len(dataloader)
         train_acc = 100 * correct / total
@@ -783,12 +966,13 @@ def main(args):
         val_class_loss_sum = defaultdict(float)
 
         with torch.no_grad():
-            for frames, actions, labels, seq_lengths in tqdm(val_dataloader, desc="  Validating"):
+            for frames, actions, scene_vecs, labels, seq_lengths in tqdm(val_dataloader, desc="  Validating"):
                 frames = frames.to(device)
                 actions, labels = actions.to(device), labels.to(device)
+                scene_vecs = scene_vecs.to(device)
                 seq_lengths = seq_lengths.to(device)
 
-                logits = model(frames, actions, seq_lengths=seq_lengths)
+                logits = model(frames, actions, seq_lengths=seq_lengths, scene_vec=scene_vecs)
                 loss = criterion(logits, labels)
                 per_sample_loss = nn.functional.cross_entropy(
                     logits, labels, reduction='none')
@@ -808,6 +992,24 @@ def main(args):
         val_avg = val_loss / len(val_dataloader)
         val_acc = 100 * val_correct / val_total if val_total > 0 else 0
         print(f"    Val Loss: {val_avg:.4f} | Val Acc: {val_acc:.2f}%")
+
+        # --- Attention fraction logging (cross-modal layers, full modality only) ---
+        attn_fracs = {}
+        if args.modality == "full" and args.cross_layers > 0:
+            try:
+                sample_frames, sample_actions, _, _, sample_seq_lens = next(
+                    iter(val_dataloader))
+                sample_frames = sample_frames.to(device)
+                sample_actions = sample_actions.to(device)
+                sample_seq_lens = sample_seq_lens.to(device)
+                layer_fracs, _ = model.get_cls_attn_fracs(
+                    sample_frames, sample_actions, seq_lengths=sample_seq_lens)
+                attn_fracs = {f"layer_{li}": v for li, v in layer_fracs.items()}
+                vis_mean = sum(v["vision"] for v in layer_fracs.values()) / max(len(layer_fracs), 1)
+                act_mean = sum(v["action"] for v in layer_fracs.values()) / max(len(layer_fracs), 1)
+                print(f"    CLS attn → vision: {vis_mean:.1%}  action: {act_mean:.1%}")
+            except Exception:
+                pass  # non-critical; skip if anything fails
 
         # Build per-class metrics dict
         per_class_train = {}
@@ -840,7 +1042,7 @@ def main(args):
                 'verb_to_id': dataset.verb_to_id,
                 'id_to_verb': dataset.id_to_verb,
                 'd_model': args.d_model,
-                'action_dim': ACTION_DIM,
+                'action_dim': action_dim,
                 'nhead': NHEAD,
                 'num_layers': args.num_layers,
                 'patch_size': PATCH_SIZE,
@@ -858,6 +1060,7 @@ def main(args):
                 'vqvae_chunk_size': vqvae_chunk_size,
                 'modal_dropout': args.modal_dropout,
                 'aux_loss_weight': args.aux_loss_weight,
+                'scene_dim': scene_dim,
                 'best_val_acc': best_val_acc,
                 'best_epoch': best_epoch,
             }
@@ -874,6 +1077,7 @@ def main(args):
             "train_acc": train_acc,
             "val_loss": val_avg,
             "val_acc": val_acc,
+            "attn_fracs": attn_fracs,
             "per_class_train": per_class_train,
             "per_class_val": per_class_val,
         }
@@ -905,7 +1109,7 @@ def main(args):
             'verb_to_id': dataset.verb_to_id,
             'id_to_verb': dataset.id_to_verb,
             'd_model': args.d_model,
-            'action_dim': ACTION_DIM,
+            'action_dim': action_dim,
             'nhead': NHEAD,
             'num_layers': args.num_layers,
             'patch_size': PATCH_SIZE,
@@ -923,6 +1127,7 @@ def main(args):
             'vqvae_chunk_size': vqvae_chunk_size,
             'modal_dropout': args.modal_dropout,
             'aux_loss_weight': args.aux_loss_weight,
+            'scene_dim': scene_dim,
         }
         torch.save(checkpoint, args.save_path)
         print(f"\nCheckpoint saved to {args.save_path}")
@@ -948,7 +1153,10 @@ if __name__ == "__main__":
     parser.add_argument("--debug", type=int, default=0, metavar="N",
                         help="Debug mode: use only N samples for quick smoke testing")
     parser.add_argument("--modality", type=str, default="full",
-                        choices=["full", "action_only", "vision_only"],
+                        choices=["full", "action_only", "vision_only",
+                                 "scene_obs", "robot_obs",
+                                 "scene_token", "scene_concat", "scene_film",
+                                 "scene_mlp"],
                         help="Which input modalities to use")
     parser.add_argument("--action_rep", type=str, default="native",
                         choices=["native", "fast", "quest", "oat", "bin", "vq_vae", "vqvla"],

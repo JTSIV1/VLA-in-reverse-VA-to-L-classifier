@@ -19,12 +19,17 @@ from config import (
     OAT_NUM_REGISTERS,
 )  # from the file above
 
-from oat.tokenizer.quest.tokenizer import QueSTTok
-from oat.tokenizer.oat.tokenizer import OATTok
-from oat.tokenizer.oat.encoder.register_encoder import RegisterEncoder
-from oat.tokenizer.oat.decoder.single_pass_decoder import SinglePassDecoder
-from oat.tokenizer.oat.quantizer.fsq import FSQ
-from oat.model.common.normalizer import LinearNormalizer
+# QueST / OAT imports are heavy (require zarr, vector_quantize_pytorch); import lazily
+def _import_quest():
+    from oat.tokenizer.quest.tokenizer import QueSTTok
+    return QueSTTok
+
+def _import_oat():
+    from oat.tokenizer.oat.tokenizer import OATTok
+    from oat.tokenizer.oat.encoder.register_encoder import RegisterEncoder
+    from oat.tokenizer.oat.decoder.single_pass_decoder import SinglePassDecoder
+    from oat.tokenizer.oat.quantizer.fsq import FSQ
+    return OATTok, RegisterEncoder, SinglePassDecoder, FSQ
 
 
 def fit_calvin_normalizer(data_dir, max_trajs=None):
@@ -39,6 +44,7 @@ def fit_calvin_normalizer(data_dir, max_trajs=None):
     actions_t = torch.from_numpy(all_actions)
 
     print("Fitting normalizer...")
+    from oat.model.common.normalizer import LinearNormalizer
     normalizer = LinearNormalizer()
     normalizer.fit({"action": actions_t}, last_n_dims=1, mode="limits", output_min=-1.0, output_max=1.0)
     return normalizer
@@ -77,6 +83,7 @@ class CalvinActionChunkDataset(Dataset):
 
 
 def build_oat(horizon):
+    OATTok, RegisterEncoder, SinglePassDecoder, FSQ = _import_oat()
     levels = [8, 5, 5, 5]
     latent_dim = len(levels)
     num_registers = OAT_NUM_REGISTERS
@@ -104,6 +111,7 @@ def train_tokenizer(kind, data_dir, out_path, normalizer, horizon=TOKENIZER_HORI
     dl = DataLoader(ds, batch_size=batch, shuffle=True, num_workers=4, drop_last=True)
 
     if kind == "quest":
+        QueSTTok = _import_quest()
         tok = QueSTTok(action_dim=ACTION_DIM, horizon=horizon, vq_type="fsq", fsq_level=[8,5,5,5], downsample_factor=TOKENIZER_DOWNSAMPLE_FACTOR)
     else:
         tok = build_oat(horizon)
@@ -151,4 +159,5 @@ if __name__ == "__main__":
         args.out = QUEST_TOKENIZER_CKPT if args.kind == "quest" else OAT_TOKENIZER_CKPT
         os.makedirs(os.path.dirname(args.out), exist_ok=True)
 
-    train_tokenizer(args.kind, args.data_dir, args.out, args.horizon, args.batch, args.epochs, args.lr, args.max_trajs)
+    normalizer = fit_calvin_normalizer(args.data_dir, max_trajs=args.max_trajs)
+    train_tokenizer(args.kind, args.data_dir, args.out, normalizer, args.horizon, args.batch, args.epochs, args.lr, args.max_trajs)

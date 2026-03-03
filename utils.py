@@ -19,6 +19,7 @@ except OSError:
     nlp = spacy.load(SPACY_MODEL)
 
 DIRECTION_WORDS = {"left", "right"}
+DISCOURSE_VERBS = {"go", "let"}  # imperative prefixes: "go close X", "let X"
 
 def extract_verb(text):
     """Extracts verbs and their particles (e.g. 'pick up') from text."""
@@ -29,9 +30,22 @@ def extract_verb(text):
         if token.pos_ == "VERB" and (token.dep_ in ("ROOT", "conj", "xcomp", "advcl")):
             if token.text in DIRECTION_WORDS:
                 continue
+            if token.text in DISCOURSE_VERBS:
+                continue
             parts = [t.text for t in token.children if t.dep_ == "prt"]
             full_verb = " ".join([token.text] + parts)
             actions.append(full_verb)
+
+    # Fallback: if "go" was skipped as ROOT and nothing else was found,
+    # look for the next word that acts as the real verb
+    if not actions:
+        for token in doc:
+            if token.pos_ in ("VERB", "ADJ", "ADV") and token.i > 0 and doc[0].text in DISCOURSE_VERBS:
+                if token.text not in DIRECTION_WORDS and token.text not in DISCOURSE_VERBS:
+                    parts = [t.text for t in token.children if t.dep_ == "prt"]
+                    full_verb = " ".join([token.text] + parts)
+                    actions.append(full_verb)
+                    break
 
     return actions
 

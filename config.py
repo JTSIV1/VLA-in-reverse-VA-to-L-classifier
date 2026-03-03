@@ -22,6 +22,7 @@ EPISODE_TEMPLATE = "episode_{:07d}.npz"
 ACTION_DIM = 7
 SCENE_OBS_DIM = 24
 ROBOT_OBS_DIM = 15
+SCENE_REP_DIM = SCENE_OBS_DIM * 2  # 48 (delta_start = [start, delta])
 D_MODEL = 128          # 128 / 8 heads = 16 dims per head (64 was too small at 8 dims/head)
 NHEAD = 8
 NUM_LAYERS = 4
