@@ -1,3 +1,11 @@
+"""CALVIN data loading and NLP utilities.
+
+- load_calvin_to_dataframe(): scan CALVIN .npz episodes, extract language
+  annotations, pair each instruction with (start_idx, end_idx, action_id)
+- Verb extraction via spaCy (en_core_web_sm): filters multi-verb sentences,
+  removes directional words, handles "turn on"/"turn off" as compound verbs
+- Sparse class filtering and label encoding
+"""
 import os
 import spacy
 import numpy as np

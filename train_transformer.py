@@ -1,3 +1,17 @@
+"""Train a Transformer verb classifier on CALVIN manipulation trajectories.
+
+Model: ActionToVerbTransformer — multimodal Transformer that fuses action
+trajectories with vision (delta patches from VC-1 or DINOv2-S) via late
+cross-attention. Classifies into 21 verb classes from [CLS] token output.
+
+Dataset: CalvinVerbDataset — loads (image, action, verb_label) triples from
+CALVIN .npz episodes, with support for multiple action tokenizations and
+vision encoders.
+
+Usage:
+    python train_transformer.py --modality full --action_rep native \\
+        --vision_encoder vc1 --cross_layers 2 --min_class_count 30 --weighted_loss
+"""
 import os
 import json
 import argparse
@@ -32,7 +46,7 @@ from config import (
     TOKENIZER_HORIZON,
     TOKENIZER_FIT_NORM_MAX_TRAJS,
 )
-from action_tokenizers import load_action_tokenizer
+from tokenization.action_tokenizers import load_action_tokenizer
 
 
 
@@ -656,7 +670,7 @@ class CalvinVerbDataset(Dataset):
                 action_real_len = min(L_tok, self.max_seq_len)
             elif self.vqvla_tokenizer is not None:
                 # VQ-VLA tokenization: (T, 7) → (T//8)*4 int64 codes (~28 for T=61)
-                from vqvae_tokenizer import tokenize_trajectory_vqvla
+                from tokenization.vqvae_tokenizer import tokenize_trajectory_vqvla
                 token_ids = tokenize_trajectory_vqvla(
                     self.vqvla_tokenizer, actions).tolist()
                 L_tok = len(token_ids)  # always 4
@@ -734,7 +748,7 @@ def main(args):
     action_vocab_size = None  # native doesn't use a vocab
     if args.action_rep == "fast":
         # Use local vendored fast_tokenizer (Python 3.9 compatible, locally fitted BPE)
-        from fast_tokenizer import load_fast_tokenizer, tokenize_trajectory
+        from tokenization.fast_tokenizer import load_fast_tokenizer, tokenize_trajectory
         _fast_tok = load_fast_tokenizer(args.fast_tokenizer_path)
         action_vocab_size = _fast_tok.vocab_size
         # Wrap to match action_tokenizer interface: (1, T, 7) → [[int, ...]]
@@ -756,18 +770,18 @@ def main(args):
         action_vocab_size = tok.vocab_size
         print(f"Loaded {args.action_rep} tokenizer (vocab_size={action_vocab_size})")
     elif args.action_rep == "vq_vae":
-        from vqvae_tokenizer import load_vqvae_tokenizer
+        from tokenization.vqvae_tokenizer import load_vqvae_tokenizer
         _vq = load_vqvae_tokenizer(args.vqvae_tokenizer_path)
         # Wrap as an action_tokenizer-compatible callable
         from functools import partial
-        from vqvae_tokenizer import tokenize_trajectory_vqvae
+        from tokenization.vqvae_tokenizer import tokenize_trajectory_vqvae
         tok = partial(tokenize_trajectory_vqvae, _vq)
         tok.vocab_size = _vq.num_codes
         action_vocab_size = _vq.num_codes
         print(f"Loaded VQ-VAE tokenizer from {args.vqvae_tokenizer_path} "
               f"(num_codes={action_vocab_size}, chunk_size={_vq.chunk_size})")
     elif args.action_rep == "vqvla":
-        from vqvae_tokenizer import load_vqvla_tokenizer, VQVLA_VOCAB_SIZE
+        from tokenization.vqvae_tokenizer import load_vqvla_tokenizer, VQVLA_VOCAB_SIZE
         vqvla_tok = load_vqvla_tokenizer(
             config_dir=args.vqvla_config_dir,
             checkpoint_path=args.vqvla_checkpoint_path)
@@ -1169,7 +1183,7 @@ if __name__ == "__main__":
                         help="Path to fitted VQ-VAE tokenizer")
     parser.add_argument("--vqvae_chunk_size", type=int, default=4,
                         help="Chunk size K used when fitting the VQ-VAE tokenizer")
-    parser.add_argument("--vqvla_config_dir", type=str, default="./vqvla_config",
+    parser.add_argument("--vqvla_config_dir", type=str, default="./vqvla/config",
                         help="Directory containing VQ-VLA config.json")
     parser.add_argument("--vqvla_checkpoint_path", type=str,
                         default="./checkpoints/vqvla_pretrained/action_tokenizer_weight/all_data_vq.pth",

@@ -52,11 +52,18 @@ success rate over 1000 chained tasks.
 
 ## Data
 
-- **CALVIN split D** (`task_D_D`): ~3,300 annotated trajectories with language
-  instructions, RGB observations, and 7-DoF actions
-- **Full CALVIN** (`task_ABCD_D`): ~24k trajectories for larger-scale experiments
+All experiments use **CALVIN split D** (`task_D_D`) only:
+- ~3,300 annotated trajectories with language instructions, RGB observations,
+  and 7-DoF actions
+- Train/val split provided by CALVIN (training/ and validation/ subdirectories)
+- Both stages train on D-train, evaluate on D-val
 - CALVIN data must be converted to **RLDS format** (TFRecord-based) for
   OpenVLA-mini's data pipeline
+
+**Note on data overlap**: Stage 1 (tokenizer) and Stage 2 (VLA) both use
+D-train. This is acceptable because the tokenizer is frozen before VLA training
+and the VLA never sees verb labels — analogous to how pretrained word embeddings
+are trained on the same corpus as downstream models.
 
 ## Architecture
 
@@ -80,7 +87,7 @@ success rate over 1000 chained tasks.
 - Decoder: 4-block causal conv (mirrored)
 - Temporal embeddings: action-type PE + time PE
 - Pretrained checkpoint: `checkpoints/vqvla_pretrained/action_tokenizer_weight/all_data_vq.pth`
-- Config: `vqvla_config/config_action_type_pe_time_pe.json`
+- Config: `vqvla/config/config_action_type_pe_time_pe.json`
 
 ### MiniVLA specs
 - Vision: DINOv2 + SigLIP fused backbone (224px)
@@ -105,8 +112,8 @@ openvla_experiment/
 ```
 
 ### Shared infrastructure (in parent directory)
-- `vqvla/` -- VQ-VLA model architecture (vendored from VQ-VLA repo)
-- `vqvla_config/` -- VQ-VLA model configs
+- `vqvla/` -- VQ-VLA model architecture + configs (vendored from VQ-VLA repo)
+- `tokenization/` -- Action tokenizer modules (FAST, VQ-VAE, etc.)
 - `config.py` -- CALVIN data paths
 - `utils.py` -- Language annotation loading + verb extraction
 
@@ -115,8 +122,8 @@ openvla_experiment/
 | Step | Script | Compute | Notes |
 |------|--------|---------|-------|
 | 0. Convert CALVIN D → RLDS | `calvin_to_rlds.py` | CPU, ~30 min | One-time |
-| 1a. Fine-tune VQ-VLA (vanilla, control) | `finetune_tokenizer.py` | 1 GPU, ~1-2h | recon + vq only (lambda=0) |
-| 1b. Fine-tune VQ-VLA (verb-decodable) | `finetune_tokenizer.py` | 1 GPU, ~1-2h | recon + vq + lambda*verb_CE |
+| 1a. Fine-tune VQ-VLA (vanilla, control) | `finetune_tokenizer.py` | 1 GPU, ~1-2h | recon + vq only (lambda=0), on D-train |
+| 1b. Fine-tune VQ-VLA (verb-decodable) | `finetune_tokenizer.py` | 1 GPU, ~1-2h | recon + vq + lambda*verb_CE, on D-train |
 | 2a. Fine-tune MiniVLA (vanilla tokenizer) | `finetune_vla.py` | 1-2 GPU, ~4-8h | LoRA on Qwen2.5-0.5B |
 | 2b. Fine-tune MiniVLA (verb tokenizer) | `finetune_vla.py` | 1-2 GPU, ~4-8h | Same hyperparams |
 | 3. Evaluate (teacher forcing) | `eval_teacher_forcing.py` | 1 GPU, ~30 min | Compare loss + token acc |

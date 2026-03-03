@@ -1,3 +1,14 @@
+"""Evaluate a trained verb classifier checkpoint.
+
+Loads a saved checkpoint, runs inference on the CALVIN validation set, and
+outputs: per-class precision/recall/F1, overall accuracy, macro/weighted F1,
+confusion matrix PNG, and metrics JSON. Modality and action_rep are read
+from the checkpoint metadata automatically.
+
+Usage:
+    python test_transformer.py --model_path ./checkpoints/model_best.pth \\
+        --save_cm ./figures/cm.png --save_metrics ./results/metrics.json
+"""
 import os
 import json
 import argparse
@@ -119,7 +130,7 @@ def main(args):
     action_tokenizer = None
     vqvla_tok = None
     if action_rep in ("bin", "quest", "oat"):
-        from action_tokenizers import load_action_tokenizer
+        from tokenization.action_tokenizers import load_action_tokenizer
         from config import (QUEST_TOKENIZER_CKPT, OAT_TOKENIZER_CKPT,
                             TOKENIZER_HORIZON, TOKENIZER_FIT_NORM_MAX_TRAJS)
         action_tokenizer = load_action_tokenizer(
@@ -130,11 +141,11 @@ def main(args):
         action_vocab_size = action_tokenizer.vocab_size
         print(f"Loaded {action_rep} tokenizer (vocab_size={action_vocab_size})")
     elif action_rep == "fast":
-        from fast_tokenizer import load_fast_tokenizer
+        from tokenization.fast_tokenizer import load_fast_tokenizer
         action_tokenizer = load_fast_tokenizer(args.fast_tokenizer_path)
         print(f"Loaded FAST tokenizer from {args.fast_tokenizer_path}")
     elif action_rep == "vq_vae":
-        from vqvae_tokenizer import load_vqvae_tokenizer, tokenize_trajectory_vqvae
+        from tokenization.vqvae_tokenizer import load_vqvae_tokenizer, tokenize_trajectory_vqvae
         from functools import partial
         _vq = load_vqvae_tokenizer(args.vqvae_tokenizer_path)
         action_tokenizer = partial(tokenize_trajectory_vqvae, _vq)
@@ -143,7 +154,7 @@ def main(args):
         print(f"Loaded VQ-VAE tokenizer from {args.vqvae_tokenizer_path} "
               f"(num_codes={action_vocab_size}, chunk_size={_vq.chunk_size})")
     elif action_rep == "vqvla":
-        from vqvae_tokenizer import load_vqvla_tokenizer, VQVLA_VOCAB_SIZE
+        from tokenization.vqvae_tokenizer import load_vqvla_tokenizer, VQVLA_VOCAB_SIZE
         vqvla_tok = load_vqvla_tokenizer(
             config_dir=args.vqvla_config_dir,
             checkpoint_path=args.vqvla_checkpoint_path)
@@ -339,7 +350,7 @@ if __name__ == "__main__":
                         help="Path to fitted VQ-VAE tokenizer")
     parser.add_argument("--vqvae_chunk_size", type=int, default=4,
                         help="Fallback chunk size if not in checkpoint")
-    parser.add_argument("--vqvla_config_dir", type=str, default="./vqvla_config",
+    parser.add_argument("--vqvla_config_dir", type=str, default="./vqvla/config",
                         help="Directory containing VQ-VLA config.json")
     parser.add_argument("--vqvla_checkpoint_path", type=str,
                         default="./checkpoints/vqvla_pretrained/action_tokenizer_weight/all_data_vq.pth",
