@@ -16,6 +16,7 @@ _actions_cache_*.npy
 # Training outputs
 checkpoints/
 logs/
+runs/
 
 # Large data files
 *.csv

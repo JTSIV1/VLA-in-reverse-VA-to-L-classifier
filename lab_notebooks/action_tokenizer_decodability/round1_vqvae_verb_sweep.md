@@ -86,24 +86,73 @@ All 50 epochs completed. Val verb accuracy tracked separately from train.
 
 ---
 
-## CALVIN → RLDS Conversion (for OpenVLA-mini)
+## Verb Decodability Probe (2026-03-05)
 
-| Job ID | Status | Output |
-|--------|--------|--------|
-| 6478945 | **Done** | `/data/user_data/wenjiel2/datasets/calvin_rlds/calvin_dataset/1.0.0/` |
+These probes only depend on VQ-VLA tokenizer checkpoints, not OpenVLA fine-tuning.
 
-- Train: 5124 episodes, 308918 steps, 62 shards
-- Val: 1011 episodes, 60575 steps, 13 shards
-- Format: TFRecord (RLDS), fields: `observation/image`, `observation/wrist_image`, `observation/state`, `action`, `language_instruction`, `discount`, `reward`, `is_first`, `is_last`, `is_terminal`
-- Next: register dataset in OpenVLA-mini configs and write fine-tuning script
+### Original Probe (round-trip, superseded)
+
+Ground-truth val trajectories encoded → tokenizer → decoded → pre-trained verb classifier
+(trained on native continuous actions). 653 val samples, 21 sparse classes.
+
+| Condition | Verb Acc | Macro F1 |
+|-----------|----------|----------|
+| Bin (256 bins) | **40.4%** | **37.0%** |
+| VQ vanilla (λ=0) | 37.8% | 35.8% |
+| VQ verb-decodable (λ=0.5) | 40.3% | 34.6% |
+
+**Why this is flawed**: the classifier was trained on native continuous actions, biased toward
+lossless tokenizers. The round-trip feeds reconstructed actions to a mismatched classifier distribution.
+
+### Redesigned Probe: four levels along the pipeline
+
+Each level tests verb decodability at a different point, from the tokenizer output to the final VLA behavior.
+
+**Level 1 — z_q latent probe** *(this round)*: classify on sequences of quantized latent vectors (128-d per 5-step chunk, continuous). Measures whether verb CE moved the VQ latent space into verb-separable positions.
+
+**Level 2 — token ID probe** *(this round)*: classify on sequences of discrete code indices (integer in [0,255] per group). Measures whether discrete token assignments are verb-separable — the exact quantity the LLM sees. Key insight: verb CE operates on z_q (differentiable via straight-through estimator), but the argmin z → token ID is not differentiable. Verb-separable z_q does not guarantee verb-separable token IDs. The gap `Level 1 − Level 2` directly measures quantization information loss.
+
+**Level 3 — LLM action token embedding probe** *(round 2, after VLA fine-tuning)*: extract the fine-tuned LLM's embedding vectors for each action token ID seen in CALVIN, train a classifier on those embeddings. Measures whether the LLM learned verb-clustered representations for action tokens during fine-tuning. If verb-structured tokenization works end-to-end, action token embeddings should cluster by verb class.
+
+**Level 4 — VLA behavior** *(round 2, after VLA fine-tuning)*: (a) continuous L1 loss under teacher-forcing on val split; (b) rollout task success rate (SR1–SR5, avg length) on CALVIN. The gold standard — does verb-structured tokenization actually improve policy performance?
+
+Script (Levels 1 & 2): `openvla_experiment/scripts/train_verb_probe_vq.py`
+
+For Levels 1 & 2, `latent_dim` and probe architecture differ by condition:
+- **VQ conditions**: L1 probe inputs are z_q vectors (128-d per chunk); L2 inputs are code IDs [0,255], 4 groups, embedding lookup.
+- **Bin condition**: L1 probe inputs are raw continuous actions (7-d per timestep); L2 inputs are per-dim 256-bin IDs, embedding lookup.
+
+| Condition | Level 1 acc ↑ | Level 2 acc ↑ | Quant. loss (L1−L2) ↓ |
+|-----------|--------------|---------------|----------------------|
+| bin (job 6502775) | 42.84% | 37.81% | **5.03pp** |
+| vq_vanilla (job 6502503) | 37.22% | 41.51% | −4.29pp |
+| vq_verb λ=0.1 (job 6502611) | 43.72% | 42.54% | 1.18pp |
+| vq_verb λ=0.5 (job 6502504) | **45.79%** | **43.72%** | 2.07pp |
+| **Δ vq_verb λ=0.5 − vq_vanilla** | **+8.57pp** | **+2.21pp** | |
+
+**Key findings:**
+
+1. **Verb CE strongly improves z_q verb decodability** (+8.6pp at Level 1 vs vq_vanilla). The verb classification loss successfully clusters quantized latents by verb class.
+
+2. **Quantization erodes the gain** (8.6pp at L1 → 2.2pp at L2). The argmin step (z → token ID) loses most of the verb structure that verb CE built into z_q. The quantization loss for vq_verb (L1−L2 = 2.07pp) shows verb information only partially survives into token IDs.
+
+3. **Vanilla: L1−L2 is negative (−4.29pp)**. The token ID probe achieves *higher* accuracy than the z_q latent probe for vanilla. The token ID probe uses 4 separate embedding tables (one per RVQ group), which can learn "group k, code c → verb v" associations more directly than regressing on continuous 128-d z_q vectors. Vanilla's codebook has consistent group-code→verb associations even without explicit verb training.
+
+4. **Bin has the largest quantization loss (5.03pp)**. Despite being a "lossless" quantizer (only rounding error), bin token IDs lose more verb info than VQ codes at L2. The L2 bin probe severely overfits (99% train, ~36% val) — the 256-bin ID space is too high-dimensional and sparse for the embedding probe to generalize. VQ codes benefit from structured learned codebooks that cluster semantically similar actions.
+
+5. **Net effect at token level is small** (2.2pp for vq_verb). The LLM only sees token IDs, so this is the effective ceiling for language grounding via tokenizer choice alone. Bin token IDs actually carry *less* verb info than vq_verb at L2 (37.81% vs 43.72%), despite bin L1 being competitive (42.84% vs 45.79%).
+
+Levels 3 & 4 results → see `round2_openvla_finetune.md`.
 
 ---
 
 ## Next Steps
 
 - [x] Collect final results from resubmitted lambda=0.01/0.05/0.1 jobs
-- [ ] (Optional) Resubmit lambda=0.01 with 4h to get final ep200 number
-- [ ] Plot lambda vs (recon, verb_acc, codebook_utilization) sweep curve for both VQ-VAE and VQ-VLA
-- [ ] Register calvin_dataset in OpenVLA-mini's `configs.py`, `transforms.py`, `mixtures.py`
-- [ ] Write OpenVLA-mini fine-tuning script (Stage 2): fine-tune with verb-decodable vs vanilla tokenizer
-- [ ] Write teacher-forcing evaluation script (Stage 3): compare action prediction quality
+- [x] Register calvin_dataset in OpenVLA-mini and write fine-tuning scripts (Stage 2)
+- [x] Fill in verb probe Level 1 & 2 results — all four conditions DONE (jobs 6502503, 6502504, 6502611, 6502775)
+- [x] Bin verb probe (job 6502775): L1=42.84%, L2=37.81%, quant loss=5.03pp
+- [ ] Interpret quantization gap: bin has largest loss (5.03pp); vq_verb lowest (2.07pp)
+- [ ] Level 3 (LLM action token embedding probe) → round 2, after VLA fine-tuning
+- [ ] Level 4 (L1 loss + rollout task success) → round 2, after VLA fine-tuning
+- See `round2_openvla_finetune.md` for OpenVLA fine-tuning and Levels 3 & 4 results

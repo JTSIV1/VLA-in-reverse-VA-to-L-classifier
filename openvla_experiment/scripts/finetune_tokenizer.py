@@ -22,6 +22,7 @@ Outputs:
     checkpoints/vqvla_ft_{tag}/full.pth  -- Full checkpoint (VQ-VLA + verb head + optimizer)
 """
 
+import csv
 import os
 import sys
 import json
@@ -168,7 +169,7 @@ def forward_vqvla(vqvae, windows_batch, n_windows_batch, device):
 
 
 def train_epoch(vqvae, verb_head, loader, optimizer, verb_criterion,
-                verb_loss_weight, device):
+                verb_loss_weight, device, max_grad_norm=1.0):
     vqvae.train()
     if verb_head is not None:
         verb_head.train()
@@ -194,6 +195,11 @@ def train_epoch(vqvae, verb_head, loader, optimizer, verb_criterion,
 
         optimizer.zero_grad()
         loss.backward()
+        if max_grad_norm > 0:
+            all_params = list(vqvae.parameters())
+            if verb_head is not None:
+                all_params += list(verb_head.parameters())
+            torch.nn.utils.clip_grad_norm_(all_params, max_grad_norm)
         optimizer.step()
 
         total_recon += result['recon_loss'].item()
@@ -279,6 +285,10 @@ def main():
     parser.add_argument("--min_class_count", type=int, default=30)
     parser.add_argument("--weighted_verb_loss", action="store_true",
                         default=True)
+    parser.add_argument("--max_grad_norm", type=float, default=1.0,
+                        help="Max gradient norm for clipping (0 = disabled)")
+    parser.add_argument("--patience", type=int, default=0,
+                        help="Early stopping patience in epochs (0 = disabled)")
     # Output
     parser.add_argument("--save_dir", type=str,
                         default="./checkpoints")
@@ -367,6 +377,16 @@ def main():
     best_val_metric = float('inf')  # Track best val recon (or verb loss)
     best_verb_acc = 0.0
 
+    # CSV logging
+    csv_path = os.path.join(save_dir, "metrics.csv")
+    csv_file = open(csv_path, "w", newline="")
+    csv_writer = csv.writer(csv_file)
+    csv_header = ["epoch", "train_recon", "train_vq", "train_verb", "train_verb_acc",
+                  "val_recon", "val_vq", "val_verb", "val_verb_acc", "codebook_used", "lr"]
+    csv_writer.writerow(csv_header)
+
+    patience_counter = 0
+
     print("\nTraining for {} epochs (lambda={})".format(
         args.epochs, args.verb_loss_weight))
     print("Save dir: {}".format(save_dir))
@@ -375,7 +395,7 @@ def main():
     for epoch in range(args.epochs):
         train_metrics = train_epoch(
             vqvae, verb_head, train_loader, optimizer, verb_criterion,
-            args.verb_loss_weight, device)
+            args.verb_loss_weight, device, max_grad_norm=args.max_grad_norm)
         scheduler.step()
 
         val_metrics = eval_epoch(
@@ -408,6 +428,7 @@ def main():
                 best_val_metric = val_metrics['recon']
 
         if is_best:
+            patience_counter = 0
             # Save VQ-VLA inner model weights (compatible with get_code / decode)
             torch.save(vqvae.state_dict(),
                        os.path.join(save_dir, "vqvla_weights.pth"))
@@ -427,6 +448,33 @@ def main():
                 full_ckpt['verb_head_state_dict'] = verb_head.state_dict()
             torch.save(full_ckpt, os.path.join(save_dir, "full.pth"))
             print("  -> Saved best checkpoint (epoch {})".format(epoch + 1))
+        else:
+            patience_counter += 1
+
+        # CSV logging
+        current_lr = optimizer.param_groups[0]['lr']
+        csv_writer.writerow([
+            epoch + 1,
+            "{:.6f}".format(train_metrics['recon']),
+            "{:.6f}".format(train_metrics['vq']),
+            "{:.6f}".format(train_metrics['verb']),
+            "{:.2f}".format(train_metrics['verb_acc']),
+            "{:.6f}".format(val_metrics['recon']),
+            "{:.6f}".format(val_metrics['vq']),
+            "{:.6f}".format(val_metrics['verb']),
+            "{:.2f}".format(val_metrics['verb_acc']),
+            val_metrics['codebook_used'],
+            "{:.8f}".format(current_lr),
+        ])
+        csv_file.flush()
+
+        # Early stopping
+        if args.patience > 0 and patience_counter >= args.patience:
+            print("Early stopping at epoch {} ({} epochs without improvement)".format(
+                epoch + 1, patience_counter))
+            break
+
+    csv_file.close()
 
     # Save config
     config = {
