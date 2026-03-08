@@ -23,16 +23,16 @@ ACTION_DIM = 7
 SCENE_OBS_DIM = 24
 ROBOT_OBS_DIM = 15
 SCENE_REP_DIM = SCENE_OBS_DIM * 2  # 48 (delta_start = [start, delta])
-D_MODEL = 128          # 128 / 8 heads = 16 dims per head (64 was too small at 8 dims/head)
+D_MODEL = 128  # 128 / 8 heads = 16 dims per head (64 was too small at 8 dims/head)
 NHEAD = 8
 NUM_LAYERS = 4
 CROSS_LAYERS = NUM_LAYERS  # how many final layers use cross-modal attention (= NUM_LAYERS means early fusion)
 DROPOUT_RATE = 0.1
-PATCH_SIZE = 25        # 200/25 = 8x8 = 64 patches per image, balances with ~64-step actions
+PATCH_SIZE = 25  # 200/25 = 8x8 = 64 patches per image, balances with ~64-step actions
 IMAGE_ENCODER = "scratch"  # "scratch" | "resnet18" | "dinov2" | "r3m"
 
 # ─── Image preprocessing ─────────────────────────────────────────────────────
-IMAGE_SIZE = (200, 200) # native CALVIN resolution, no unnecessary upscale
+IMAGE_SIZE = (200, 200)  # native CALVIN resolution, no unnecessary upscale
 IMG_MEAN = [0.485, 0.456, 0.406]
 IMG_STD = [0.229, 0.224, 0.225]
 
@@ -59,10 +59,12 @@ VQVAE_VOCAB_SIZE = 512
 CHECKPOINT_DIR = "./checkpoints"
 QUEST_TOKENIZER_CKPT = "./checkpoints/quest_tokenizer"
 OAT_TOKENIZER_CKPT = "./checkpoints/oat_tokenizer"
-TOKENIZER_HORIZON = 32          # action chunk length (matches oat/config train_questtok.yaml)
-TOKENIZER_DOWNSAMPLE_FACTOR = 4 # QueST temporal downsampling (horizon 32 → 8 latent tokens)
+TOKENIZER_HORIZON = 32  # action chunk length (matches oat/config train_questtok.yaml)
+TOKENIZER_DOWNSAMPLE_FACTOR = (
+    4  # QueST temporal downsampling (horizon 32 → 8 latent tokens)
+)
 TOKENIZER_FIT_NORM_MAX_TRAJS = 1000  # max trajectories used to fit action normalizer
-OAT_NUM_REGISTERS = 8           # OAT register tokens (matches oat/config train_oattok.yaml)
+OAT_NUM_REGISTERS = 8  # OAT register tokens (matches oat/config train_oattok.yaml)
 
 # ─── NLP ──────────────────────────────────────────────────────────────────────
 SPACY_MODEL = "en_core_web_sm"
