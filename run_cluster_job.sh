@@ -15,6 +15,7 @@
 #   DELTA_PATCHES  : int  (default: 16, for images)
 #   CLUSTER_METHOD : kmeans | agglomerative  (default: kmeans)
 #   USE_PCA        : 1 | 0  (default: 1 — cluster on 99%-PCA features)
+#   PCA_COMPONENTS : int  (default: 0 — use 99% threshold; set to e.g. 10, 50)
 
 set -euo pipefail
 
@@ -28,8 +29,11 @@ conda activate base
 FEATURE_SOURCE="${FEATURE_SOURCE:-actions}"
 CLUSTER_METHOD="${CLUSTER_METHOD:-kmeans}"
 USE_PCA="${USE_PCA:-1}"
+PCA_COMPONENTS="${PCA_COMPONENTS:-0}"
 PCA_FLAG="--use_pca"
 [[ "${USE_PCA}" == "0" ]] && PCA_FLAG="--no_use_pca"
+PCA_COMP_FLAG=""
+[[ "${PCA_COMPONENTS}" != "0" ]] && PCA_COMP_FLAG="--pca_components ${PCA_COMPONENTS}"
 
 echo "===== Cluster Job: FEATURE_SOURCE=${FEATURE_SOURCE} ====="
 echo "Job ID: $SLURM_JOB_ID  Node: $(hostname)"
@@ -50,7 +54,7 @@ if [[ "${FEATURE_SOURCE}" == "images" ]]; then
         --batch_size "${BATCH_SIZE}" \
         --out_dir "${OUT_DIR}" \
         --cluster_method "${CLUSTER_METHOD}" \
-        ${PCA_FLAG}
+        ${PCA_FLAG} ${PCA_COMP_FLAG}
 
 elif [[ "${ACTION_REP:-native}" == "fast" ]]; then
     echo ">>> Fitting FAST tokenizer (vocab=${VOCAB_SIZE}, scale=${SCALE}) ..."
@@ -69,7 +73,7 @@ elif [[ "${ACTION_REP:-native}" == "fast" ]]; then
         --scale "${SCALE}" \
         --tokenizer_path "${TOKENIZER_PATH}" \
         --cluster_method "${CLUSTER_METHOD}" \
-        ${PCA_FLAG}
+        ${PCA_FLAG} ${PCA_COMP_FLAG}
 else
     ACTION_REP="${ACTION_REP:-native}"
     echo ">>> Running cluster analysis (${ACTION_REP}, method=${CLUSTER_METHOD}, pca=${USE_PCA}) ..."
@@ -79,7 +83,7 @@ else
         --out_dir "${OUT_DIR}" \
         --action_rep "${ACTION_REP}" \
         --cluster_method "${CLUSTER_METHOD}" \
-        ${PCA_FLAG}
+        ${PCA_FLAG} ${PCA_COMP_FLAG}
 fi
 
 echo "===== Done ====="

@@ -306,19 +306,44 @@ def run_pca(features, verb_labels, out_dir, prefix="native"):
     scaler = StandardScaler()
     scaled_features = scaler.fit_transform(features)
 
-    # Check components needed for 99% variance AND project into that subspace
-    print("Computing PCA components needed for 99% variance...")
-    pca_99 = PCA(n_components=0.99, svd_solver="full")
-    pca_99_features = pca_99.fit_transform(scaled_features)
-    comps_99 = pca_99.n_components_
-    print(f"PCA components needed for 99% variance: {comps_99}")
+    # Full PCA to get cumulative explained variance
+    print("Computing full PCA for variance analysis...")
+    max_comps = min(scaled_features.shape[0], scaled_features.shape[1])
+    pca_full = PCA(n_components=max_comps, svd_solver="full")
+    pca_full.fit(scaled_features)
+    cumvar = np.cumsum(pca_full.explained_variance_ratio_)
 
-    # 2D PCA for visualization
-    print("Computing 2D PCA for visualization...")
-    pca = PCA(n_components=2)
-    pca_2d = pca.fit_transform(scaled_features)
-    variance_2d = pca.explained_variance_ratio_.sum()
-    print(f"2D PCA explained variance: {variance_2d:.1%}")
+    # Components needed for X% variance
+    def comps_for_var(target):
+        idx = np.searchsorted(cumvar, target)
+        return int(idx + 1) if idx < len(cumvar) else int(len(cumvar))
+
+    comps_90 = comps_for_var(0.90)
+    comps_95 = comps_for_var(0.95)
+    comps_99 = comps_for_var(0.99)
+
+    # Variance explained by first K components
+    var_2 = float(cumvar[min(1, len(cumvar) - 1)])
+    var_5 = float(cumvar[min(4, len(cumvar) - 1)])
+    var_10 = float(cumvar[min(9, len(cumvar) - 1)])
+    var_25 = float(cumvar[min(24, len(cumvar) - 1)])
+    var_50 = float(cumvar[min(49, len(cumvar) - 1)])
+
+    print(f"  Components for 90% var: {comps_90}")
+    print(f"  Components for 95% var: {comps_95}")
+    print(f"  Components for 99% var: {comps_99}")
+    print(f"  Variance explained by 2 comps:  {var_2:.1%}")
+    print(f"  Variance explained by 5 comps:  {var_5:.1%}")
+    print(f"  Variance explained by 10 comps: {var_10:.1%}")
+    print(f"  Variance explained by 25 comps: {var_25:.1%}")
+    print(f"  Variance explained by 50 comps: {var_50:.1%}")
+
+    # Project into 99% subspace for clustering
+    pca_99_features = pca_full.transform(scaled_features)[:, :comps_99]
+
+    # 2D PCA for visualization (reuse first 2 components from full PCA)
+    pca_2d = pca_full.transform(scaled_features)[:, :2]
+    print(f"2D PCA explained variance: {var_2:.1%}")
 
     unique_verbs = sorted(set(verb_labels))
     cmap = plt.cm.get_cmap("tab20", len(unique_verbs))
@@ -346,8 +371,14 @@ def run_pca(features, verb_labels, out_dir, prefix="native"):
         unique_verbs,
         cmap,
         {
-            "variance_99_comps": int(comps_99) if comps_99 is not None else -1,
-            "variance_2d": float(variance_2d),
+            "variance_90_comps": comps_90,
+            "variance_95_comps": comps_95,
+            "variance_99_comps": comps_99,
+            "variance_top2": var_2,
+            "variance_top5": var_5,
+            "variance_top10": var_10,
+            "variance_top25": var_25,
+            "variance_top50": var_50,
         },
     )
 
@@ -508,10 +539,21 @@ def main():
         action="store_false",
         help="Cluster on raw StandardScaled features instead of PCA-projected",
     )
+    parser.add_argument(
+        "--pca_components",
+        type=int,
+        default=0,
+        help="Fixed number of PCA components for clustering (0 = use 99%% variance threshold)",
+    )
     args = parser.parse_args()
 
-    # Build structured output dir: <base>/<feature_source>/<pca_or_raw>/<cluster_method>/
-    pca_tag = "pca" if args.use_pca else "raw"
+    # Build structured output dir: <base>/<feature_source>/<pca_tag>/<cluster_method>/
+    if not args.use_pca:
+        pca_tag = "raw"
+    elif args.pca_components > 0:
+        pca_tag = f"pca{args.pca_components}"
+    else:
+        pca_tag = "pca"
     run_out_dir = os.path.join(
         args.out_dir, args.feature_source, pca_tag, args.cluster_method
     )
@@ -581,9 +623,21 @@ def main():
     )
     print()
 
-    cluster_features = pca_99_features if args.use_pca else scaled_features
+    if not args.use_pca:
+        cluster_features = scaled_features
+        cluster_label = "raw scaled features"
+    elif args.pca_components > 0:
+        n_comp = min(args.pca_components, pca_99_features.shape[1])
+        # Reuse the full PCA projection, just take first N columns
+        # pca_99_features already contains up to comps_99 columns;
+        # if user wants more than comps_99, we use comps_99
+        cluster_features = pca_99_features[:, :n_comp]
+        cluster_label = f"PCA top-{n_comp} features"
+    else:
+        cluster_features = pca_99_features
+        cluster_label = "PCA-99% features"
     print(
-        f"Clustering on {'PCA-99% features' if args.use_pca else 'raw scaled features'} "
+        f"Clustering on {cluster_label} "
         f"(shape {cluster_features.shape}) with {args.cluster_method} ..."
     )
 
@@ -603,6 +657,7 @@ def main():
         "feature_source": args.feature_source,
         "cluster_method": args.cluster_method,
         "use_pca": args.use_pca,
+        "pca_components": args.pca_components if args.pca_components > 0 else None,
         "pca": pca_metrics,
         "clustering": cluster_metrics,
     }

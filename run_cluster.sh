@@ -13,6 +13,10 @@ CLUSTER_METHOD="${CLUSTER_METHOD:-kmeans}"
 #   images  → image-based clustering only  (6 jobs)
 #   all     → both action + image jobs      (23 jobs)
 RUN_MODE="${RUN_MODE:-all}"
+# ── SWITCH: PCA component counts to sweep (for use_pca=1) ──────────────────────
+#   "0"      → use 99% variance threshold
+#   "10 50"  → run for 10 and 50 components
+PCA_COMP_LIST="${PCA_COMP_LIST:-0}"
 # ─────────────────────────────────────────────────────────────────────────────
 
 set -euo pipefail
@@ -44,44 +48,43 @@ submit_gpu() {
 
 if [[ "${RUN_MODE}" == "actions" || "${RUN_MODE}" == "all" ]]; then
 
-# ── native ────────────────────────────────────────────────────────────────────
-submit "act-native" \
-    --export=ALL,FEATURE_SOURCE=actions,ACTION_REP=native,CLUSTER_METHOD=${CLUSTER_METHOD}
+for pca_comp in ${PCA_COMP_LIST}; do
+    PCA_SUFFIX=""
+    [[ "${pca_comp}" != "0" ]] && PCA_SUFFIX="-pca${pca_comp}"
 
-# ── bin ───────────────────────────────────────────────────────────────────────
-submit "act-bin" \
-    --export=ALL,FEATURE_SOURCE=actions,ACTION_REP=bin,CLUSTER_METHOD=${CLUSTER_METHOD}
+    echo ">>> Action jobs (PCA: ${pca_comp})"
 
-# ── quest ─────────────────────────────────────────────────────────────────────
-submit "act-quest" \
-    --export=ALL,FEATURE_SOURCE=actions,ACTION_REP=quest,CLUSTER_METHOD=${CLUSTER_METHOD}
+    # ── native ────────────────────────────────────────────────────────────────────
+    submit "act-native${PCA_SUFFIX}" \
+        --export=ALL,FEATURE_SOURCE=actions,ACTION_REP=native,CLUSTER_METHOD=${CLUSTER_METHOD},PCA_COMPONENTS=${pca_comp}
 
-# ── oat ───────────────────────────────────────────────────────────────────────
-submit "act-oat" \
-    --export=ALL,FEATURE_SOURCE=actions,ACTION_REP=oat,CLUSTER_METHOD=${CLUSTER_METHOD}
+    # ── bin ───────────────────────────────────────────────────────────────────────
+    submit "act-bin${PCA_SUFFIX}" \
+        --export=ALL,FEATURE_SOURCE=actions,ACTION_REP=bin,CLUSTER_METHOD=${CLUSTER_METHOD},PCA_COMPONENTS=${pca_comp}
 
-# ── FAST: valid (vocab, scale) pairs ─────────────────────────────────────────
-# scale=25 needs vocab>=512; scale=50 needs vocab>=1024.
-# Invalid combos (vocab too small for token range) are excluded.
-#
-#   vocab=256  → scale ∈ {1, 10}
-#   vocab=512  → scale ∈ {1, 10, 25}
-#   vocab=1024 → scale ∈ {1, 10, 25, 50}
-#   vocab=2048 → scale ∈ {1, 10, 25, 50}
+    # ── quest ─────────────────────────────────────────────────────────────────────
+    submit "act-quest${PCA_SUFFIX}" \
+        --export=ALL,FEATURE_SOURCE=actions,ACTION_REP=quest,CLUSTER_METHOD=${CLUSTER_METHOD},PCA_COMPONENTS=${pca_comp}
 
-for combo in \
-    "256 1" "256 10" \
-    "512 1" "512 10" "512 25" \
-    "1024 1" "1024 10" "1024 25" "1024 50" \
-    "2048 1" "2048 10" "2048 25" "2048 50"
-do
-    read -r vocab scale <<< "$combo"
-    tok_path="${CKPT_DIR}/fast_tokenizer_v${vocab}_s${scale}"
-    submit "act-fast_v${vocab}_s${scale}" \
-        --export=ALL,FEATURE_SOURCE=actions,ACTION_REP=fast,VOCAB_SIZE=${vocab},SCALE=${scale},TOKENIZER_PATH=${tok_path},CLUSTER_METHOD=${CLUSTER_METHOD}
+    # ── oat ───────────────────────────────────────────────────────────────────────
+    submit "act-oat${PCA_SUFFIX}" \
+        --export=ALL,FEATURE_SOURCE=actions,ACTION_REP=oat,CLUSTER_METHOD=${CLUSTER_METHOD},PCA_COMPONENTS=${pca_comp}
+
+    # ── FAST: valid (vocab, scale) pairs ─────────────────────────────────────────
+    for combo in \
+        "256 1" "256 10" \
+        "512 1" "512 10" "512 25" \
+        "1024 1" "1024 10" "1024 25" "1024 50" \
+        "2048 1" "2048 10" "2048 25" "2048 50"
+    do
+        read -r vocab scale <<< "$combo"
+        tok_path="${CKPT_DIR}/fast_tokenizer_v${vocab}_s${scale}"
+        submit "act-fast_v${vocab}_s${scale}${PCA_SUFFIX}" \
+            --export=ALL,FEATURE_SOURCE=actions,ACTION_REP=fast,VOCAB_SIZE=${vocab},SCALE=${scale},TOKENIZER_PATH=${tok_path},CLUSTER_METHOD=${CLUSTER_METHOD},PCA_COMPONENTS=${pca_comp}
+    done
 done
 
-echo "Action jobs submitted (4 base + 13 FAST = 17 jobs)."
+echo "Action jobs submitted for all PCA configs."
 
 fi  # end actions
 
@@ -89,19 +92,26 @@ if [[ "${RUN_MODE}" == "images" || "${RUN_MODE}" == "all" ]]; then
 
 DELTA_PATCHES="${DELTA_PATCHES:-16}"
 
-# Encoders that support delta patches
-for enc in resnet18 dinov2 dinov2_s dinov2_b vc1; do
-    submit_gpu "img-${enc}" \
-        --export=ALL,FEATURE_SOURCE=images,IMAGE_ENCODER=${enc},DELTA_PATCHES=${DELTA_PATCHES},CLUSTER_METHOD=${CLUSTER_METHOD}
+for pca_comp in ${PCA_COMP_LIST}; do
+    PCA_SUFFIX=""
+    [[ "${pca_comp}" != "0" ]] && PCA_SUFFIX="-pca${pca_comp}"
+
+    echo ">>> Image jobs (PCA: ${pca_comp})"
+
+    # Encoders that support delta patches
+    for enc in resnet18 dinov2 dinov2_s dinov2_b vc1; do
+        submit_gpu "img-${enc}${PCA_SUFFIX}" \
+            --export=ALL,FEATURE_SOURCE=images,IMAGE_ENCODER=${enc},DELTA_PATCHES=${DELTA_PATCHES},CLUSTER_METHOD=${CLUSTER_METHOD},PCA_COMPONENTS=${pca_comp}
+    done
+
+    # R3M: global vector — delta not meaningful, use full mode
+    submit_gpu "img-r3m${PCA_SUFFIX}" \
+        --export=ALL,FEATURE_SOURCE=images,IMAGE_ENCODER=r3m,DELTA_PATCHES=0,CLUSTER_METHOD=${CLUSTER_METHOD},PCA_COMPONENTS=${pca_comp}
 done
 
-# R3M: global vector — delta not meaningful, use full mode
-submit_gpu "img-r3m" \
-    --export=ALL,FEATURE_SOURCE=images,IMAGE_ENCODER=r3m,DELTA_PATCHES=0,CLUSTER_METHOD=${CLUSTER_METHOD}
-
-echo "Image jobs submitted (6 encoders)."
+echo "Image jobs submitted for all PCA configs."
 
 fi  # end images
 
 echo ""
-echo "Done. RUN_MODE=${RUN_MODE}. Monitor with: squeue -u \$USER"
+echo "Done. RUN_MODE=${RUN_MODE} PCA_COMP_LIST=\"${PCA_COMP_LIST}\". Monitor with: squeue -u \$USER"
