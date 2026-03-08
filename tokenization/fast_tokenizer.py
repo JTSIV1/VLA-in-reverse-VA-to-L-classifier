@@ -5,19 +5,25 @@ Implements the DCT + BPE pipeline from the FAST paper (arxiv 2501.09747),
 vendored locally to support Python 3.9 (the HuggingFace version uses 3.10+ syntax).
 
 Usage (standalone):
-    python fast_tokenizer.py --save_path ./checkpoints/fast_tokenizer
+    python -m tokenization.fast_tokenizer --save_path ./checkpoints/fast_tokenizer
 
 Usage (as module):
-    from fast_tokenizer import load_fast_tokenizer, tokenize_trajectory
+    from tokenization.fast_tokenizer import load_fast_tokenizer, tokenize_trajectory
     tok = load_fast_tokenizer("./checkpoints/fast_tokenizer")
     token_ids = tokenize_trajectory(tok, actions_np)  # (T, 7) -> list[int]
 """
 
 import os
+import sys
 import json
 import logging
 import argparse
 from typing import Optional, List
+
+# Ensure project root is on path for standalone execution
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
 
 import numpy as np
 from scipy.fft import dct, idct

@@ -14,10 +14,15 @@ LANG_ANNOTATIONS_SUBDIR = "lang_annotations"
 LANG_ANNOTATIONS_FILE = "auto_lang_ann.npy"
 IMAGE_KEY = "rgb_static"
 ACTION_KEY = "rel_actions"
+SCENE_OBS_KEY = "scene_obs"
+ROBOT_OBS_KEY = "robot_obs"
 EPISODE_TEMPLATE = "episode_{:07d}.npz"
 
 # ─── Model defaults ──────────────────────────────────────────────────────────
 ACTION_DIM = 7
+SCENE_OBS_DIM = 24
+ROBOT_OBS_DIM = 15
+SCENE_REP_DIM = SCENE_OBS_DIM * 2  # 48 (delta_start = [start, delta])
 D_MODEL = 128  # 128 / 8 heads = 16 dims per head (64 was too small at 8 dims/head)
 NHEAD = 8
 NUM_LAYERS = 4
@@ -47,13 +52,19 @@ R3M_VARIANT = "resnet50"  # resnet18 (512-d), resnet34 (512-d), resnet50 (2048-d
 # ─── Action tokenization ───────────────────────────────────────────────────────
 BINNING_VOCAB_SIZE = 1024
 FAST_TOKENIZER_PATH = "./checkpoints/fast_tokenizer"
+VQVAE_TOKENIZER_PATH = "./checkpoints/vqvae_tokenizer"
+VQVAE_VOCAB_SIZE = 512
+
+# QueST / OAT tokenizer checkpoints and shared hyperparameters
 CHECKPOINT_DIR = "./checkpoints"
-QUEST_TOKENIZER_CKPT = "./checkpoints/quest_tokenizer.pt"
-OAT_TOKENIZER_CKPT = "./checkpoints/oat_tokenizer.pt"
-TOKENIZER_HORIZON = 32  # action chunk length for QueST / OAT
-TOKENIZER_FIT_NORM_MAX_TRAJS = 2000
-TOKENIZER_DOWNSAMPLE_FACTOR = 4  # QueST temporal downsampling
-OAT_NUM_REGISTERS = 8  # OAT number of latent register tokens
+QUEST_TOKENIZER_CKPT = "./checkpoints/quest_tokenizer"
+OAT_TOKENIZER_CKPT = "./checkpoints/oat_tokenizer"
+TOKENIZER_HORIZON = 32  # action chunk length (matches oat/config train_questtok.yaml)
+TOKENIZER_DOWNSAMPLE_FACTOR = (
+    4  # QueST temporal downsampling (horizon 32 → 8 latent tokens)
+)
+TOKENIZER_FIT_NORM_MAX_TRAJS = 1000  # max trajectories used to fit action normalizer
+OAT_NUM_REGISTERS = 8  # OAT register tokens (matches oat/config train_oattok.yaml)
 
 # ─── NLP ──────────────────────────────────────────────────────────────────────
 SPACY_MODEL = "en_core_web_sm"

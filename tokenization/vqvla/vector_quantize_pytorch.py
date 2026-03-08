@@ -517,7 +517,7 @@ class EuclideanCodebook(Module):
         sample_codebook_temp=None,
         mask=None,
         freeze_codebook=False,
-        codebook_transform_fn: Callable | None = None,
+        codebook_transform_fn: Optional[Callable] = None,
     ):
         needs_codebook_dim = x.ndim < 4
         sample_codebook_temp = default(sample_codebook_temp, self.sample_codebook_temp)
@@ -743,7 +743,7 @@ class CosineSimCodebook(Module):
         sample_codebook_temp=None,
         mask=None,
         freeze_codebook=False,
-        codebook_transform_fn: Callable | None = None,
+        codebook_transform_fn: Optional[Callable] = None,
     ):
         needs_codebook_dim = x.ndim < 4
         sample_codebook_temp = default(sample_codebook_temp, self.sample_codebook_temp)
@@ -1060,7 +1060,7 @@ class VectorQuantize(Module):
         sample_codebook_temp=None,
         freeze_codebook=False,
         return_loss_breakdown=False,
-        codebook_transform_fn: Callable | None = None,
+        codebook_transform_fn: Optional[Callable] = None,
     ):
         orig_input = x
 

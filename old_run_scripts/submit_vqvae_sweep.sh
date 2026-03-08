@@ -31,7 +31,7 @@ for CHUNK_SIZE in 2 4 8; do
 source \$(conda info --base)/etc/profile.d/conda.sh
 conda activate mmml
 cd ${PROJECT_DIR}
-echo 'Fitting VQ-VAE: chunk_size=${CHUNK_SIZE}, num_codes=${NUM_CODES}'
+echo "Fitting VQ-VAE: chunk_size=${CHUNK_SIZE}, num_codes=${NUM_CODES}"
 python vqvae_tokenizer.py \
     --chunk_size ${CHUNK_SIZE} \
     --num_codes ${NUM_CODES} \

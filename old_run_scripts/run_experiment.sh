@@ -48,8 +48,8 @@ while [[ $# -gt 0 ]]; do
             CROSS_FLAG="--cross_layers $2"
             shift 2
             ;;
-        --vision_encoder)
-            VISION_FLAG="--vision_encoder $2"
+        --image_encoder|--vision_encoder)
+            VISION_FLAG="--image_encoder $2"
             shift 2
             ;;
         --no_freeze_vision)
