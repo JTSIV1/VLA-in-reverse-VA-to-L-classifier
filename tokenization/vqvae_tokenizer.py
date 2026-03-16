@@ -21,6 +21,7 @@ import os
 import sys
 import json
 import argparse
+import warnings
 
 # Ensure project root is on path for standalone execution
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -34,8 +35,37 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset, TensorDataset
 from tqdm import tqdm
 
-from utils import load_calvin_to_dataframe
+from utils import load_calvin_to_dataframe, nlp
 from config import DATA_DIR, ACTION_KEY, EPISODE_TEMPLATE, VQVAE_TOKENIZER_PATH
+
+
+class SemanticLoss(nn.Module):
+    def __init__(self, id_to_verb, temperature=0.1, weight=None, device='cuda'):
+        super().__init__()
+        num_verbs = len(id_to_verb)
+        similarity_matrix = torch.zeros((num_verbs, num_verbs))
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            for i in range(num_verbs):
+                doc1 = nlp(id_to_verb[i])
+                for j in range(num_verbs):
+                    doc2 = nlp(id_to_verb[j])
+                    if doc1.has_vector and doc2.has_vector and doc1.vector_norm and doc2.vector_norm:
+                        similarity_matrix[i, j] = doc1.similarity(doc2)
+                    else:
+                        similarity_matrix[i, j] = 1.0 if i == j else 0.0
+
+        self.soft_targets = torch.nn.functional.softmax(similarity_matrix / temperature, dim=1).to(device)
+        self.weight = weight.to(device) if weight is not None else None
+
+    def forward(self, logits, targets):
+        batch_soft_targets = self.soft_targets[targets]
+        log_probs = torch.nn.functional.log_softmax(logits, dim=1)
+        loss = -(batch_soft_targets * log_probs).sum(dim=1)
+        if self.weight is not None:
+            loss = loss * self.weight[targets]
+        return loss.mean()
 
 
 class ActionVQVAE(nn.Module):
@@ -380,8 +410,8 @@ def fit_verb_decodable_vqvae(df, data_dir, save_path,
                               epochs=200, batch_size=64, lr=1e-3,
                               commitment_cost=0.25, verb_loss_weight=1.0,
                               weighted_verb_loss=True, min_class_count=30,
-                              cls_d_model=128, cls_nhead=4, cls_layers=2,
-                              cls_dropout=0.1):
+                              cls_d_model=128, cls_nhead=4, cls_layers=2, cls_dropout=0.1,
+                              loss_function="ce", semantic_temp=0.1):
     """Fit a verb-decodable VQ-VAE tokenizer on CALVIN training trajectories.
 
     Joint training: total_loss = recon_loss + vq_loss + lambda * verb_CE.
@@ -402,6 +432,7 @@ def fit_verb_decodable_vqvae(df, data_dir, save_path,
 
     unique_verbs = sorted(df['primary_verb'].unique())
     verb_to_id = {v: i for i, v in enumerate(unique_verbs)}
+    id_to_verb = {i: v for i, v in verb_to_id.items()}
     num_verbs = len(verb_to_id)
     print("Verb classes ({}): {}".format(num_verbs, unique_verbs))
 
@@ -429,15 +460,19 @@ def fit_verb_decodable_vqvae(df, data_dir, save_path,
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
 
     # Optionally weight verb loss by inverse frequency
+    weights = None
     if weighted_verb_loss:
         class_counts = df['primary_verb'].value_counts()
         weights = torch.zeros(num_verbs)
         for verb, cid in verb_to_id.items():
             weights[cid] = 1.0 / class_counts.get(verb, 1)
         weights = weights / weights.sum() * num_verbs
-        verb_criterion = nn.CrossEntropyLoss(weight=weights.to(device))
+
+    if loss_function == "semantic":
+        verb_criterion = SemanticLoss(id_to_verb, temperature=semantic_temp, weight=weights, device=device)
+        print(f"Using Semantic Loss for verb classification (temperature={semantic_temp})")
     else:
-        verb_criterion = nn.CrossEntropyLoss()
+        verb_criterion = nn.CrossEntropyLoss(weight=weights.to(device) if weights is not None else None)
 
     for epoch in range(epochs):
         model.train()
@@ -709,7 +744,11 @@ if __name__ == "__main__":
                         help="Weight lambda for verb classification loss")
     parser.add_argument("--min_class_count", type=int, default=30,
                         help="Drop verb classes with fewer than N training samples")
-    parser.add_argument("--weighted_verb_loss", action="store_true", default=True,
+    parser.add_argument("--loss_function", type=str, default="ce", choices=["ce", "semantic"],
+                        help="Loss function for verb classification (default: ce)")
+    parser.add_argument("--semantic_temp", type=float, default=0.1,
+                        help="Temperature for semantic loss soft targets (default: 0.1)")
+    parser.add_argument("--weighted_verb_loss", action="store_true",
                         help="Use inverse-frequency weighted CE for verb loss")
     # Classifier architecture (verb-decodable only)
     parser.add_argument("--cls_d_model", type=int, default=128,
@@ -739,6 +778,8 @@ if __name__ == "__main__":
             min_class_count=args.min_class_count,
             cls_d_model=args.cls_d_model, cls_nhead=args.cls_nhead,
             cls_layers=args.cls_layers, cls_dropout=args.cls_dropout,
+            loss_function=args.loss_function,
+            semantic_temp=args.semantic_temp,
         )
     else:
         fit_vqvae_tokenizer(

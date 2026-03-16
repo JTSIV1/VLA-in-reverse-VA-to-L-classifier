@@ -25,8 +25,9 @@ from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
 from PIL import Image
 from tqdm import tqdm
+import warnings
 
-from utils import load_calvin_to_dataframe
+from utils import load_calvin_to_dataframe, nlp
 from image_encoders import build_image_encoder
 from config import (
     DATA_DIR, VAL_DIR, IMAGE_KEY, ACTION_KEY, EPISODE_TEMPLATE,
@@ -531,6 +532,35 @@ class ActionToVerbTransformer(nn.Module):
         return fracs, v_end
 
 
+class SemanticLoss(nn.Module):
+    def __init__(self, id_to_verb, temperature=0.1, weight=None, device='cuda'):
+        super().__init__()
+        num_verbs = len(id_to_verb)
+        similarity_matrix = torch.zeros((num_verbs, num_verbs))
+        
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            for i in range(num_verbs):
+                doc1 = nlp(id_to_verb[i])
+                for j in range(num_verbs):
+                    doc2 = nlp(id_to_verb[j])
+                    if doc1.has_vector and doc2.has_vector and doc1.vector_norm and doc2.vector_norm:
+                        similarity_matrix[i, j] = doc1.similarity(doc2)
+                    else:
+                        similarity_matrix[i, j] = 1.0 if i == j else 0.0
+        
+        self.soft_targets = torch.nn.functional.softmax(similarity_matrix / temperature, dim=1).to(device)
+        self.weight = weight.to(device) if weight is not None else None
+
+    def forward(self, logits, targets):
+        batch_soft_targets = self.soft_targets[targets]
+        log_probs = torch.nn.functional.log_softmax(logits, dim=1)
+        loss = -(batch_soft_targets * log_probs).sum(dim=1)
+        if self.weight is not None:
+            loss = loss * self.weight[targets]
+        return loss.mean()
+
+
 class CalvinVerbDataset(Dataset):
     def __init__(self, df, data_dir, transform=None, max_seq_len=MAX_SEQ_LEN,
                  modality="full", action_tokenizer=None,
@@ -887,6 +917,7 @@ def main(args):
         dataset.num_patches = model.num_patches
         val_dataset.num_patches = model.num_patches
 
+    weights = None
     # Optionally weight classes inversely by frequency
     if args.weighted_loss:
         class_counts = dataset.df['primary_verb'].value_counts()
@@ -895,10 +926,14 @@ def main(args):
             count = class_counts.get(verb, 1)
             weights[cid] = 1.0 / count
         weights = weights / weights.sum() * num_verbs  # normalize to mean=1
-        criterion = nn.CrossEntropyLoss(weight=weights.to(device))
-        print(f"Using weighted CE loss (min weight={weights.min():.3f}, max={weights.max():.3f})")
+        print(f"Using weighted loss (min weight={weights.min():.3f}, max={weights.max():.3f})")
+        
+    if args.loss_function == "semantic":
+        criterion = SemanticLoss(dataset.id_to_verb, temperature=args.semantic_temp, weight=weights, device=device)
+        print(f"Using Semantic Loss (temperature={args.semantic_temp})")
     else:
-        criterion = nn.CrossEntropyLoss()
+        criterion = nn.CrossEntropyLoss(weight=weights.to(device) if weights is not None else None)
+
     optimizer = optim.AdamW(model.parameters(), lr=args.lr)
     total_steps = len(dataloader) * args.epochs
     warmup_pct = min(args.warmup_epochs / args.epochs, 0.3)
@@ -1075,6 +1110,8 @@ def main(args):
                 'modal_dropout': args.modal_dropout,
                 'aux_loss_weight': args.aux_loss_weight,
                 'scene_dim': scene_dim,
+                'loss_function': args.loss_function,
+                'semantic_temp': args.semantic_temp,
                 'best_val_acc': best_val_acc,
                 'best_epoch': best_epoch,
             }
@@ -1107,7 +1144,9 @@ def main(args):
                                       "action_rep": args.action_rep,
                                       "cross_layers": args.cross_layers,
                                       "lr": args.lr, "batch_size": args.batch_size,
-                                      "max_seq_len": args.max_seq_len},
+                                      "max_seq_len": args.max_seq_len,
+                                      "loss_function": args.loss_function,
+                                      "semantic_temp": args.semantic_temp},
                            "epochs": training_log}, f, indent=2)
             print(f"    Training log saved to {args.log_path}")
 
@@ -1142,6 +1181,8 @@ def main(args):
             'modal_dropout': args.modal_dropout,
             'aux_loss_weight': args.aux_loss_weight,
             'scene_dim': scene_dim,
+            'loss_function': args.loss_function,
+            'semantic_temp': args.semantic_temp,
         }
         torch.save(checkpoint, args.save_path)
         print(f"\nCheckpoint saved to {args.save_path}")
@@ -1219,6 +1260,10 @@ if __name__ == "__main__":
     parser.add_argument("--aux_loss_weight", type=float, default=0.0,
                         help="Weight lambda for auxiliary unimodal CE losses applied at "
                              "the self->cross layer transition (0 = disabled)")
+    parser.add_argument("--loss_function", type=str, default="ce", choices=["ce", "semantic"],
+                        help="Loss function to use (default: ce)")
+    parser.add_argument("--semantic_temp", type=float, default=0.1,
+                        help="Temperature for semantic loss soft targets (default: 0.1)")
 
     args = parser.parse_args()
     main(args)
