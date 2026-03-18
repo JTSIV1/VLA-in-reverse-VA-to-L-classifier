@@ -25,6 +25,8 @@ CALVIN rel_actions layout (7-dim):
 """
 
 import os
+import re
+import sys
 from typing import Iterator, Tuple, Any
 
 import numpy as np
@@ -32,6 +34,60 @@ import tensorflow_datasets as tfds
 import tensorflow as tf
 
 CALVIN_DIR = "/data/user_data/yashagar/task_D_D"
+
+# ── Verb filtering (mirrors utils.py) ─────────────────────────────────────────
+# Lazy-load to avoid import at module level; populated on first call.
+_nlp = None
+
+def _get_nlp():
+    global _nlp
+    if _nlp is None:
+        import spacy
+        try:
+            _nlp = spacy.load("en_core_web_sm")
+        except OSError:
+            from spacy.cli import download
+            download("en_core_web_sm")
+            _nlp = spacy.load("en_core_web_sm")
+    return _nlp
+
+_DIRECTION_WORDS = {"left", "right"}
+_DISCOURSE_VERBS = {"go", "let"}
+_THEN_RE = re.compile(r'\bthen\b', re.IGNORECASE)
+_AND_RE = re.compile(r'\band\b', re.IGNORECASE)
+
+def _extract_verbs(text):
+    """Mirrors utils.extract_verb — returns list of verb strings."""
+    nlp = _get_nlp()
+    doc = nlp(text)
+    actions = []
+    for token in doc:
+        if token.pos_ == "VERB":
+            if token.text in _DIRECTION_WORDS:
+                continue
+            parts = [child.text for child in token.children
+                     if child.dep_ == "prt" and child.text not in _DIRECTION_WORDS]
+            full_verb = " ".join([token.text] + parts)
+            actions.append(full_verb)
+        elif token.pos_ == "NOUN" and token.dep_ == "ROOT":
+            for child in token.children:
+                if child.pos_ == "VERB" and child.text not in _DIRECTION_WORDS \
+                        and child.text not in _DISCOURSE_VERBS:
+                    parts = [gc.text for gc in child.children
+                             if gc.dep_ == "prt" and gc.text not in _DIRECTION_WORDS]
+                    full_verb = " ".join([child.text] + parts)
+                    actions.append(full_verb)
+    return actions
+
+def _keep_episode(instruction: str) -> bool:
+    """Return True only if the episode passes the verb-label quality filters."""
+    if _THEN_RE.search(instruction):
+        return False
+    # Filter "and" sentences except "go ... and ..." (go is a discourse prefix)
+    if _AND_RE.search(instruction) and not instruction.lower().startswith('go'):
+        return False
+    verbs = _extract_verbs(instruction)
+    return len(verbs) == 1
 
 
 class CalvinDataset(tfds.core.GeneratorBasedBuilder):
@@ -45,7 +101,8 @@ class CalvinDataset(tfds.core.GeneratorBasedBuilder):
             builder=self,
             description=(
                 "CALVIN task_D_D language-conditioned robot manipulation dataset. "
-                "5124 train / 1011 val episodes with EEF relative actions."
+                "Filtered to episodes with exactly one unambiguous verb and no 'then' "
+                "(mirrors the verb-classifier training split). EEF relative actions."
             ),
             features=tfds.features.FeaturesDict({
                 "steps": tfds.features.Dataset({
@@ -94,6 +151,8 @@ class CalvinDataset(tfds.core.GeneratorBasedBuilder):
         indices = ann["info"]["indx"]           # list of (start_idx, end_idx) tuples
 
         for ep_idx, (instruction, (start, end)) in enumerate(zip(instructions, indices)):
+            if not _keep_episode(str(instruction)):
+                continue
             steps = []
             for frame_idx in range(int(start), int(end) + 1):
                 path = os.path.join(split_dir, "episode_{:07d}.npz".format(frame_idx))

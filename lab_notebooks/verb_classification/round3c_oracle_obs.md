@@ -159,3 +159,56 @@ Key finding: **both signals are informative, but require matched architectures.*
 **Verb identity is grounded in both motion kinematics and action outcomes**, but different representations require different model families. The transformer architecture used throughout this project is well-suited for sequential action/vision data but poorly suited for low-dimensional state vectors. With the right model (Random Forest), scene_obs achieves 48.4% — the highest single-modality accuracy, surpassing even multimodal transformers.
 
 This suggests that **the ceiling for verb classification may be significantly higher than 42%** if we combine action trajectories (via transformer) with scene_obs features (via tree-based models or by engineering them into the transformer input).
+
+---
+
+## Part 3: Full-sequence scene_obs transformer (allT)
+
+**Date**: 2026-03-13
+**Goal**: Test whether the transformer's failure on scene_obs was due to too few tokens (2–8), not the modality itself.
+
+### Motivation
+
+Parts 1–2 showed a 36pp gap between transformer (12%) and RF (48%) on scene_obs. The hypothesis was that the transformer had too few tokens (2–8 timesteps of a 24-d vector) for self-attention to find useful patterns. But native actions work well with the transformer at ~61 tokens/episode. So: **what happens if we give the transformer the full scene_obs sequence (all T timesteps)?**
+
+This is analogous to how `action_only` native loads every timestep from start to end. The sequence `[CLS, scene_obs_t0, scene_obs_t1, ..., scene_obs_T]` has ~61 tokens — matching the action trajectory length — and lets the transformer learn temporal patterns in how the scene state evolves.
+
+### Method
+
+Same architecture as all previous rounds: 4-layer transformer, d_model=128, 8 heads, dropout=0.1, sp+wt recipe. The only change is `--num_frames 0` which loads all T timesteps instead of uniform subsampling.
+
+| Tag | Modality | Frames | Input dim | Tokens (avg) |
+|-----|----------|--------|-----------|--------------|
+| scene_obs_allT j6574457 | scene_obs | all T (~61) | 24 | ~62 (CLS + T) |
+
+For comparison, the previous scene_obs experiments:
+| Tag | Frames | Tokens | BestAcc |
+|-----|--------|--------|---------|
+| scene_obs_2f | 2 | 3 | 8.0% |
+| scene_obs_8f | 8 | 9 | 12.2% |
+| **scene_obs_allT** | **~61** | **~62** | **TBD** |
+
+### Results
+
+| Tag | BestAcc | BestMF1 | Active | BestEp |
+|-----|---------|---------|--------|--------|
+| scene_obs_allT j6574533 | 4.8% | — | ~1/21 | — (never learned) |
+
+**The full-sequence transformer completely fails** — 4.8% val accuracy across all 30 epochs,
+essentially random. More tokens did not help. The training loss barely decreased (2.94 → 2.94).
+
+Updated comparison:
+| Tag | Frames | Tokens | BestAcc |
+|-----|--------|--------|---------|
+| scene_obs_2f | 2 | 3 | 8.0% |
+| scene_obs_8f | 8 | 9 | 12.2% |
+| scene_obs_allT | ~61 | ~62 | **4.8%** |
+| scene_delta RF | 1 (delta) | flat | **48.4%** |
+
+**Conclusion**: The transformer's failure on scene_obs is NOT about sequence length — giving
+it more tokens actually made performance worse. The fundamental issue is that self-attention
+over low-dimensional state vectors adds no value over tabular models. The scene_obs signal
+lives in axis-aligned feature interactions (e.g., "drawer joint changed AND block didn't
+move → close drawer"), which RF captures naturally but transformers cannot.
+
+Complementarity analysis using sklearn models instead is in [Round 7: Scene Fusion](round7_scene_fusion.md#complementarity-analysis-ao-transformer-vs-scene-obs-sklearn).

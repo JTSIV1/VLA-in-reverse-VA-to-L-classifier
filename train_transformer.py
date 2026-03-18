@@ -22,8 +22,12 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
-from torchvision import transforms
-from PIL import Image
+try:
+    from torchvision import transforms
+    from PIL import Image
+except (ImportError, RuntimeError):
+    transforms = None  # lazy: only needed for vision modalities
+    Image = None
 from tqdm import tqdm
 
 from utils import load_calvin_to_dataframe
@@ -403,10 +407,10 @@ class ActionToVerbTransformer(nn.Module):
             positions = torch.arange(total_len, device=full_seq.device).unsqueeze(0)
             src_key_padding_mask = positions >= seq_lengths.unsqueeze(1)
 
-        # Build block-diagonal self-only mask for early layers (full modality only)
+        # Build block-diagonal self-only mask for early layers (full and scene_token)
         self_mask = None
         num_self_layers = self.num_layers - self.cross_layers
-        if num_self_layers > 0 and self.modality == "full":
+        if num_self_layers > 0 and self.modality in ("full", "scene_token"):
             # Additive mask: -inf blocks attention, 0.0 allows it
             self_mask = torch.full((total_len, total_len), float('-inf'),
                                    device=full_seq.device)
@@ -627,9 +631,12 @@ class CalvinVerbDataset(Dataset):
 
         # -- Load oracle obs or actions --
         if self.obs_key is not None:
-            # Oracle: sample obs vectors at frame-like indices (2f or 8f)
+            # Oracle: sample obs vectors at frame-like indices
+            # num_frames=0 means load ALL timesteps (like native actions)
             total_steps = end_idx - start_idx + 1
-            if self.num_frames == 2:
+            if self.num_frames == 0:
+                sample_indices = list(range(start_idx, end_idx + 1))
+            elif self.num_frames == 2:
                 sample_indices = [start_idx, end_idx]
             else:
                 positions = np.linspace(0, total_steps - 1, self.num_frames, dtype=int)
@@ -736,11 +743,16 @@ def main(args):
         img_size = 224
     else:
         img_size = IMAGE_SIZE[0]
-    transform = transforms.Compose([
-        transforms.Resize((img_size, img_size)),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=IMG_MEAN, std=IMG_STD)
-    ])
+    # Vision transform only needed for modalities that load images
+    VISION_MODALITIES = {"full", "vision_only"}
+    if args.modality in VISION_MODALITIES and transforms is not None:
+        transform = transforms.Compose([
+            transforms.Resize((img_size, img_size)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=IMG_MEAN, std=IMG_STD)
+        ])
+    else:
+        transform = None
 
     # --- Load action tokenizer if needed ---
     tok = None
@@ -1183,7 +1195,7 @@ if __name__ == "__main__":
                         help="Path to fitted VQ-VAE tokenizer")
     parser.add_argument("--vqvae_chunk_size", type=int, default=4,
                         help="Chunk size K used when fitting the VQ-VAE tokenizer")
-    parser.add_argument("--vqvla_config_dir", type=str, default="./vqvla/config",
+    parser.add_argument("--vqvla_config_dir", type=str, default="./tokenization/vqvla/config",
                         help="Directory containing VQ-VLA config.json")
     parser.add_argument("--vqvla_checkpoint_path", type=str,
                         default="./checkpoints/vqvla_pretrained/action_tokenizer_weight/all_data_vq.pth",

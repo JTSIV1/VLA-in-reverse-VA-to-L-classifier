@@ -1,0 +1,22 @@
+close
+collapse
+grasp
+lift
+move
+open
+pick up
+place
+pull
+push
+put
+remove
+rotate
+slide
+stack
+store
+sweep
+take off
+turn
+turn off
+turn on
+unstack

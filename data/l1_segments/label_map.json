@@ -1,0 +1,38 @@
+{
+  "verb2id": {
+    "approach": 0,
+    "flip": 1,
+    "grasp": 2,
+    "lift": 3,
+    "lower": 4,
+    "move": 5,
+    "open": 6,
+    "place": 7,
+    "position": 8,
+    "press": 9,
+    "pull": 10,
+    "push": 11,
+    "release": 12,
+    "retract": 13,
+    "rotate": 14,
+    "slide": 15
+  },
+  "id2verb": {
+    "0": "approach",
+    "1": "flip",
+    "2": "grasp",
+    "3": "lift",
+    "4": "lower",
+    "5": "move",
+    "6": "open",
+    "7": "place",
+    "8": "position",
+    "9": "press",
+    "10": "pull",
+    "11": "push",
+    "12": "release",
+    "13": "retract",
+    "14": "rotate",
+    "15": "slide"
+  }
+}

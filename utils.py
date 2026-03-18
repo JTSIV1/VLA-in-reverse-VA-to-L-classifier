@@ -92,7 +92,16 @@ def load_calvin_to_dataframe(data_dir):
     pre_then = len(df)
     df = df[~df['instruction'].str.contains(r'\bthen\b', case=False)].copy()
     print(f"Filtered out {pre_then - len(df)} examples containing 'then'.")
-    
+
+    # Filter out multi-action instructions containing "and"
+    # Exception: sentences starting with "go" (e.g. "go towards X and grasp it")
+    # are kept because "go" is a discourse prefix, not a second robot action.
+    pre_and = len(df)
+    and_mask = (df['instruction'].str.contains(r'\band\b', case=False) &
+                ~df['instruction'].str.lower().str.startswith('go'))
+    df = df[~and_mask].copy()
+    print(f"Filtered out {pre_and - len(df)} examples containing 'and' (non-go).")
+
     # Use the single extracted verb as the primary label
     df['primary_verb'] = df['verbs'].apply(lambda x: x[0])
 
@@ -101,8 +110,12 @@ def load_calvin_to_dataframe(data_dir):
     turn_on_mask = (df['primary_verb'] == 'turn') & df['instruction'].str.contains(r'\bturn on\b', case=False)
     df.loc[turn_on_mask, 'primary_verb'] = 'turn on'
 
-    # Collapse "slide up" / "slide down" into "slide"
-    df['primary_verb'] = df['primary_verb'].replace({'slide up': 'slide', 'slide down': 'slide', 'move up': 'move'})
+    # Collapse verb variants: slide up/down → slide, move up → move, lift up → lift
+    df['primary_verb'] = df['primary_verb'].replace({
+        'slide up': 'slide', 'slide down': 'slide',
+        'move up': 'move',
+        'lift up': 'lift',
+    })
     
     return df
 

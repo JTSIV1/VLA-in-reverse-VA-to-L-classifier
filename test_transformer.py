@@ -14,7 +14,10 @@ import json
 import argparse
 import torch
 from torch.utils.data import DataLoader
-from torchvision import transforms
+try:
+    from torchvision import transforms
+except (ImportError, RuntimeError):
+    transforms = None  # lazy: only needed for vision modalities
 from sklearn.metrics import classification_report, confusion_matrix, ConfusionMatrixDisplay
 import matplotlib.pyplot as plt
 
@@ -300,6 +303,16 @@ def main(args):
             json.dump(metrics, f, indent=2)
         print(f"\nMetrics saved to {args.save_metrics}")
 
+    # Save per-instance predictions
+    if args.save_preds:
+        preds_dir = os.path.dirname(args.save_preds)
+        if preds_dir:
+            os.makedirs(preds_dir, exist_ok=True)
+        with open(args.save_preds, "w") as f:
+            json.dump({"labels": all_labels, "preds": all_preds,
+                       "id_to_verb": {str(v): k for k, v in dataset.verb_to_id.items()}}, f)
+        print(f"Predictions saved to {args.save_preds}")
+
     # Confusion matrix
     cm = confusion_matrix(all_labels, all_preds, labels=present_labels)
     fig, ax = plt.subplots(figsize=(14, 12))
@@ -328,6 +341,8 @@ if __name__ == "__main__":
                         help="Path to save confusion matrix image (e.g., cm.png)")
     parser.add_argument("--save_metrics", type=str, default=None,
                         help="Path to save metrics JSON (e.g., metrics.json)")
+    parser.add_argument("--save_preds", type=str, default=None,
+                        help="Path to save per-instance predictions JSON (labels + preds)")
     parser.add_argument("--debug", type=int, default=0, metavar="N",
                         help="Debug mode: use only N samples for quick smoke testing")
     parser.add_argument("--modality", type=str, default="full",

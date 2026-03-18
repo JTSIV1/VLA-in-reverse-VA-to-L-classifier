@@ -580,7 +580,7 @@ VQVLA_VOCAB_SIZE = 256  # vqvae_n_embed = 256 (hardcoded in modeling_causal_vae.
 # Tokens per trajectory: (T // VQVLA_WINDOW_SIZE) * VQVLA_NUM_TOKENS ≈ 12*4=48 for T=61
 
 # Default paths
-VQVLA_CONFIG_DIR = os.path.join(os.path.dirname(__file__), "vqvla", "config")
+VQVLA_CONFIG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vqvla", "config")
 VQVLA_CHECKPOINT_PATH = "./checkpoints/vqvla_pretrained/action_tokenizer_weight/all_data_vq.pth"
 
 
