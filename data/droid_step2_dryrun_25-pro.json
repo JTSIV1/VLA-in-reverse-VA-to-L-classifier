@@ -1,0 +1,1552 @@
+[
+  {
+    "episode_idx": 3,
+    "instruction": "Close the lid of the bottle",
+    "verb": "close",
+    "n_steps": 268,
+    "frame_indices": [
+      0,
+      11,
+      23,
+      34,
+      46,
+      58,
+      69,
+      81,
+      92,
+      104,
+      116,
+      127,
+      139,
+      150,
+      162,
+      174,
+      185,
+      197,
+      208,
+      220,
+      232,
+      243,
+      255,
+      267
+    ],
+    "annotations": [
+      {
+        "frame": 0,
+        "verb": "approach",
+        "subtask": "approach the soap bottle to position for closing the lid"
+      },
+      {
+        "frame": 1,
+        "verb": "approach",
+        "subtask": "approach the soap bottle to position for closing the lid"
+      },
+      {
+        "frame": 2,
+        "verb": "approach",
+        "subtask": "approach the soap bottle to position for closing the lid"
+      },
+      {
+        "frame": 3,
+        "verb": "approach",
+        "subtask": "approach the soap bottle to position for closing the lid"
+      },
+      {
+        "frame": 4,
+        "verb": "approach",
+        "subtask": "approach the soap bottle to position for closing the lid"
+      },
+      {
+        "frame": 5,
+        "verb": "approach",
+        "subtask": "approach the soap bottle to position for closing the lid"
+      },
+      {
+        "frame": 6,
+        "verb": "lower",
+        "subtask": "lower the gripper onto the green lid to prepare for grasping"
+      },
+      {
+        "frame": 7,
+        "verb": "lower",
+        "subtask": "lower the gripper onto the green lid to prepare for grasping"
+      },
+      {
+        "frame": 8,
+        "verb": "lower",
+        "subtask": "lower the gripper onto the green lid to prepare for grasping"
+      },
+      {
+        "frame": 9,
+        "verb": "lower",
+        "subtask": "lower the gripper onto the green lid to prepare for grasping"
+      },
+      {
+        "frame": 10,
+        "verb": "grasp",
+        "subtask": "grasp the green lid of the soap bottle"
+      },
+      {
+        "frame": 11,
+        "verb": "grasp",
+        "subtask": "grasp the green lid of the soap bottle"
+      },
+      {
+        "frame": 12,
+        "verb": "twist",
+        "subtask": "twist the green lid clockwise to close the bottle"
+      },
+      {
+        "frame": 13,
+        "verb": "twist",
+        "subtask": "twist the green lid clockwise to close the bottle"
+      },
+      {
+        "frame": 14,
+        "verb": "twist",
+        "subtask": "twist the green lid clockwise to close the bottle"
+      },
+      {
+        "frame": 15,
+        "verb": "release",
+        "subtask": "release the green lid after closing it"
+      },
+      {
+        "frame": 16,
+        "verb": "retract",
+        "subtask": "retract the arm away from the bottle to complete the task"
+      },
+      {
+        "frame": 17,
+        "verb": "retract",
+        "subtask": "retract the arm away from the bottle to complete the task"
+      },
+      {
+        "frame": 18,
+        "verb": "retract",
+        "subtask": "retract the arm away from the bottle to complete the task"
+      },
+      {
+        "frame": 19,
+        "verb": "retract",
+        "subtask": "retract the arm away from the bottle to complete the task"
+      },
+      {
+        "frame": 20,
+        "verb": "retract",
+        "subtask": "retract the arm away from the bottle to complete the task"
+      },
+      {
+        "frame": 21,
+        "verb": "retract",
+        "subtask": "retract the arm away from the bottle to complete the task"
+      },
+      {
+        "frame": 22,
+        "verb": "retract",
+        "subtask": "retract the arm away from the bottle to complete the task"
+      },
+      {
+        "frame": 23,
+        "verb": "retract",
+        "subtask": "retract the arm away from the bottle to complete the task"
+      }
+    ],
+    "task_analysis": "The task is to close the lid of a dish soap bottle located next to a kitchen sink. The episode begins with the robot arm out of frame. The progression of the task can be divided into four main phases:\n\n1.  **Approach (Frames 0-7):** The robot arm enters the scene from the right and moves towards the open soap bottle. It gradually lowers and aligns its gripper directly above the green bottle lid.\n2.  **Grasp and Close (Frames 8-14):** The robot lowers its gripper to make contact with the lid, grasps it securely, and then performs a distinct clockwise twisting motion to screw the lid onto the bottle until it is closed. The transition from grasping to closing happens between frames 11 and 12.\n3.  **Release (Frame 15):** Once the bottle is closed, the gripper immediately opens, releasing its hold on the lid.\n4.  **Retract (Frames 16-23):** The robot arm lifts up and moves away from the bottle, retracting from the workspace to complete the task.\n\nThe task is successfully completed, as the bottle lid is visibly closed by the end of the interaction."
+  },
+  {
+    "episode_idx": 10,
+    "instruction": "Fold the yellow towel twice from left to right.",
+    "verb": "fold",
+    "n_steps": 562,
+    "frame_indices": [
+      0,
+      24,
+      48,
+      73,
+      97,
+      121,
+      146,
+      170,
+      195,
+      219,
+      243,
+      268,
+      292,
+      317,
+      341,
+      365,
+      390,
+      414,
+      439,
+      463,
+      487,
+      512,
+      536,
+      561
+    ],
+    "annotations": [
+      {
+        "frame": 0,
+        "verb": "move",
+        "subtask": "move robot arm toward the yellow towel"
+      },
+      {
+        "frame": 1,
+        "verb": "move",
+        "subtask": "move robot arm toward the yellow towel"
+      },
+      {
+        "frame": 2,
+        "verb": "move",
+        "subtask": "move robot arm toward the yellow towel"
+      },
+      {
+        "frame": 3,
+        "verb": "lower",
+        "subtask": "lower gripper to the left edge of the towel"
+      },
+      {
+        "frame": 4,
+        "verb": "grasp",
+        "subtask": "grasp the left edge of the towel for the first fold"
+      },
+      {
+        "frame": 5,
+        "verb": "fold",
+        "subtask": "fold the left side of the towel over to the right"
+      },
+      {
+        "frame": 6,
+        "verb": "fold",
+        "subtask": "fold the left side of the towel over to the right"
+      },
+      {
+        "frame": 7,
+        "verb": "release",
+        "subtask": "release the towel to complete the first fold"
+      },
+      {
+        "frame": 8,
+        "verb": "retract",
+        "subtask": "retract arm away from the towel"
+      },
+      {
+        "frame": 9,
+        "verb": "move",
+        "subtask": "move gripper to the new left edge of the towel for the second fold"
+      },
+      {
+        "frame": 10,
+        "verb": "move",
+        "subtask": "move gripper to the new left edge of the towel for the second fold"
+      },
+      {
+        "frame": 11,
+        "verb": "move",
+        "subtask": "move gripper to the new left edge of the towel for the second fold"
+      },
+      {
+        "frame": 12,
+        "verb": "move",
+        "subtask": "move gripper to the new left edge of the towel for the second fold"
+      },
+      {
+        "frame": 13,
+        "verb": "move",
+        "subtask": "move gripper to the new left edge of the towel for the second fold"
+      },
+      {
+        "frame": 14,
+        "verb": "move",
+        "subtask": "move gripper to the new left edge of the towel for the second fold"
+      },
+      {
+        "frame": 15,
+        "verb": "move",
+        "subtask": "move gripper to the new left edge of the towel for the second fold"
+      },
+      {
+        "frame": 16,
+        "verb": "grasp",
+        "subtask": "grasp the left edge of the once-folded towel"
+      },
+      {
+        "frame": 17,
+        "verb": "fold",
+        "subtask": "fold the left side of the towel over to the right for the second time"
+      },
+      {
+        "frame": 18,
+        "verb": "fold",
+        "subtask": "fold the left side of the towel over to the right for the second time"
+      },
+      {
+        "frame": 19,
+        "verb": "fold",
+        "subtask": "fold the left side of the towel over to the right for the second time"
+      },
+      {
+        "frame": 20,
+        "verb": "place",
+        "subtask": "place the folded edge down on the towel"
+      },
+      {
+        "frame": 21,
+        "verb": "place",
+        "subtask": "place the folded edge down on the towel"
+      },
+      {
+        "frame": 22,
+        "verb": "release",
+        "subtask": "release the towel to complete the second fold"
+      },
+      {
+        "frame": 23,
+        "verb": "retract",
+        "subtask": "retract arm away from the finished towel"
+      }
+    ],
+    "task_analysis": "The scene is a laundry area, with a yellow towel laid flat on a white board atop a washing machine. The task is to fold this towel twice from left to right.\n\nThe overall progression of the task follows a clear, two-stage folding process:\n1.  **First Fold (Frames 1-7):** The robot arm first appears and approaches the unfolded towel from the right. It lowers and grasps the left edge of the towel. It then lifts this edge and carries it completely over to the right, folding the towel in half. The robot releases the towel, completing the first fold.\n2.  **Repositioning (Frames 8-15):** After the first fold, the robot retracts its arm and repositions it. It moves from the right side of the towel over to the new, once-folded left edge, preparing for the second fold.\n3.  **Second Fold (Frames 16-22):** The robot grasps the new left edge of the now half-folded towel. It repeats the folding motion, lifting and carrying this edge over to the right. It places the edge down, completing the second fold and making the towel a quarter of its original width.\n4.  **Completion (Frame 23):** After releasing the twice-folded towel, the robot retracts its arm, leaving the completed task.\n\nThroughout the episode, the robot successfully executes the two \"left to right\" folds as instructed."
+  },
+  {
+    "episode_idx": 12,
+    "instruction": "Push down the switch on the toaster",
+    "verb": "push",
+    "n_steps": 233,
+    "frame_indices": [
+      0,
+      10,
+      20,
+      30,
+      40,
+      50,
+      60,
+      70,
+      80,
+      90,
+      100,
+      110,
+      121,
+      131,
+      141,
+      151,
+      161,
+      171,
+      181,
+      191,
+      201,
+      211,
+      221,
+      232
+    ],
+    "annotations": [
+      {
+        "frame": 0,
+        "verb": "approach",
+        "subtask": "approach the toaster switch to prepare for pushing"
+      },
+      {
+        "frame": 1,
+        "verb": "approach",
+        "subtask": "approach the toaster switch to prepare for pushing"
+      },
+      {
+        "frame": 2,
+        "verb": "approach",
+        "subtask": "approach the toaster switch to prepare for pushing"
+      },
+      {
+        "frame": 3,
+        "verb": "approach",
+        "subtask": "approach the toaster switch to prepare for pushing"
+      },
+      {
+        "frame": 4,
+        "verb": "approach",
+        "subtask": "approach the toaster switch to prepare for pushing"
+      },
+      {
+        "frame": 5,
+        "verb": "approach",
+        "subtask": "approach the toaster switch to prepare for pushing"
+      },
+      {
+        "frame": 6,
+        "verb": "approach",
+        "subtask": "approach the toaster switch to prepare for pushing"
+      },
+      {
+        "frame": 7,
+        "verb": "approach",
+        "subtask": "approach the toaster switch to prepare for pushing"
+      },
+      {
+        "frame": 8,
+        "verb": "approach",
+        "subtask": "approach the toaster switch to prepare for pushing"
+      },
+      {
+        "frame": 9,
+        "verb": "approach",
+        "subtask": "approach the toaster switch to prepare for pushing"
+      },
+      {
+        "frame": 10,
+        "verb": "approach",
+        "subtask": "approach the toaster switch to prepare for pushing"
+      },
+      {
+        "frame": 11,
+        "verb": "approach",
+        "subtask": "approach the toaster switch to prepare for pushing"
+      },
+      {
+        "frame": 12,
+        "verb": "approach",
+        "subtask": "approach the toaster switch to prepare for pushing"
+      },
+      {
+        "frame": 13,
+        "verb": "align",
+        "subtask": "align the gripper over the toaster switch"
+      },
+      {
+        "frame": 14,
+        "verb": "align",
+        "subtask": "align the gripper over the toaster switch"
+      },
+      {
+        "frame": 15,
+        "verb": "align",
+        "subtask": "align the gripper over the toaster switch"
+      },
+      {
+        "frame": 16,
+        "verb": "align",
+        "subtask": "align the gripper over the toaster switch"
+      },
+      {
+        "frame": 17,
+        "verb": "push",
+        "subtask": "push the toaster switch downward to turn on the toaster"
+      },
+      {
+        "frame": 18,
+        "verb": "push",
+        "subtask": "push the toaster switch downward to turn on the toaster"
+      },
+      {
+        "frame": 19,
+        "verb": "push",
+        "subtask": "push the toaster switch downward to turn on the toaster"
+      },
+      {
+        "frame": 20,
+        "verb": "withdraw",
+        "subtask": "withdraw the gripper away from the toaster"
+      },
+      {
+        "frame": 21,
+        "verb": "withdraw",
+        "subtask": "withdraw the gripper away from the toaster"
+      },
+      {
+        "frame": 22,
+        "verb": "withdraw",
+        "subtask": "withdraw the gripper away from the toaster"
+      },
+      {
+        "frame": 23,
+        "verb": "withdraw",
+        "subtask": "withdraw the gripper away from the toaster"
+      }
+    ],
+    "task_analysis": "The scene is a kitchen counter with several appliances. The relevant objects are the robot arm and a silver and black toaster. The task is to push down the switch (lever) on the toaster.\n\nThe task progresses through four distinct phases:\n1.  **Approach (Frames 0-12):** The robot starts with its arm to the left of the counter. It extends its arm, moving it rightward and downward in a continuous motion to bring the gripper towards the toaster.\n2.  **Alignment (Frames 13-16):** The robot's gripper is now positioned directly above the toaster's switch. It makes small, precise adjustments to align the gripper perfectly with the switch before pushing.\n3.  **Pushing (Frames 17-19):** The robot executes the main action by moving its arm straight down. The gripper makes contact with the switch and pushes it down until it locks into place, activating the toaster.\n4.  **Withdrawal (Frames 20-23):** After successfully pushing the switch, the robot retracts its arm by first lifting it vertically and then moving it back to the left, away from the toaster and towards its initial resting area."
+  },
+  {
+    "episode_idx": 15,
+    "instruction": "Set the grey cup upright",
+    "verb": "set",
+    "n_steps": 170,
+    "frame_indices": [
+      0,
+      7,
+      14,
+      22,
+      29,
+      36,
+      44,
+      51,
+      58,
+      66,
+      73,
+      80,
+      88,
+      95,
+      102,
+      110,
+      117,
+      124,
+      132,
+      139,
+      146,
+      154,
+      161,
+      169
+    ],
+    "annotations": [
+      {
+        "frame": 0,
+        "verb": "approach",
+        "subtask": "approach the grey cup on the table"
+      },
+      {
+        "frame": 1,
+        "verb": "approach",
+        "subtask": "approach the grey cup on the table"
+      },
+      {
+        "frame": 2,
+        "verb": "approach",
+        "subtask": "approach the grey cup on the table"
+      },
+      {
+        "frame": 3,
+        "verb": "approach",
+        "subtask": "approach the grey cup on the table"
+      },
+      {
+        "frame": 4,
+        "verb": "approach",
+        "subtask": "approach the grey cup on the table"
+      },
+      {
+        "frame": 5,
+        "verb": "approach",
+        "subtask": "approach the grey cup on the table"
+      },
+      {
+        "frame": 6,
+        "verb": "approach",
+        "subtask": "approach the grey cup on the table"
+      },
+      {
+        "frame": 7,
+        "verb": "lower",
+        "subtask": "lower the gripper to align with the side of the grey cup"
+      },
+      {
+        "frame": 8,
+        "verb": "lower",
+        "subtask": "lower the gripper to align with the side of the grey cup"
+      },
+      {
+        "frame": 9,
+        "verb": "lower",
+        "subtask": "lower the gripper to align with the side of the grey cup"
+      },
+      {
+        "frame": 10,
+        "verb": "grasp",
+        "subtask": "grasp the side of the grey cup"
+      },
+      {
+        "frame": 11,
+        "verb": "grasp",
+        "subtask": "grasp the side of the grey cup"
+      },
+      {
+        "frame": 12,
+        "verb": "rotate",
+        "subtask": "rotate the grey cup to an upright orientation"
+      },
+      {
+        "frame": 13,
+        "verb": "rotate",
+        "subtask": "rotate the grey cup to an upright orientation"
+      },
+      {
+        "frame": 14,
+        "verb": "rotate",
+        "subtask": "rotate the grey cup to an upright orientation"
+      },
+      {
+        "frame": 15,
+        "verb": "rotate",
+        "subtask": "rotate the grey cup to an upright orientation"
+      },
+      {
+        "frame": 16,
+        "verb": "rotate",
+        "subtask": "rotate the grey cup to an upright orientation"
+      },
+      {
+        "frame": 17,
+        "verb": "place",
+        "subtask": "place the grey cup upright on the table"
+      },
+      {
+        "frame": 18,
+        "verb": "place",
+        "subtask": "place the grey cup upright on the table"
+      },
+      {
+        "frame": 19,
+        "verb": "place",
+        "subtask": "place the grey cup upright on the table"
+      },
+      {
+        "frame": 20,
+        "verb": "place",
+        "subtask": "place the grey cup upright on the table"
+      },
+      {
+        "frame": 21,
+        "verb": "release",
+        "subtask": "release the grey cup"
+      },
+      {
+        "frame": 22,
+        "verb": "withdraw",
+        "subtask": "withdraw the arm from the grey cup"
+      },
+      {
+        "frame": 23,
+        "verb": "withdraw",
+        "subtask": "withdraw the arm from the grey cup"
+      }
+    ],
+    "task_analysis": "The robot's task is to set a grey cup upright. The episode begins with the robot arm in a neutral position and the grey cup lying on its side on a wooden table. The task progresses through four main phases.\n\n1.  **Approach and Grasp (Frames 0-11):** The robot first moves its arm from the starting position toward the grey cup. It then lowers its gripper, aligning it with the horizontally-oriented cup, and closes the gripper to secure it. This phase ends once the cup is firmly grasped.\n\n2.  **Lift and Reorient (Frames 12-16):** After grasping the cup, the robot lifts it off the table while simultaneously rotating its wrist. This coordinated motion turns the cup from a horizontal to a vertical, upright orientation. This is the core part of fulfilling the \"set upright\" instruction.\n\n3.  **Place and Release (Frames 17-21):** With the cup now held upright, the robot lowers it back down to the table surface. Once the cup is stable on the table, the robot opens its gripper to release it.\n\n4.  **Retract (Frames 22-23):** After successfully placing the cup, the robot withdraws its arm up and away, leaving the cup standing upright on the table and completing the task."
+  },
+  {
+    "episode_idx": 17,
+    "instruction": "Put the spatula in the utensil holder",
+    "verb": "put",
+    "n_steps": 321,
+    "frame_indices": [
+      0,
+      13,
+      27,
+      41,
+      55,
+      69,
+      83,
+      97,
+      111,
+      125,
+      139,
+      153,
+      166,
+      180,
+      194,
+      208,
+      222,
+      236,
+      250,
+      264,
+      278,
+      292,
+      306,
+      320
+    ],
+    "annotations": [
+      {
+        "frame": 0,
+        "verb": "reach",
+        "subtask": "reach toward the spatula on the counter to prepare for grasping"
+      },
+      {
+        "frame": 1,
+        "verb": "reach",
+        "subtask": "reach toward the spatula on the counter to prepare for grasping"
+      },
+      {
+        "frame": 2,
+        "verb": "reach",
+        "subtask": "reach toward the spatula on the counter to prepare for grasping"
+      },
+      {
+        "frame": 3,
+        "verb": "reach",
+        "subtask": "reach toward the spatula on the counter to prepare for grasping"
+      },
+      {
+        "frame": 4,
+        "verb": "reach",
+        "subtask": "reach toward the spatula on the counter to prepare for grasping"
+      },
+      {
+        "frame": 5,
+        "verb": "reach",
+        "subtask": "reach toward the spatula on the counter to prepare for grasping"
+      },
+      {
+        "frame": 6,
+        "verb": "position",
+        "subtask": "position the gripper over the spatula handle for grasping"
+      },
+      {
+        "frame": 7,
+        "verb": "position",
+        "subtask": "position the gripper over the spatula handle for grasping"
+      },
+      {
+        "frame": 8,
+        "verb": "position",
+        "subtask": "position the gripper over the spatula handle for grasping"
+      },
+      {
+        "frame": 9,
+        "verb": "grasp",
+        "subtask": "grasp the spatula handle"
+      },
+      {
+        "frame": 10,
+        "verb": "lift",
+        "subtask": "lift the spatula off the countertop"
+      },
+      {
+        "frame": 11,
+        "verb": "lift",
+        "subtask": "lift the spatula off the countertop"
+      },
+      {
+        "frame": 12,
+        "verb": "carry",
+        "subtask": "carry the spatula toward the utensil holder"
+      },
+      {
+        "frame": 13,
+        "verb": "carry",
+        "subtask": "carry the spatula toward the utensil holder"
+      },
+      {
+        "frame": 14,
+        "verb": "carry",
+        "subtask": "carry the spatula toward the utensil holder"
+      },
+      {
+        "frame": 15,
+        "verb": "carry",
+        "subtask": "carry the spatula toward the utensil holder"
+      },
+      {
+        "frame": 16,
+        "verb": "carry",
+        "subtask": "carry the spatula toward the utensil holder"
+      },
+      {
+        "frame": 17,
+        "verb": "carry",
+        "subtask": "carry the spatula toward the utensil holder"
+      },
+      {
+        "frame": 18,
+        "verb": "insert",
+        "subtask": "insert the spatula into the utensil holder"
+      },
+      {
+        "frame": 19,
+        "verb": "insert",
+        "subtask": "insert the spatula into the utensil holder"
+      },
+      {
+        "frame": 20,
+        "verb": "insert",
+        "subtask": "insert the spatula into the utensil holder"
+      },
+      {
+        "frame": 21,
+        "verb": "insert",
+        "subtask": "insert the spatula into the utensil holder"
+      },
+      {
+        "frame": 22,
+        "verb": "release",
+        "subtask": "release the spatula into the utensil holder"
+      },
+      {
+        "frame": 23,
+        "verb": "withdraw",
+        "subtask": "withdraw the arm away from the utensil holder"
+      }
+    ],
+    "task_analysis": "The robot's task is to pick up a spatula from the countertop and place it into a utensil holder. The scene is a kitchen counter with a stove, microwave, the spatula, and the utensil holder being the relevant objects.\n\nThe task progresses through five distinct phases:\n1.  **Approach (Frames 0-5):** The robot arm begins in a high, neutral position and moves downward and forward, reaching towards the spatula lying on the counter.\n2.  **Grasp (Frames 6-9):** The robot's gripper hovers over the spatula's handle, making fine adjustments to its position and orientation. This phase culminates at Frame 9 when the gripper closes firmly around the handle.\n3.  **Lift and Carry (Frames 10-17):** The robot first lifts the spatula vertically off the counter (Frames 10-11) and then carries it in an upward arc towards the utensil holder (Frames 12-17), positioning it directly above the holder's opening.\n4.  **Insert (Frames 18-21):** The robot lowers the spatula straight down, inserting it into the utensil holder amongst the other utensils.\n5.  **Release and Withdraw (Frames 22-23):** Once the spatula is securely in the holder, the robot opens its gripper to release it (Frame 22) and then withdraws its arm upward and away from the area, completing the task (Frame 23)."
+  },
+  {
+    "episode_idx": 18,
+    "instruction": "Move the right slop to the top shelf",
+    "verb": "move",
+    "n_steps": 417,
+    "frame_indices": [
+      0,
+      18,
+      36,
+      54,
+      72,
+      90,
+      108,
+      126,
+      144,
+      162,
+      180,
+      198,
+      217,
+      235,
+      253,
+      271,
+      289,
+      307,
+      325,
+      343,
+      361,
+      379,
+      397,
+      416
+    ],
+    "annotations": [
+      {
+        "frame": 0,
+        "verb": "move",
+        "subtask": "move the arm from its starting position toward the shelf"
+      },
+      {
+        "frame": 1,
+        "verb": "move",
+        "subtask": "move the arm from its starting position toward the shelf"
+      },
+      {
+        "frame": 2,
+        "verb": "move",
+        "subtask": "move the arm from its starting position toward the shelf"
+      },
+      {
+        "frame": 3,
+        "verb": "reach",
+        "subtask": "reach downward toward the right slipper on the bottom shelf"
+      },
+      {
+        "frame": 4,
+        "verb": "reach",
+        "subtask": "reach downward toward the right slipper on the bottom shelf"
+      },
+      {
+        "frame": 5,
+        "verb": "reach",
+        "subtask": "reach downward toward the right slipper on the bottom shelf"
+      },
+      {
+        "frame": 6,
+        "verb": "reach",
+        "subtask": "reach downward toward the right slipper on the bottom shelf"
+      },
+      {
+        "frame": 7,
+        "verb": "reach",
+        "subtask": "reach downward toward the right slipper on the bottom shelf"
+      },
+      {
+        "frame": 8,
+        "verb": "reach",
+        "subtask": "reach downward toward the right slipper on the bottom shelf"
+      },
+      {
+        "frame": 9,
+        "verb": "grasp",
+        "subtask": "grasp the right slipper on the bottom shelf"
+      },
+      {
+        "frame": 10,
+        "verb": "lift",
+        "subtask": "lift the slipper off the bottom shelf"
+      },
+      {
+        "frame": 11,
+        "verb": "carry",
+        "subtask": "carry the slipper up and over to the top shelf"
+      },
+      {
+        "frame": 12,
+        "verb": "carry",
+        "subtask": "carry the slipper up and over to the top shelf"
+      },
+      {
+        "frame": 13,
+        "verb": "carry",
+        "subtask": "carry the slipper up and over to the top shelf"
+      },
+      {
+        "frame": 14,
+        "verb": "carry",
+        "subtask": "carry the slipper up and over to the top shelf"
+      },
+      {
+        "frame": 15,
+        "verb": "carry",
+        "subtask": "carry the slipper up and over to the top shelf"
+      },
+      {
+        "frame": 16,
+        "verb": "carry",
+        "subtask": "carry the slipper up and over to the top shelf"
+      },
+      {
+        "frame": 17,
+        "verb": "carry",
+        "subtask": "carry the slipper up and over to the top shelf"
+      },
+      {
+        "frame": 18,
+        "verb": "place",
+        "subtask": "place the slipper onto the top shelf"
+      },
+      {
+        "frame": 19,
+        "verb": "place",
+        "subtask": "place the slipper onto the top shelf"
+      },
+      {
+        "frame": 20,
+        "verb": "release",
+        "subtask": "release the slipper on the top shelf"
+      },
+      {
+        "frame": 21,
+        "verb": "release",
+        "subtask": "release the slipper on the top shelf"
+      },
+      {
+        "frame": 22,
+        "verb": "withdraw",
+        "subtask": "withdraw the arm upward and away from the shelf"
+      },
+      {
+        "frame": 23,
+        "verb": "withdraw",
+        "subtask": "withdraw the arm upward and away from the shelf"
+      }
+    ],
+    "task_analysis": "The robot's task is to move the right grey slipper (referred to as \"slop\") from the bottom shelf of a black wire rack to the top shelf.\n\nThe overall progression of the task can be divided into five major phases:\n1.  **Approach (Frames 0-8):** The robot arm starts in a neutral position and moves downward and forward, positioning its gripper directly over the right slipper on the bottom shelf.\n2.  **Grasp and Lift (Frames 9-10):** The gripper closes to grasp the slipper, and then lifts it vertically off the bottom shelf.\n3.  **Transport (Frames 11-17):** The robot carries the slipper in an upward and arcing motion, moving it from its initial position toward the target placement area on the top shelf, clearing the other objects.\n4.  **Place and Release (Frames 18-21):** The robot lowers the slipper onto the top shelf, positions it, and then opens its gripper to release it.\n5.  **Withdraw (Frames 22-23):** After successfully placing the slipper, the robot retracts its arm upward and away from the shelf to complete the task.\n\nThe task is about halfway complete by Frame 11, when the slipper has been successfully picked up and is being moved to its destination. The key action of placing the object begins around Frame 18."
+  },
+  {
+    "episode_idx": 28,
+    "instruction": "Open the drawer",
+    "verb": "open",
+    "n_steps": 316,
+    "frame_indices": [
+      0,
+      13,
+      27,
+      41,
+      54,
+      68,
+      82,
+      95,
+      109,
+      123,
+      136,
+      150,
+      164,
+      178,
+      191,
+      205,
+      219,
+      232,
+      246,
+      260,
+      273,
+      287,
+      301,
+      315
+    ],
+    "annotations": [
+      {
+        "frame": 0,
+        "verb": "move",
+        "subtask": "move the robot arm from its initial position toward the kitchen counter"
+      },
+      {
+        "frame": 1,
+        "verb": "move",
+        "subtask": "move the robot arm from its initial position toward the kitchen counter"
+      },
+      {
+        "frame": 2,
+        "verb": "move",
+        "subtask": "move the robot arm from its initial position toward the kitchen counter"
+      },
+      {
+        "frame": 3,
+        "verb": "move",
+        "subtask": "move the robot arm from its initial position toward the kitchen counter"
+      },
+      {
+        "frame": 4,
+        "verb": "move",
+        "subtask": "move the gripper toward the drawer handle"
+      },
+      {
+        "frame": 5,
+        "verb": "move",
+        "subtask": "move the gripper toward the drawer handle"
+      },
+      {
+        "frame": 6,
+        "verb": "move",
+        "subtask": "move the gripper toward the drawer handle"
+      },
+      {
+        "frame": 7,
+        "verb": "position",
+        "subtask": "position the gripper in front of the drawer handle to prepare for grasping"
+      },
+      {
+        "frame": 8,
+        "verb": "position",
+        "subtask": "position the gripper in front of the drawer handle to prepare for grasping"
+      },
+      {
+        "frame": 9,
+        "verb": "grasp",
+        "subtask": "grasp the drawer handle"
+      },
+      {
+        "frame": 10,
+        "verb": "pull",
+        "subtask": "pull the handle backward to open the drawer"
+      },
+      {
+        "frame": 11,
+        "verb": "pull",
+        "subtask": "pull the handle backward to open the drawer"
+      },
+      {
+        "frame": 12,
+        "verb": "pull",
+        "subtask": "pull the handle backward to open the drawer"
+      },
+      {
+        "frame": 13,
+        "verb": "release",
+        "subtask": "release the drawer handle"
+      },
+      {
+        "frame": 14,
+        "verb": "retract",
+        "subtask": "retract the gripper upward after opening the drawer"
+      },
+      {
+        "frame": 15,
+        "verb": "move",
+        "subtask": "move the gripper over the open drawer"
+      },
+      {
+        "frame": 16,
+        "verb": "move",
+        "subtask": "move the gripper over the open drawer"
+      },
+      {
+        "frame": 17,
+        "verb": "move",
+        "subtask": "move the gripper over the open drawer"
+      },
+      {
+        "frame": 18,
+        "verb": "lower",
+        "subtask": "lower the gripper toward the red basket inside the drawer"
+      },
+      {
+        "frame": 19,
+        "verb": "lower",
+        "subtask": "lower the gripper toward the red basket inside the drawer"
+      },
+      {
+        "frame": 20,
+        "verb": "lower",
+        "subtask": "lower the gripper toward the red basket inside the drawer"
+      },
+      {
+        "frame": 21,
+        "verb": "lower",
+        "subtask": "lower the gripper toward the red basket inside the drawer"
+      },
+      {
+        "frame": 22,
+        "verb": "lower",
+        "subtask": "lower the gripper toward the red basket inside the drawer"
+      },
+      {
+        "frame": 23,
+        "verb": "lower",
+        "subtask": "lower the gripper toward the red basket inside the drawer"
+      }
+    ],
+    "task_analysis": "The scene is a kitchen or lab environment with a countertop and cabinets. The primary object of interest is the top drawer under the counter. The task is to open this drawer.\n\nThe overall progression of the task can be divided into three main phases:\n1.  **Approach (Frames 0-8):** The robot arm is initially off-screen. It moves into the frame from the right and approaches the handle of the top drawer. This phase includes both a coarse movement into the correct area and a finer movement to align the gripper with the handle.\n2.  **Grasp and Open (Frames 9-12):** This is the core action of the task. The robot gripper closes to grasp the drawer handle at frame 9. It then immediately begins to pull the drawer straight out. The drawer is fully open by frame 12.\n3.  **Release and Reposition (Frames 13-23):** After successfully opening the drawer, the robot releases the handle at frame 13. It then retracts its arm slightly before moving back over the now-open drawer and lowering its gripper towards a red basket inside. This final phase appears to be a preparation for a subsequent task involving the drawer's contents. The initial instruction \"Open the drawer\" is completed by frame 13."
+  },
+  {
+    "episode_idx": 29,
+    "instruction": "Twist the remote control",
+    "verb": "twist",
+    "n_steps": 289,
+    "frame_indices": [
+      0,
+      12,
+      25,
+      37,
+      50,
+      62,
+      75,
+      87,
+      100,
+      112,
+      125,
+      137,
+      150,
+      162,
+      175,
+      187,
+      200,
+      212,
+      225,
+      237,
+      250,
+      262,
+      275,
+      288
+    ],
+    "annotations": [
+      {
+        "frame": 0,
+        "verb": "reach",
+        "subtask": "reach toward the remote control on the couch"
+      },
+      {
+        "frame": 1,
+        "verb": "reach",
+        "subtask": "reach toward the remote control on the couch"
+      },
+      {
+        "frame": 2,
+        "verb": "reach",
+        "subtask": "reach toward the remote control on the couch"
+      },
+      {
+        "frame": 3,
+        "verb": "reach",
+        "subtask": "reach toward the remote control on the couch"
+      },
+      {
+        "frame": 4,
+        "verb": "reach",
+        "subtask": "reach toward the remote control on the couch"
+      },
+      {
+        "frame": 5,
+        "verb": "reach",
+        "subtask": "reach toward the remote control on the couch"
+      },
+      {
+        "frame": 6,
+        "verb": "reach",
+        "subtask": "reach toward the remote control on the couch"
+      },
+      {
+        "frame": 7,
+        "verb": "reach",
+        "subtask": "reach toward the remote control on the couch"
+      },
+      {
+        "frame": 8,
+        "verb": "reach",
+        "subtask": "reach toward the remote control on the couch"
+      },
+      {
+        "frame": 9,
+        "verb": "reach",
+        "subtask": "reach toward the remote control on the couch"
+      },
+      {
+        "frame": 10,
+        "verb": "reach",
+        "subtask": "reach toward the remote control on the couch"
+      },
+      {
+        "frame": 11,
+        "verb": "reach",
+        "subtask": "reach toward the remote control on the couch"
+      },
+      {
+        "frame": 12,
+        "verb": "lower",
+        "subtask": "lower the gripper onto the remote control to prepare for grasping"
+      },
+      {
+        "frame": 13,
+        "verb": "lower",
+        "subtask": "lower the gripper onto the remote control to prepare for grasping"
+      },
+      {
+        "frame": 14,
+        "verb": "lower",
+        "subtask": "lower the gripper onto the remote control to prepare for grasping"
+      },
+      {
+        "frame": 15,
+        "verb": "grasp",
+        "subtask": "grasp the remote control"
+      },
+      {
+        "frame": 16,
+        "verb": "lift",
+        "subtask": "lift the remote control up from the couch"
+      },
+      {
+        "frame": 17,
+        "verb": "lift",
+        "subtask": "lift the remote control up from the couch"
+      },
+      {
+        "frame": 18,
+        "verb": "twist",
+        "subtask": "twist the remote control clockwise"
+      },
+      {
+        "frame": 19,
+        "verb": "twist",
+        "subtask": "twist the remote control clockwise"
+      },
+      {
+        "frame": 20,
+        "verb": "twist",
+        "subtask": "twist the remote control clockwise"
+      },
+      {
+        "frame": 21,
+        "verb": "twist",
+        "subtask": "twist the remote control clockwise"
+      },
+      {
+        "frame": 22,
+        "verb": "retract",
+        "subtask": "retract the arm away from the couch"
+      },
+      {
+        "frame": 23,
+        "verb": "retract",
+        "subtask": "retract the arm away from the couch"
+      }
+    ],
+    "task_analysis": "The scene is a living room with a brown couch. The relevant object is a black remote control lying on the couch. The task is performed by a robot arm that enters the scene from the right.\n\nThe task follows a clear progression of \"reach-grasp-manipulate-retract\".\n1.  **Approach (Frames 0-11):** The episode begins with the robot arm off-screen or in its starting position. From frame 3 onwards, it becomes visible and moves purposefully towards the remote control on the couch. This continuous reaching motion concludes at frame 11 when the arm is positioned above the target.\n2.  **Position and Grasp (Frames 12-15):** The robot arm makes a fine adjustment, lowering its gripper directly onto the remote control (frames 12-14). At frame 15, the gripper closes, successfully grasping the remote.\n3.  **Lift and Twist (Frames 16-21):** Immediately after grasping, the robot lifts the remote control vertically off the couch (frames 16-17). Then, it executes the core instruction by rotating its wrist to twist the remote control clockwise (frames 18-21).\n4.  **Retract (Frames 22-23):** Having completed the twist, the robot arm retracts upwards and away from the couch, bringing the episode to a close."
+  },
+  {
+    "episode_idx": 32,
+    "instruction": "Turn on the extension cable",
+    "verb": "turn on",
+    "n_steps": 166,
+    "frame_indices": [
+      0,
+      7,
+      14,
+      21,
+      28,
+      35,
+      43,
+      50,
+      57,
+      64,
+      71,
+      78,
+      86,
+      93,
+      100,
+      107,
+      114,
+      121,
+      129,
+      136,
+      143,
+      150,
+      157,
+      165
+    ],
+    "annotations": [
+      {
+        "frame": 0,
+        "verb": "approach",
+        "subtask": "approach the red power switch on the extension cable"
+      },
+      {
+        "frame": 1,
+        "verb": "approach",
+        "subtask": "approach the red power switch on the extension cable"
+      },
+      {
+        "frame": 2,
+        "verb": "approach",
+        "subtask": "approach the red power switch on the extension cable"
+      },
+      {
+        "frame": 3,
+        "verb": "approach",
+        "subtask": "approach the red power switch on the extension cable"
+      },
+      {
+        "frame": 4,
+        "verb": "approach",
+        "subtask": "approach the red power switch on the extension cable"
+      },
+      {
+        "frame": 5,
+        "verb": "approach",
+        "subtask": "approach the red power switch on the extension cable"
+      },
+      {
+        "frame": 6,
+        "verb": "approach",
+        "subtask": "approach the red power switch on the extension cable"
+      },
+      {
+        "frame": 7,
+        "verb": "approach",
+        "subtask": "approach the red power switch on the extension cable"
+      },
+      {
+        "frame": 8,
+        "verb": "approach",
+        "subtask": "approach the red power switch on the extension cable"
+      },
+      {
+        "frame": 9,
+        "verb": "approach",
+        "subtask": "approach the red power switch on the extension cable"
+      },
+      {
+        "frame": 10,
+        "verb": "approach",
+        "subtask": "approach the red power switch on the extension cable"
+      },
+      {
+        "frame": 11,
+        "verb": "approach",
+        "subtask": "approach the red power switch on the extension cable"
+      },
+      {
+        "frame": 12,
+        "verb": "approach",
+        "subtask": "approach the red power switch on the extension cable"
+      },
+      {
+        "frame": 13,
+        "verb": "approach",
+        "subtask": "approach the red power switch on the extension cable"
+      },
+      {
+        "frame": 14,
+        "verb": "approach",
+        "subtask": "approach the red power switch on the extension cable"
+      },
+      {
+        "frame": 15,
+        "verb": "position",
+        "subtask": "position the end-effector over the red power switch"
+      },
+      {
+        "frame": 16,
+        "verb": "position",
+        "subtask": "position the end-effector over the red power switch"
+      },
+      {
+        "frame": 17,
+        "verb": "position",
+        "subtask": "position the end-effector over the red power switch"
+      },
+      {
+        "frame": 18,
+        "verb": "press",
+        "subtask": "press the red power switch to turn on the extension cable"
+      },
+      {
+        "frame": 19,
+        "verb": "press",
+        "subtask": "press the red power switch to turn on the extension cable"
+      },
+      {
+        "frame": 20,
+        "verb": "retract",
+        "subtask": "retract the arm away from the extension cable"
+      },
+      {
+        "frame": 21,
+        "verb": "retract",
+        "subtask": "retract the arm away from the extension cable"
+      },
+      {
+        "frame": 22,
+        "verb": "retract",
+        "subtask": "retract the arm away from the extension cable"
+      },
+      {
+        "frame": 23,
+        "verb": "retract",
+        "subtask": "retract the arm away from the extension cable"
+      }
+    ],
+    "task_analysis": "The scene is a workshop with a black tabletop where a white extension cable and a white appliance are placed. The task is to turn on the extension cable.\n\nThe overall progression of the task can be divided into four major phases:\n1.  **Approach (Frames 0-14):** The episode begins with a static view of the scene. At frame 10, a white robot arm enters the frame from the top right and moves towards the red power switch on the extension cable.\n2.  **Alignment (Frames 15-17):** The robot arm pauses its movement and positions its end-effector directly above the red power switch, preparing to press it.\n3.  **Pressing (Frames 18-19):** The robot lowers its end-effector, makes contact with the switch, and presses it. The successful press is confirmed in frame 18 when the switch illuminates.\n4.  **Retraction (Frames 20-23):** After successfully turning on the extension cable, the robot arm retracts upwards and away from the table, leaving the scene."
+  },
+  {
+    "episode_idx": 44,
+    "instruction": "Flick the switch on the machine on",
+    "verb": "flick",
+    "n_steps": 123,
+    "frame_indices": [
+      0,
+      5,
+      10,
+      15,
+      21,
+      26,
+      31,
+      37,
+      42,
+      47,
+      53,
+      58,
+      63,
+      68,
+      74,
+      79,
+      84,
+      90,
+      95,
+      100,
+      106,
+      111,
+      116,
+      122
+    ],
+    "annotations": [
+      {
+        "frame": 0,
+        "verb": "reach",
+        "subtask": "reach toward the red switch on the machine"
+      },
+      {
+        "frame": 1,
+        "verb": "reach",
+        "subtask": "reach toward the red switch on the machine"
+      },
+      {
+        "frame": 2,
+        "verb": "reach",
+        "subtask": "reach toward the red switch on the machine"
+      },
+      {
+        "frame": 3,
+        "verb": "reach",
+        "subtask": "reach toward the red switch on the machine"
+      },
+      {
+        "frame": 4,
+        "verb": "reach",
+        "subtask": "reach toward the red switch on the machine"
+      },
+      {
+        "frame": 5,
+        "verb": "reach",
+        "subtask": "reach toward the red switch on the machine"
+      },
+      {
+        "frame": 6,
+        "verb": "reach",
+        "subtask": "reach toward the red switch on the machine"
+      },
+      {
+        "frame": 7,
+        "verb": "reach",
+        "subtask": "reach toward the red switch on the machine"
+      },
+      {
+        "frame": 8,
+        "verb": "reach",
+        "subtask": "reach toward the red switch on the machine"
+      },
+      {
+        "frame": 9,
+        "verb": "align",
+        "subtask": "align the gripper with the bottom of the red switch"
+      },
+      {
+        "frame": 10,
+        "verb": "align",
+        "subtask": "align the gripper with the bottom of the red switch"
+      },
+      {
+        "frame": 11,
+        "verb": "align",
+        "subtask": "align the gripper with the bottom of the red switch"
+      },
+      {
+        "frame": 12,
+        "verb": "push",
+        "subtask": "push the red switch upward to turn on the machine"
+      },
+      {
+        "frame": 13,
+        "verb": "push",
+        "subtask": "push the red switch upward to turn on the machine"
+      },
+      {
+        "frame": 14,
+        "verb": "push",
+        "subtask": "push the red switch upward to turn on the machine"
+      },
+      {
+        "frame": 15,
+        "verb": "push",
+        "subtask": "push the red switch upward to turn on the machine"
+      },
+      {
+        "frame": 16,
+        "verb": "push",
+        "subtask": "push the red switch upward to turn on the machine"
+      },
+      {
+        "frame": 17,
+        "verb": "push",
+        "subtask": "push the red switch upward to turn on the machine"
+      },
+      {
+        "frame": 18,
+        "verb": "push",
+        "subtask": "push the red switch upward to turn on the machine"
+      },
+      {
+        "frame": 19,
+        "verb": "push",
+        "subtask": "push the red switch upward to turn on the machine"
+      },
+      {
+        "frame": 20,
+        "verb": "retreat",
+        "subtask": "retreat the arm away from the machine"
+      },
+      {
+        "frame": 21,
+        "verb": "retreat",
+        "subtask": "retreat the arm away from the machine"
+      },
+      {
+        "frame": 22,
+        "verb": "retreat",
+        "subtask": "retreat the arm away from the machine"
+      },
+      {
+        "frame": 23,
+        "verb": "retreat",
+        "subtask": "retreat the arm away from the machine"
+      }
+    ],
+    "task_analysis": "The scene takes place in a kitchen or lab environment. A white robot arm is tasked with turning on a machine, likely a coffee maker, by flicking a red switch.\n\nThe task progresses through three distinct phases:\n1.  **Approach (Frames 0-11):** The robot begins in a neutral position and moves its end-effector towards the red switch on the machine. This phase involves a broad movement to get close to the target, followed by fine-tuned adjustments to precisely align the gripper with the switch. This phase transitions to the next upon making contact with the switch.\n2.  **Manipulation (Frames 12-19):** In this phase, the robot performs the core action. It pushes the red switch upward. The success of this action is confirmed in frame 18 when a red indicator light on the machine turns on. The switch is fully in the \"on\" position by frame 19.\n3.  **Retraction (Frames 20-23):** After successfully flicking the switch, the robot withdraws its arm from the machine, moving back towards a neutral or resting position.\n\nThe task is fully complete by frame 20, as the switch is on and the robot is beginning to move away. The remaining frames show the completion of the retraction movement."
+  }
+]

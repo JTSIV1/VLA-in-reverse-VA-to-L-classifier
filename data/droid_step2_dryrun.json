@@ -1,0 +1,1542 @@
+[
+  {
+    "episode_idx": 3,
+    "instruction": "Close the lid of the bottle",
+    "verb": "close",
+    "n_steps": 268,
+    "frame_indices": [
+      0,
+      11,
+      23,
+      34,
+      46,
+      58,
+      69,
+      81,
+      92,
+      104,
+      116,
+      127,
+      139,
+      150,
+      162,
+      174,
+      185,
+      197,
+      208,
+      220,
+      232,
+      243,
+      255,
+      267
+    ],
+    "annotations": [
+      {
+        "frame": 0,
+        "verb": "approach",
+        "subtask": "approach the lid"
+      },
+      {
+        "frame": 1,
+        "verb": "approach",
+        "subtask": "approach the lid"
+      },
+      {
+        "frame": 2,
+        "verb": "approach",
+        "subtask": "approach the lid"
+      },
+      {
+        "frame": 3,
+        "verb": "approach",
+        "subtask": "approach the lid"
+      },
+      {
+        "frame": 4,
+        "verb": "approach",
+        "subtask": "approach the lid"
+      },
+      {
+        "frame": 5,
+        "verb": "approach",
+        "subtask": "approach the lid"
+      },
+      {
+        "frame": 6,
+        "verb": "approach",
+        "subtask": "approach the lid"
+      },
+      {
+        "frame": 7,
+        "verb": "position",
+        "subtask": "position the gripper"
+      },
+      {
+        "frame": 8,
+        "verb": "position",
+        "subtask": "position the gripper"
+      },
+      {
+        "frame": 9,
+        "verb": "carry",
+        "subtask": "carry the lid"
+      },
+      {
+        "frame": 10,
+        "verb": "move",
+        "subtask": "move the lid"
+      },
+      {
+        "frame": 11,
+        "verb": "move",
+        "subtask": "move the lid"
+      },
+      {
+        "frame": 12,
+        "verb": "align",
+        "subtask": "align the lid"
+      },
+      {
+        "frame": 13,
+        "verb": "close",
+        "subtask": "close the lid"
+      },
+      {
+        "frame": 14,
+        "verb": "close",
+        "subtask": "close the lid"
+      },
+      {
+        "frame": 15,
+        "verb": "close",
+        "subtask": "close the lid"
+      },
+      {
+        "frame": 16,
+        "verb": "retract",
+        "subtask": "retract the arm"
+      },
+      {
+        "frame": 17,
+        "verb": "retract",
+        "subtask": "retract the arm"
+      },
+      {
+        "frame": 18,
+        "verb": "retract",
+        "subtask": "retract the arm"
+      },
+      {
+        "frame": 19,
+        "verb": "retract",
+        "subtask": "retract the arm"
+      },
+      {
+        "frame": 20,
+        "verb": "retract",
+        "subtask": "retract the arm"
+      },
+      {
+        "frame": 21,
+        "verb": "retract",
+        "subtask": "retract the arm"
+      },
+      {
+        "frame": 22,
+        "verb": "retract",
+        "subtask": "retract the arm"
+      },
+      {
+        "frame": 23,
+        "verb": "retract",
+        "subtask": "retract the arm"
+      }
+    ]
+  },
+  {
+    "episode_idx": 10,
+    "instruction": "Fold the yellow towel twice from left to right.",
+    "verb": "fold",
+    "n_steps": 562,
+    "frame_indices": [
+      0,
+      24,
+      48,
+      73,
+      97,
+      121,
+      146,
+      170,
+      195,
+      219,
+      243,
+      268,
+      292,
+      317,
+      341,
+      365,
+      390,
+      414,
+      439,
+      463,
+      487,
+      512,
+      536,
+      561
+    ],
+    "annotations": [
+      {
+        "frame": 0,
+        "verb": "approach",
+        "subtask": "approach the towel"
+      },
+      {
+        "frame": 1,
+        "verb": "approach",
+        "subtask": "approach the towel"
+      },
+      {
+        "frame": 2,
+        "verb": "approach",
+        "subtask": "approach the towel"
+      },
+      {
+        "frame": 3,
+        "verb": "approach",
+        "subtask": "approach the towel"
+      },
+      {
+        "frame": 4,
+        "verb": "reach",
+        "subtask": "reach the towel"
+      },
+      {
+        "frame": 5,
+        "verb": "grasp",
+        "subtask": "grasp the towel"
+      },
+      {
+        "frame": 6,
+        "verb": "fold",
+        "subtask": "fold the towel"
+      },
+      {
+        "frame": 7,
+        "verb": "position",
+        "subtask": "position the towel"
+      },
+      {
+        "frame": 8,
+        "verb": "lower",
+        "subtask": "lower the towel"
+      },
+      {
+        "frame": 9,
+        "verb": "place",
+        "subtask": "place the towel"
+      },
+      {
+        "frame": 10,
+        "verb": "release",
+        "subtask": "release the towel"
+      },
+      {
+        "frame": 11,
+        "verb": "approach",
+        "subtask": "approach the towel"
+      },
+      {
+        "frame": 12,
+        "verb": "approach",
+        "subtask": "approach the towel"
+      },
+      {
+        "frame": 13,
+        "verb": "reach",
+        "subtask": "reach the towel"
+      },
+      {
+        "frame": 14,
+        "verb": "grasp",
+        "subtask": "grasp the towel"
+      },
+      {
+        "frame": 15,
+        "verb": "grasp",
+        "subtask": "grasp the towel"
+      },
+      {
+        "frame": 16,
+        "verb": "fold",
+        "subtask": "fold the towel"
+      },
+      {
+        "frame": 17,
+        "verb": "fold",
+        "subtask": "fold the towel"
+      },
+      {
+        "frame": 18,
+        "verb": "position",
+        "subtask": "position the towel"
+      },
+      {
+        "frame": 19,
+        "verb": "lower",
+        "subtask": "lower the towel"
+      },
+      {
+        "frame": 20,
+        "verb": "place",
+        "subtask": "place the towel"
+      },
+      {
+        "frame": 21,
+        "verb": "place",
+        "subtask": "place the towel"
+      },
+      {
+        "frame": 22,
+        "verb": "release",
+        "subtask": "release the towel"
+      },
+      {
+        "frame": 23,
+        "verb": "retract",
+        "subtask": "retract the arm"
+      }
+    ]
+  },
+  {
+    "episode_idx": 12,
+    "instruction": "Push down the switch on the toaster",
+    "verb": "push",
+    "n_steps": 233,
+    "frame_indices": [
+      0,
+      10,
+      20,
+      30,
+      40,
+      50,
+      60,
+      70,
+      80,
+      90,
+      100,
+      110,
+      121,
+      131,
+      141,
+      151,
+      161,
+      171,
+      181,
+      191,
+      201,
+      211,
+      221,
+      232
+    ],
+    "annotations": [
+      {
+        "frame": 0,
+        "verb": "approach",
+        "subtask": "approach the toaster"
+      },
+      {
+        "frame": 1,
+        "verb": "approach",
+        "subtask": "approach the toaster"
+      },
+      {
+        "frame": 2,
+        "verb": "approach",
+        "subtask": "approach the toaster"
+      },
+      {
+        "frame": 3,
+        "verb": "align",
+        "subtask": "align with the toaster switch"
+      },
+      {
+        "frame": 4,
+        "verb": "align",
+        "subtask": "align with the toaster switch"
+      },
+      {
+        "frame": 5,
+        "verb": "lower",
+        "subtask": "lower arm to the switch"
+      },
+      {
+        "frame": 6,
+        "verb": "contact",
+        "subtask": "contact the toaster switch"
+      },
+      {
+        "frame": 7,
+        "verb": "press",
+        "subtask": "press the toaster switch"
+      },
+      {
+        "frame": 8,
+        "verb": "press",
+        "subtask": "press the toaster switch"
+      },
+      {
+        "frame": 9,
+        "verb": "press",
+        "subtask": "press the toaster switch"
+      },
+      {
+        "frame": 10,
+        "verb": "press",
+        "subtask": "press the toaster switch"
+      },
+      {
+        "frame": 11,
+        "verb": "press",
+        "subtask": "press the toaster switch"
+      },
+      {
+        "frame": 12,
+        "verb": "press",
+        "subtask": "press the toaster switch"
+      },
+      {
+        "frame": 13,
+        "verb": "press",
+        "subtask": "press the toaster switch"
+      },
+      {
+        "frame": 14,
+        "verb": "press",
+        "subtask": "press the toaster switch"
+      },
+      {
+        "frame": 15,
+        "verb": "press",
+        "subtask": "press the toaster switch"
+      },
+      {
+        "frame": 16,
+        "verb": "press",
+        "subtask": "press the toaster switch"
+      },
+      {
+        "frame": 17,
+        "verb": "press",
+        "subtask": "press the toaster switch"
+      },
+      {
+        "frame": 18,
+        "verb": "press",
+        "subtask": "press the toaster switch"
+      },
+      {
+        "frame": 19,
+        "verb": "press",
+        "subtask": "press the toaster switch"
+      },
+      {
+        "frame": 20,
+        "verb": "lift",
+        "subtask": "lift from the toaster switch"
+      },
+      {
+        "frame": 21,
+        "verb": "retract",
+        "subtask": "retract the arm"
+      },
+      {
+        "frame": 22,
+        "verb": "retract",
+        "subtask": "retract the arm"
+      },
+      {
+        "frame": 23,
+        "verb": "retract",
+        "subtask": "retract the arm"
+      }
+    ]
+  },
+  {
+    "episode_idx": 15,
+    "instruction": "Set the grey cup upright",
+    "verb": "set",
+    "n_steps": 170,
+    "frame_indices": [
+      0,
+      7,
+      14,
+      22,
+      29,
+      36,
+      44,
+      51,
+      58,
+      66,
+      73,
+      80,
+      88,
+      95,
+      102,
+      110,
+      117,
+      124,
+      132,
+      139,
+      146,
+      154,
+      161,
+      169
+    ],
+    "annotations": [
+      {
+        "frame": 0,
+        "verb": "move",
+        "subtask": "move arm"
+      },
+      {
+        "frame": 1,
+        "verb": "move",
+        "subtask": "move arm"
+      },
+      {
+        "frame": 2,
+        "verb": "move",
+        "subtask": "move arm"
+      },
+      {
+        "frame": 3,
+        "verb": "approach",
+        "subtask": "approach the grey cup"
+      },
+      {
+        "frame": 4,
+        "verb": "approach",
+        "subtask": "approach the grey cup"
+      },
+      {
+        "frame": 5,
+        "verb": "approach",
+        "subtask": "approach the grey cup"
+      },
+      {
+        "frame": 6,
+        "verb": "approach",
+        "subtask": "approach the grey cup"
+      },
+      {
+        "frame": 7,
+        "verb": "approach",
+        "subtask": "approach the grey cup"
+      },
+      {
+        "frame": 8,
+        "verb": "approach",
+        "subtask": "approach the grey cup"
+      },
+      {
+        "frame": 9,
+        "verb": "grasp",
+        "subtask": "grasp the grey cup"
+      },
+      {
+        "frame": 10,
+        "verb": "grasp",
+        "subtask": "grasp the grey cup"
+      },
+      {
+        "frame": 11,
+        "verb": "lift",
+        "subtask": "lift the grey cup"
+      },
+      {
+        "frame": 12,
+        "verb": "lift",
+        "subtask": "lift the grey cup"
+      },
+      {
+        "frame": 13,
+        "verb": "orient",
+        "subtask": "orient the grey cup"
+      },
+      {
+        "frame": 14,
+        "verb": "orient",
+        "subtask": "orient the grey cup"
+      },
+      {
+        "frame": 15,
+        "verb": "lower",
+        "subtask": "lower the grey cup"
+      },
+      {
+        "frame": 16,
+        "verb": "lower",
+        "subtask": "lower the grey cup"
+      },
+      {
+        "frame": 17,
+        "verb": "place",
+        "subtask": "place the grey cup"
+      },
+      {
+        "frame": 18,
+        "verb": "release",
+        "subtask": "release the grey cup"
+      },
+      {
+        "frame": 19,
+        "verb": "retract",
+        "subtask": "retract arm"
+      },
+      {
+        "frame": 20,
+        "verb": "retract",
+        "subtask": "retract arm"
+      },
+      {
+        "frame": 21,
+        "verb": "retract",
+        "subtask": "retract arm"
+      },
+      {
+        "frame": 22,
+        "verb": "retract",
+        "subtask": "retract arm"
+      },
+      {
+        "frame": 23,
+        "verb": "retract",
+        "subtask": "retract arm"
+      }
+    ]
+  },
+  {
+    "episode_idx": 17,
+    "instruction": "Put the spatula in the utensil holder",
+    "verb": "put",
+    "n_steps": 321,
+    "frame_indices": [
+      0,
+      13,
+      27,
+      41,
+      55,
+      69,
+      83,
+      97,
+      111,
+      125,
+      139,
+      153,
+      166,
+      180,
+      194,
+      208,
+      222,
+      236,
+      250,
+      264,
+      278,
+      292,
+      306,
+      320
+    ],
+    "annotations": [
+      {
+        "frame": 0,
+        "verb": "reach",
+        "subtask": "reach for the spatula"
+      },
+      {
+        "frame": 1,
+        "verb": "reach",
+        "subtask": "reach for the spatula"
+      },
+      {
+        "frame": 2,
+        "verb": "reach",
+        "subtask": "reach for the spatula"
+      },
+      {
+        "frame": 3,
+        "verb": "reach",
+        "subtask": "reach for the spatula"
+      },
+      {
+        "frame": 4,
+        "verb": "reach",
+        "subtask": "reach for the spatula"
+      },
+      {
+        "frame": 5,
+        "verb": "approach",
+        "subtask": "approach the spatula"
+      },
+      {
+        "frame": 6,
+        "verb": "approach",
+        "subtask": "approach the spatula"
+      },
+      {
+        "frame": 7,
+        "verb": "approach",
+        "subtask": "approach the spatula"
+      },
+      {
+        "frame": 8,
+        "verb": "grasp",
+        "subtask": "grasp the spatula"
+      },
+      {
+        "frame": 9,
+        "verb": "grasp",
+        "subtask": "grasp the spatula"
+      },
+      {
+        "frame": 10,
+        "verb": "lift",
+        "subtask": "lift the spatula"
+      },
+      {
+        "frame": 11,
+        "verb": "lift",
+        "subtask": "lift the spatula"
+      },
+      {
+        "frame": 12,
+        "verb": "lift",
+        "subtask": "lift the spatula"
+      },
+      {
+        "frame": 13,
+        "verb": "carry",
+        "subtask": "carry the spatula"
+      },
+      {
+        "frame": 14,
+        "verb": "carry",
+        "subtask": "carry the spatula"
+      },
+      {
+        "frame": 15,
+        "verb": "carry",
+        "subtask": "carry the spatula"
+      },
+      {
+        "frame": 16,
+        "verb": "lower",
+        "subtask": "lower the spatula"
+      },
+      {
+        "frame": 17,
+        "verb": "lower",
+        "subtask": "lower the spatula"
+      },
+      {
+        "frame": 18,
+        "verb": "lower",
+        "subtask": "lower the spatula"
+      },
+      {
+        "frame": 19,
+        "verb": "put",
+        "subtask": "put the spatula"
+      },
+      {
+        "frame": 20,
+        "verb": "put",
+        "subtask": "put the spatula"
+      },
+      {
+        "frame": 21,
+        "verb": "release",
+        "subtask": "release the spatula"
+      },
+      {
+        "frame": 22,
+        "verb": "retract",
+        "subtask": "retract the arm"
+      },
+      {
+        "frame": 23,
+        "verb": "retract",
+        "subtask": "retract the arm"
+      }
+    ]
+  },
+  {
+    "episode_idx": 18,
+    "instruction": "Move the right slop to the top shelf",
+    "verb": "move",
+    "n_steps": 417,
+    "frame_indices": [
+      0,
+      18,
+      36,
+      54,
+      72,
+      90,
+      108,
+      126,
+      144,
+      162,
+      180,
+      198,
+      217,
+      235,
+      253,
+      271,
+      289,
+      307,
+      325,
+      343,
+      361,
+      379,
+      397,
+      416
+    ],
+    "annotations": [
+      {
+        "frame": 0,
+        "verb": "reach",
+        "subtask": "reach the right slop"
+      },
+      {
+        "frame": 1,
+        "verb": "reach",
+        "subtask": "reach the right slop"
+      },
+      {
+        "frame": 2,
+        "verb": "reach",
+        "subtask": "reach the right slop"
+      },
+      {
+        "frame": 3,
+        "verb": "reach",
+        "subtask": "reach the right slop"
+      },
+      {
+        "frame": 4,
+        "verb": "reach",
+        "subtask": "reach the right slop"
+      },
+      {
+        "frame": 5,
+        "verb": "reach",
+        "subtask": "reach the right slop"
+      },
+      {
+        "frame": 6,
+        "verb": "reach",
+        "subtask": "reach the right slop"
+      },
+      {
+        "frame": 7,
+        "verb": "reach",
+        "subtask": "reach the right slop"
+      },
+      {
+        "frame": 8,
+        "verb": "approach",
+        "subtask": "approach the right slop"
+      },
+      {
+        "frame": 9,
+        "verb": "grasp",
+        "subtask": "grasp the right slop"
+      },
+      {
+        "frame": 10,
+        "verb": "grasp",
+        "subtask": "grasp the right slop"
+      },
+      {
+        "frame": 11,
+        "verb": "lift",
+        "subtask": "lift the right slop"
+      },
+      {
+        "frame": 12,
+        "verb": "move",
+        "subtask": "move the right slop"
+      },
+      {
+        "frame": 13,
+        "verb": "move",
+        "subtask": "move the right slop"
+      },
+      {
+        "frame": 14,
+        "verb": "move",
+        "subtask": "move the right slop"
+      },
+      {
+        "frame": 15,
+        "verb": "move",
+        "subtask": "move the right slop"
+      },
+      {
+        "frame": 16,
+        "verb": "move",
+        "subtask": "move the right slop"
+      },
+      {
+        "frame": 17,
+        "verb": "place",
+        "subtask": "place the right slop"
+      },
+      {
+        "frame": 18,
+        "verb": "place",
+        "subtask": "place the right slop"
+      },
+      {
+        "frame": 19,
+        "verb": "place",
+        "subtask": "place the right slop"
+      },
+      {
+        "frame": 20,
+        "verb": "release",
+        "subtask": "release the right slop"
+      },
+      {
+        "frame": 21,
+        "verb": "retract",
+        "subtask": "retract the arm"
+      },
+      {
+        "frame": 22,
+        "verb": "retract",
+        "subtask": "retract the arm"
+      },
+      {
+        "frame": 23,
+        "verb": "retract",
+        "subtask": "retract the arm"
+      }
+    ]
+  },
+  {
+    "episode_idx": 28,
+    "instruction": "Open the drawer",
+    "verb": "open",
+    "n_steps": 316,
+    "frame_indices": [
+      0,
+      13,
+      27,
+      41,
+      54,
+      68,
+      82,
+      95,
+      109,
+      123,
+      136,
+      150,
+      164,
+      178,
+      191,
+      205,
+      219,
+      232,
+      246,
+      260,
+      273,
+      287,
+      301,
+      315
+    ],
+    "annotations": [
+      {
+        "frame": 0,
+        "verb": "move",
+        "subtask": "move arm"
+      },
+      {
+        "frame": 1,
+        "verb": "move",
+        "subtask": "move arm"
+      },
+      {
+        "frame": 2,
+        "verb": "move",
+        "subtask": "move arm"
+      },
+      {
+        "frame": 3,
+        "verb": "move",
+        "subtask": "move arm"
+      },
+      {
+        "frame": 4,
+        "verb": "approach",
+        "subtask": "approach the drawer handle"
+      },
+      {
+        "frame": 5,
+        "verb": "approach",
+        "subtask": "approach the drawer handle"
+      },
+      {
+        "frame": 6,
+        "verb": "approach",
+        "subtask": "approach the drawer handle"
+      },
+      {
+        "frame": 7,
+        "verb": "approach",
+        "subtask": "approach the drawer handle"
+      },
+      {
+        "frame": 8,
+        "verb": "contact",
+        "subtask": "contact the drawer handle"
+      },
+      {
+        "frame": 9,
+        "verb": "grasp",
+        "subtask": "grasp the drawer handle"
+      },
+      {
+        "frame": 10,
+        "verb": "open",
+        "subtask": "open the drawer"
+      },
+      {
+        "frame": 11,
+        "verb": "open",
+        "subtask": "open the drawer"
+      },
+      {
+        "frame": 12,
+        "verb": "open",
+        "subtask": "open the drawer"
+      },
+      {
+        "frame": 13,
+        "verb": "retract",
+        "subtask": "retract the arm"
+      },
+      {
+        "frame": 14,
+        "verb": "retract",
+        "subtask": "retract the arm"
+      },
+      {
+        "frame": 15,
+        "verb": "retract",
+        "subtask": "retract the arm"
+      },
+      {
+        "frame": 16,
+        "verb": "retract",
+        "subtask": "retract the arm"
+      },
+      {
+        "frame": 17,
+        "verb": "retract",
+        "subtask": "retract the arm"
+      },
+      {
+        "frame": 18,
+        "verb": "retract",
+        "subtask": "retract the arm"
+      },
+      {
+        "frame": 19,
+        "verb": "retract",
+        "subtask": "retract the arm"
+      },
+      {
+        "frame": 20,
+        "verb": "retract",
+        "subtask": "retract the arm"
+      },
+      {
+        "frame": 21,
+        "verb": "retract",
+        "subtask": "retract the arm"
+      },
+      {
+        "frame": 22,
+        "verb": "retract",
+        "subtask": "retract the arm"
+      },
+      {
+        "frame": 23,
+        "verb": "retract",
+        "subtask": "retract the arm"
+      }
+    ]
+  },
+  {
+    "episode_idx": 29,
+    "instruction": "Twist the remote control",
+    "verb": "twist",
+    "n_steps": 289,
+    "frame_indices": [
+      0,
+      12,
+      25,
+      37,
+      50,
+      62,
+      75,
+      87,
+      100,
+      112,
+      125,
+      137,
+      150,
+      162,
+      175,
+      187,
+      200,
+      212,
+      225,
+      237,
+      250,
+      262,
+      275,
+      288
+    ],
+    "annotations": [
+      {
+        "frame": 0,
+        "verb": "position",
+        "subtask": "position the arm"
+      },
+      {
+        "frame": 1,
+        "verb": "position",
+        "subtask": "position the arm"
+      },
+      {
+        "frame": 2,
+        "verb": "position",
+        "subtask": "position the arm"
+      },
+      {
+        "frame": 3,
+        "verb": "position",
+        "subtask": "position the arm"
+      },
+      {
+        "frame": 4,
+        "verb": "position",
+        "subtask": "position the arm"
+      },
+      {
+        "frame": 5,
+        "verb": "move",
+        "subtask": "move the arm"
+      },
+      {
+        "frame": 6,
+        "verb": "approach",
+        "subtask": "approach the remote control"
+      },
+      {
+        "frame": 7,
+        "verb": "approach",
+        "subtask": "approach the remote control"
+      },
+      {
+        "frame": 8,
+        "verb": "approach",
+        "subtask": "approach the remote control"
+      },
+      {
+        "frame": 9,
+        "verb": "approach",
+        "subtask": "approach the remote control"
+      },
+      {
+        "frame": 10,
+        "verb": "approach",
+        "subtask": "approach the remote control"
+      },
+      {
+        "frame": 11,
+        "verb": "approach",
+        "subtask": "approach the remote control"
+      },
+      {
+        "frame": 12,
+        "verb": "approach",
+        "subtask": "approach the remote control"
+      },
+      {
+        "frame": 13,
+        "verb": "grasp",
+        "subtask": "grasp the remote control"
+      },
+      {
+        "frame": 14,
+        "verb": "lift",
+        "subtask": "lift the remote control"
+      },
+      {
+        "frame": 15,
+        "verb": "lift",
+        "subtask": "lift the remote control"
+      },
+      {
+        "frame": 16,
+        "verb": "lift",
+        "subtask": "lift the remote control"
+      },
+      {
+        "frame": 17,
+        "verb": "lift",
+        "subtask": "lift the remote control"
+      },
+      {
+        "frame": 18,
+        "verb": "twist",
+        "subtask": "twist the remote control"
+      },
+      {
+        "frame": 19,
+        "verb": "twist",
+        "subtask": "twist the remote control"
+      },
+      {
+        "frame": 20,
+        "verb": "twist",
+        "subtask": "twist the remote control"
+      },
+      {
+        "frame": 21,
+        "verb": "twist",
+        "subtask": "twist the remote control"
+      },
+      {
+        "frame": 22,
+        "verb": "retract",
+        "subtask": "retract the arm"
+      },
+      {
+        "frame": 23,
+        "verb": "retract",
+        "subtask": "retract the arm"
+      }
+    ]
+  },
+  {
+    "episode_idx": 32,
+    "instruction": "Turn on the extension cable",
+    "verb": "turn on",
+    "n_steps": 166,
+    "frame_indices": [
+      0,
+      7,
+      14,
+      21,
+      28,
+      35,
+      43,
+      50,
+      57,
+      64,
+      71,
+      78,
+      86,
+      93,
+      100,
+      107,
+      114,
+      121,
+      129,
+      136,
+      143,
+      150,
+      157,
+      165
+    ],
+    "annotations": [
+      {
+        "frame": 0,
+        "verb": "move",
+        "subtask": "move towards the extension cable"
+      },
+      {
+        "frame": 1,
+        "verb": "move",
+        "subtask": "move towards the extension cable"
+      },
+      {
+        "frame": 2,
+        "verb": "move",
+        "subtask": "move towards the extension cable"
+      },
+      {
+        "frame": 3,
+        "verb": "move",
+        "subtask": "move towards the extension cable"
+      },
+      {
+        "frame": 4,
+        "verb": "move",
+        "subtask": "move towards the extension cable"
+      },
+      {
+        "frame": 5,
+        "verb": "move",
+        "subtask": "move towards the extension cable"
+      },
+      {
+        "frame": 6,
+        "verb": "move",
+        "subtask": "move towards the extension cable"
+      },
+      {
+        "frame": 7,
+        "verb": "move",
+        "subtask": "move towards the extension cable"
+      },
+      {
+        "frame": 8,
+        "verb": "move",
+        "subtask": "move towards the extension cable"
+      },
+      {
+        "frame": 9,
+        "verb": "move",
+        "subtask": "move towards the extension cable"
+      },
+      {
+        "frame": 10,
+        "verb": "move",
+        "subtask": "move towards the extension cable"
+      },
+      {
+        "frame": 11,
+        "verb": "move",
+        "subtask": "move towards the extension cable"
+      },
+      {
+        "frame": 12,
+        "verb": "move",
+        "subtask": "move towards the extension cable"
+      },
+      {
+        "frame": 13,
+        "verb": "approach",
+        "subtask": "approach the extension cable switch"
+      },
+      {
+        "frame": 14,
+        "verb": "approach",
+        "subtask": "approach the extension cable switch"
+      },
+      {
+        "frame": 15,
+        "verb": "approach",
+        "subtask": "approach the extension cable switch"
+      },
+      {
+        "frame": 16,
+        "verb": "approach",
+        "subtask": "approach the extension cable switch"
+      },
+      {
+        "frame": 17,
+        "verb": "approach",
+        "subtask": "approach the extension cable switch"
+      },
+      {
+        "frame": 18,
+        "verb": "approach",
+        "subtask": "approach the extension cable switch"
+      },
+      {
+        "frame": 19,
+        "verb": "contact",
+        "subtask": "contact the extension cable switch"
+      },
+      {
+        "frame": 20,
+        "verb": "press",
+        "subtask": "press the extension cable switch"
+      },
+      {
+        "frame": 21,
+        "verb": "press",
+        "subtask": "press the extension cable switch"
+      },
+      {
+        "frame": 22,
+        "verb": "withdraw",
+        "subtask": "withdraw from the extension cable switch"
+      },
+      {
+        "frame": 23,
+        "verb": "retract",
+        "subtask": "retract the arm"
+      }
+    ]
+  },
+  {
+    "episode_idx": 44,
+    "instruction": "Flick the switch on the machine on",
+    "verb": "flick",
+    "n_steps": 123,
+    "frame_indices": [
+      0,
+      5,
+      10,
+      15,
+      21,
+      26,
+      31,
+      37,
+      42,
+      47,
+      53,
+      58,
+      63,
+      68,
+      74,
+      79,
+      84,
+      90,
+      95,
+      100,
+      106,
+      111,
+      116,
+      122
+    ],
+    "annotations": [
+      {
+        "frame": 0,
+        "verb": "move",
+        "subtask": "move the arm"
+      },
+      {
+        "frame": 1,
+        "verb": "move",
+        "subtask": "move the arm"
+      },
+      {
+        "frame": 2,
+        "verb": "move",
+        "subtask": "move the arm"
+      },
+      {
+        "frame": 3,
+        "verb": "reach",
+        "subtask": "reach the switch"
+      },
+      {
+        "frame": 4,
+        "verb": "reach",
+        "subtask": "reach the switch"
+      },
+      {
+        "frame": 5,
+        "verb": "reach",
+        "subtask": "reach the switch"
+      },
+      {
+        "frame": 6,
+        "verb": "reach",
+        "subtask": "reach the switch"
+      },
+      {
+        "frame": 7,
+        "verb": "reach",
+        "subtask": "reach the switch"
+      },
+      {
+        "frame": 8,
+        "verb": "approach",
+        "subtask": "approach the switch"
+      },
+      {
+        "frame": 9,
+        "verb": "approach",
+        "subtask": "approach the switch"
+      },
+      {
+        "frame": 10,
+        "verb": "approach",
+        "subtask": "approach the switch"
+      },
+      {
+        "frame": 11,
+        "verb": "contact",
+        "subtask": "contact the switch"
+      },
+      {
+        "frame": 12,
+        "verb": "contact",
+        "subtask": "contact the switch"
+      },
+      {
+        "frame": 13,
+        "verb": "contact",
+        "subtask": "contact the switch"
+      },
+      {
+        "frame": 14,
+        "verb": "push",
+        "subtask": "push the switch"
+      },
+      {
+        "frame": 15,
+        "verb": "push",
+        "subtask": "push the switch"
+      },
+      {
+        "frame": 16,
+        "verb": "push",
+        "subtask": "push the switch"
+      },
+      {
+        "frame": 17,
+        "verb": "push",
+        "subtask": "push the switch"
+      },
+      {
+        "frame": 18,
+        "verb": "withdraw",
+        "subtask": "withdraw the arm"
+      },
+      {
+        "frame": 19,
+        "verb": "withdraw",
+        "subtask": "withdraw the arm"
+      },
+      {
+        "frame": 20,
+        "verb": "withdraw",
+        "subtask": "withdraw the arm"
+      },
+      {
+        "frame": 21,
+        "verb": "withdraw",
+        "subtask": "withdraw the arm"
+      },
+      {
+        "frame": 22,
+        "verb": "withdraw",
+        "subtask": "withdraw the arm"
+      },
+      {
+        "frame": 23,
+        "verb": "withdraw",
+        "subtask": "withdraw the arm"
+      }
+    ]
+  }
+]
