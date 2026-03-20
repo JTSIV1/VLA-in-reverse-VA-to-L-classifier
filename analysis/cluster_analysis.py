@@ -115,10 +115,35 @@ def build_features(df, max_len, num_workers, action_rep="native", tokenizer=None
 
     # Build feature matrix via pure slicing
     N = len(df)
+    starts = df["start_idx"].values
+    ends = df["end_idx"].values
+
+    # GAMPT primitive-level: one row per primitive (variable count), 14-D geometric features.
+    # Used for the ARI/NMI eval table (k=21 sweep on primitive features).
+    if action_rep == "gampt_primitive":
+        from tokenization.gampt import GAMPTFeaturizer
+        featurizer = GAMPTFeaturizer()
+        all_feats = []
+        all_labels = []
+        for i in range(N):
+            s = idx_to_pos[starts[i]]
+            e = idx_to_pos[ends[i]] + 1
+            traj = all_actions[s:e]
+            prims = tokenizer.segmenter.segment(traj)
+            feats = featurizer.extract(traj, prims)  # (n_prims, 14)
+            all_feats.append(feats)
+            all_labels.extend([df["primary_verb"].iloc[i]] * len(prims))
+        features = np.vstack(all_feats)
+        verb_labels = all_labels
+        return features, verb_labels
+
     if action_rep == "native":
         features = np.zeros((N, max_len * ACTION_DIM), dtype=np.float32)
     elif action_rep == "fast":
         features = np.zeros((N, max_len), dtype=np.float32)
+    elif action_rep == "gampt":
+        # Trajectory-level: fixed-length token ID sequence (max_primitives tokens per traj)
+        features = np.zeros((N, tokenizer.max_primitives), dtype=np.float32)
     else:
         dummy_traj = np.zeros((max_len, ACTION_DIM), dtype=np.float32)
         dummy_tokens = tokenizer(dummy_traj)
@@ -130,9 +155,6 @@ def build_features(df, max_len, num_workers, action_rep="native", tokenizer=None
             dummy_tokens = dummy_tokens[0]
         feat_len = len(dummy_tokens)
         features = np.zeros((N, feat_len), dtype=np.float32)
-
-    starts = df["start_idx"].values
-    ends = df["end_idx"].values
 
     for i in range(N):
         s = idx_to_pos[starts[i]]
@@ -148,6 +170,8 @@ def build_features(df, max_len, num_workers, action_rep="native", tokenizer=None
             else:
                 tokens = tokens + [0] * (max_len - L)
             features[i] = tokens
+        elif action_rep == "gampt":
+            features[i] = tokenizer.tokenize(traj)  # fixed-length, pad_id-padded
         elif action_rep in ("bin", "quest", "oat"):
             token_ids = tokenizer(traj)
             if (
