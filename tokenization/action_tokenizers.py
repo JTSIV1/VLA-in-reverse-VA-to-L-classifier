@@ -7,6 +7,7 @@ Supports multiple action representations for the verb classifier:
   - vqvla:   pretrained VQ-VLA (causal conv VAE + 4-group ResidualVQ)
   - quest:   QueST tokenizer (conv-based)
   - oat:     Object Action Tokenizer (register-based + FSQ)
+  - gampt:   Geometry-Aware Motion Primitive Tokenizer (kinematic segmentation + KMeans)
 
 Heavy dependencies (dill, zarr, vector_quantize_pytorch) are imported lazily
 so the mmml conda env can load this module without installing everything.
@@ -135,11 +136,25 @@ def load_action_tokenizer(
     quest_ckpt: str = QUEST_TOKENIZER_CKPT,
     oat_ckpt: str = OAT_TOKENIZER_CKPT,
     fit_norm_max_trajs: int = TOKENIZER_FIT_NORM_MAX_TRAJS,
+    gampt_ckpt: str = None,
+    gampt_k: int = 64,
 ):
     """
-    name: "fast" | "bin" | "quest" | "oat"
+    name: "fast" | "bin" | "quest" | "oat" | "gampt"
     """
     name = name.lower()
+
+    # GAMPT is pure-numpy (no normalizer needed) — return early before fitting one
+    if name == "gampt":
+        from tokenization.gampt import GAMPTTokenizer
+        if gampt_ckpt is None:
+            gampt_ckpt = os.path.join(CHECKPOINT_DIR, f"gampt_k{gampt_k}.pkl")
+        if not os.path.exists(gampt_ckpt):
+            raise FileNotFoundError(
+                f"GAMPT tokenizer checkpoint not found at {gampt_ckpt}. "
+                f"Run: python -m tokenization.gampt.train --steps 4 --k {gampt_k}"
+            )
+        return GAMPTTokenizer.load(gampt_ckpt)
 
     # normalizer for everything except raw HF FAST (FASTTok expects normalized [-1,1], and wraps a normalizer too)
     _, fit_calvin_normalizer = _import_training_utils()
