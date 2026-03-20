@@ -798,6 +798,15 @@ def main(args):
             config_dir=args.vqvla_config_dir,
             checkpoint_path=args.vqvla_checkpoint_path)
         action_vocab_size = VQVLA_VOCAB_SIZE  # 256
+    elif args.action_rep == "gampt":
+        tok = load_action_tokenizer(
+            "gampt",
+            train_dir=args.data_dir,
+            gampt_ckpt=args.gampt_ckpt,
+            gampt_k=args.gampt_k,
+        )
+        action_vocab_size = tok.vocab_size
+        print(f"Loaded GAMPT tokenizer (k={args.gampt_k}, vocab_size={action_vocab_size})")
 
     # --- Load dataframes ---
     print(f"Loading training data from {args.data_dir}...")
@@ -1185,8 +1194,8 @@ if __name__ == "__main__":
                                  "scene_mlp"],
                         help="Which input modalities to use")
     parser.add_argument("--action_rep", type=str, default="native",
-                        choices=["native", "fast", "quest", "oat", "bin", "vq_vae", "vqvla"],
-                        help="Action representation: native, FAST, QueST, OAT, BIN, VQ-VAE, or VQ-VLA")
+                        choices=["native", "fast", "quest", "oat", "bin", "vq_vae", "vqvla", "gampt"],
+                        help="Action representation: native, FAST, QueST, OAT, BIN, VQ-VAE, VQ-VLA, or GAMPT")
     parser.add_argument("--quest_ckpt", type=str, default=QUEST_TOKENIZER_CKPT)
     parser.add_argument("--oat_ckpt", type=str, default=OAT_TOKENIZER_CKPT)
     parser.add_argument("--fast_tokenizer_path", type=str, default=FAST_TOKENIZER_PATH,
@@ -1200,6 +1209,10 @@ if __name__ == "__main__":
     parser.add_argument("--vqvla_checkpoint_path", type=str,
                         default="./checkpoints/vqvla_pretrained/action_tokenizer_weight/all_data_vq.pth",
                         help="Path to VQ-VLA pretrained weights (all_data_vq.pth)")
+    parser.add_argument("--gampt_ckpt", type=str, default=None,
+                        help="Path to fitted GAMPT tokenizer .pkl (default: checkpoints/gampt_k{gampt_k}.pkl)")
+    parser.add_argument("--gampt_k", type=int, default=64,
+                        help="GAMPT vocabulary size k (used to resolve default checkpoint path)")
     parser.add_argument("--cross_layers", type=int, default=CROSS_LAYERS,
                         help="Number of final layers with cross-modal attention "
                              "(default=NUM_LAYERS for early fusion)")
