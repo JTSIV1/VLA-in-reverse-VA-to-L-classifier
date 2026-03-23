@@ -517,10 +517,12 @@ def main():
     parser.add_argument(
         "--action_rep",
         type=str,
-        choices=["native", "fast", "bin", "quest", "oat"],
+        choices=["native", "fast", "bin", "quest", "oat", "gampt", "gampt_primitive"],
         default="native",
     )
     parser.add_argument("--tokenizer_path", type=str, default=FAST_TOKENIZER_PATH)
+    parser.add_argument("--gampt_ckpt", type=str, default=None,
+                        help="Path to a fitted GAMPTTokenizer .pkl (required for gampt/gampt_primitive)")
     parser.add_argument("--vocab_size", type=int, default=1024)
     parser.add_argument("--scale", type=float, default=10)
     # ── Image-specific args ──
@@ -620,6 +622,12 @@ def main():
                 horizon=TOKENIZER_HORIZON,
                 max_tokens=args.max_len,
             )
+        elif args.action_rep in ("gampt", "gampt_primitive"):
+            from tokenization.gampt import GAMPTTokenizer
+            if args.gampt_ckpt is None:
+                raise ValueError("--gampt_ckpt is required for gampt/gampt_primitive")
+            print(f"Loading GAMPT tokenizer from {args.gampt_ckpt} ...")
+            tokenizer = GAMPTTokenizer.load(args.gampt_ckpt)
 
         features, verb_labels = build_features(
             df,
@@ -636,6 +644,9 @@ def main():
                 else str(args.scale)
             )
             prefix = f"{args.action_rep}_v{args.vocab_size}_s{scale_str}"
+        elif args.action_rep in ("gampt", "gampt_primitive"):
+            k = tokenizer.k if tokenizer is not None else "unknown"
+            prefix = f"{args.action_rep}_k{k}"
         else:
             prefix = args.action_rep
 
