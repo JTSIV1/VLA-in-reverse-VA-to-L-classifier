@@ -1,0 +1,474 @@
+"""CALVIN dataset base class and subclasses.
+
+CalvinDataset: base class that handles loading raw data from per-frame .npz
+files given (start_idx, end_idx) time spans. Each row in the DataFrame is a
+time span — could be a full episode (from auto_lang_ann.npy) or a subtask
+segment (from Gemini decomposition).
+
+Subclasses define __getitem__ for specific consumers:
+- CalvinVerbProbeDataset: verb classification from full action sequences
+- CalvinTokenizerDataset: action chunks for tokenizer training / fine-tuning
+  (set include_instruction=True for CLIP contrastive auxiliary loss)
+- CalvinActionCropDataset: random fixed-length crops for tokenizer fitting
+"""
+
+import os
+import numpy as np
+import torch
+from torch.utils.data import Dataset
+try:
+    from torchvision import transforms
+    from PIL import Image
+except (ImportError, RuntimeError):
+    transforms = None
+    Image = None
+
+from config import (
+    IMAGE_KEY, ACTION_KEY, SCENE_OBS_KEY,
+    SCENE_OBS_DIM, SCENE_REP_DIM, ACTION_DIM,
+    PATCH_SIZE, IMAGE_SIZE, MAX_SEQ_LEN, EPISODE_TEMPLATE,
+)
+
+
+class CalvinDataset(Dataset):
+    """Base CALVIN dataset — loads raw data from per-frame .npz files.
+
+    Each row in df must have at least 'start_idx' and 'end_idx' columns
+    (global frame indices). Additional columns (instruction, primary_verb,
+    verb, task, etc.) are available to subclasses via self.df.iloc[idx].
+
+    Also provides:
+    - Verb vocabulary mapping (verb_to_id / id_to_verb) built from the df
+    - Action chunking utility (_chunk_actions)
+
+    Args:
+        data_dir: path to CALVIN split (e.g. .../task_D_D/training/)
+        df: DataFrame with (start_idx, end_idx, ...) per time span
+        verb_to_id: optional pre-built verb mapping (for val set consistency)
+        cache_actions: if True, preload all timestep actions into RAM
+            (builds/loads a _action_cache.npz file for fast restarts)
+        transform: torchvision transform for image loading
+        img_size: image size for transforms / dummy tensors
+    """
+
+    def __init__(self, data_dir, df, verb_to_id=None, cache_actions=False,
+                 transform=None, img_size=224):
+        self.data_dir = data_dir
+        self.df = df
+        self.transform = transform
+        self.img_size = img_size
+
+        # Verb vocabulary
+        self._verb_col = 'primary_verb' if 'primary_verb' in df.columns else 'verb'
+        if verb_to_id is not None:
+            self.verb_to_id = verb_to_id
+        elif self._verb_col in df.columns:
+            unique_verbs = sorted(df[self._verb_col].dropna().unique())
+            self.verb_to_id = {v: i for i, v in enumerate(unique_verbs)}
+        else:
+            self.verb_to_id = {}
+        self.id_to_verb = {i: v for v, i in self.verb_to_id.items()}
+
+        if cache_actions:
+            self._action_cache, self._cache_offset = self._build_action_cache()
+        else:
+            self._action_cache = None
+            self._cache_offset = 0
+
+    def __len__(self):
+        return len(self.df)
+
+    # ------------------------------------------------------------------
+    # Raw data loading (protected methods for subclasses)
+    # ------------------------------------------------------------------
+
+    def _load_npz(self, frame_idx):
+        """Load a single frame's .npz file."""
+        path = os.path.join(self.data_dir, EPISODE_TEMPLATE.format(frame_idx))
+        return np.load(path, mmap_mode='r')
+
+    def _get_actions(self, idx):
+        """Load raw action trajectory for row idx. Returns (T, action_dim)."""
+        row = self.df.iloc[idx]
+        start, end = int(row['start_idx']), int(row['end_idx'])
+
+        if self._action_cache is not None:
+            s = start - self._cache_offset
+            e = end - self._cache_offset + 1
+            return self._action_cache[s:e].copy()
+
+        actions = []
+        for i in range(start, end + 1):
+            data = self._load_npz(i)
+            actions.append(np.array(data[ACTION_KEY]))
+        return np.array(actions, dtype=np.float32)
+
+    def _get_frames(self, idx, frame_indices=None, num_frames=2):
+        """Load and transform frames for row idx.
+
+        Args:
+            frame_indices: explicit list of global frame indices to load.
+                If None, samples num_frames uniformly from [start, end].
+        Returns:
+            torch.Tensor of shape (num_frames, C, H, W)
+        """
+        row = self.df.iloc[idx]
+        start, end = int(row['start_idx']), int(row['end_idx'])
+
+        if frame_indices is None:
+            total_steps = end - start + 1
+            if num_frames == 2:
+                frame_indices = [start, end]
+            else:
+                positions = np.linspace(0, total_steps - 1, num_frames, dtype=int)
+                frame_indices = [start + p for p in positions]
+
+        frame_list = []
+        for fi in frame_indices:
+            data = self._load_npz(fi)
+            img = Image.fromarray(np.array(data[IMAGE_KEY])).convert("RGB")
+            if self.transform:
+                frame_list.append(self.transform(img))
+            else:
+                frame_list.append(transforms.ToTensor()(img))
+        return torch.stack(frame_list)
+
+    def _get_scene_obs(self, idx):
+        """Load scene_obs at start and end of time span.
+
+        Returns:
+            (start_obs, end_obs) each np.ndarray of shape (scene_obs_dim,)
+        """
+        row = self.df.iloc[idx]
+        start_data = self._load_npz(int(row['start_idx']))
+        end_data = self._load_npz(int(row['end_idx']))
+        return (np.array(start_data[SCENE_OBS_KEY], dtype=np.float32),
+                np.array(end_data[SCENE_OBS_KEY], dtype=np.float32))
+
+    # ------------------------------------------------------------------
+    # Labels
+    # ------------------------------------------------------------------
+
+    def _get_verb_id(self, idx):
+        """Get verb label as integer for row idx."""
+        verb = self.df.iloc[idx].get(self._verb_col, None)
+        return self.verb_to_id.get(verb, 0) if verb else 0
+
+    def _get_instruction(self, idx):
+        """Get instruction string for row idx."""
+        return self.df.iloc[idx]['instruction']
+
+    # ------------------------------------------------------------------
+    # Action chunking
+    # ------------------------------------------------------------------
+
+    def _chunk_actions(self, actions, window_size, max_windows):
+        """Chunk raw (T, D) actions into fixed-size windows with padding.
+
+        Returns: (padded_windows, n_windows) where padded_windows is
+            np.ndarray of shape (max_windows, window_size, action_dim).
+        """
+        T, action_dim = actions.shape
+
+        n_windows = T // window_size
+        if n_windows == 0:
+            padded = np.pad(actions, ((0, window_size - T), (0, 0)), mode='edge')
+            windows = padded.reshape(1, window_size, action_dim)
+            n_windows = 1
+        else:
+            usable = n_windows * window_size
+            windows = actions[:usable].reshape(n_windows, window_size, action_dim)
+
+        if n_windows > max_windows:
+            windows = windows[:max_windows]
+            n_windows = max_windows
+
+        padded_windows = np.zeros(
+            (max_windows, window_size, action_dim), dtype=np.float32)
+        padded_windows[:n_windows] = windows
+        return padded_windows, n_windows
+
+    # ------------------------------------------------------------------
+    # Action caching
+    # ------------------------------------------------------------------
+
+    def _build_action_cache(self):
+        """Preload all needed timestep actions into a contiguous array.
+
+        Builds/loads a _action_cache.npz file in data_dir for fast restarts.
+        """
+        cache_path = os.path.join(self.data_dir, '_action_cache.npz')
+        all_starts = self.df['start_idx'].values.astype(int)
+        all_ends = self.df['end_idx'].values.astype(int)
+
+        if os.path.exists(cache_path):
+            print(f"  Loading action cache from {cache_path}...")
+            cache = np.load(cache_path)
+            return cache['actions'], int(cache['offset'])
+
+        needed = set()
+        for s, e in zip(all_starts, all_ends):
+            needed.update(range(s, e + 1))
+        needed = sorted(needed)
+        offset = needed[0]
+        size = needed[-1] - offset + 1
+        print(f"  Building action cache: {len(needed)} timesteps "
+              f"({offset}-{needed[-1]})...")
+        all_actions = np.zeros((size, ACTION_DIM), dtype=np.float32)
+        for j in needed:
+            path = os.path.join(self.data_dir, EPISODE_TEMPLATE.format(j))
+            data = np.load(path, mmap_mode='r')
+            all_actions[j - offset] = data[ACTION_KEY]
+        np.savez_compressed(cache_path, actions=all_actions,
+                            offset=np.array(offset))
+        print(f"  Saved cache to {cache_path}")
+        return all_actions, offset
+
+    def __getitem__(self, idx):
+        raise NotImplementedError("Subclasses must implement __getitem__")
+
+
+# ======================================================================
+# Verb probe subclass
+# ======================================================================
+
+class CalvinVerbProbeDataset(CalvinDataset):
+    """For verb classification: full action sequence + optional frames/scene_obs.
+
+    Returns: (frames, actions_tensor, scene_vec, verb_label, seq_len)
+
+    This is the standard batch format consumed by ActionToVerbTransformer.
+    The action sequence can optionally be tokenized (FAST, VQ-VAE, etc.)
+    before being returned.
+    """
+
+    # Import here to avoid circular dependency at module level
+    SCENE_FUSION_MODALITIES = ("scene_token", "scene_concat", "scene_film",
+                               "scene_mlp")
+
+    def __init__(self, data_dir, df, modality="action_only",
+                 action_tokenizer=None,
+                 max_seq_len=MAX_SEQ_LEN, num_frames=2, delta_patches=0,
+                 image_encoder="scratch", num_patches=64,
+                 verb_to_id=None,
+                 transform=None, img_size=224,
+                 cache_actions=False):
+        super().__init__(data_dir, df, verb_to_id=verb_to_id,
+                         cache_actions=cache_actions,
+                         transform=transform, img_size=img_size)
+        self.modality = modality
+        self.action_tokenizer = action_tokenizer
+        self.max_seq_len = max_seq_len
+        self.num_frames = num_frames
+        self.delta_patches = delta_patches
+
+        # Oracle modality
+        self.obs_key = SCENE_OBS_KEY if modality == "scene_obs" else None
+
+        # Scene rep flag
+        self.scene_rep = modality in self.SCENE_FUSION_MODALITIES
+
+        # Num patches based on encoder
+        if image_encoder in ("r3m",):
+            self.num_patches = 49
+        elif image_encoder in ("dinov2_s", "dinov2_b", "vc1"):
+            self.num_patches = 49 if delta_patches == 0 else delta_patches
+        elif image_encoder == "dinov2":
+            self.num_patches = 64
+        elif image_encoder == "resnet18":
+            self.num_patches = 49
+        else:
+            self.num_patches = (IMAGE_SIZE[0] // PATCH_SIZE) ** 2
+        if num_patches != 64:
+            self.num_patches = num_patches
+
+        print(f"Vocab mapped: {len(self.verb_to_id)} unique verbs.")
+
+    def __getitem__(self, idx):
+        row = self.df.iloc[idx]
+        start_idx, end_idx = int(row['start_idx']), int(row['end_idx'])
+
+        # -- Frames --
+        if self.modality not in ("action_only", "scene_obs") + self.SCENE_FUSION_MODALITIES:
+            frames = self._get_frames(idx, num_frames=self.num_frames)
+        else:
+            frames = torch.zeros(self.num_frames, 3, self.img_size, self.img_size)
+
+        # -- Oracle obs or actions --
+        if self.obs_key is not None:
+            actions_tensor, action_real_len = self._load_oracle_obs(
+                idx, start_idx, end_idx)
+        elif self.modality != "vision_only":
+            actions_tensor, action_real_len = self._load_and_tokenize_actions(idx)
+        else:
+            actions_tensor = torch.zeros(self.max_seq_len, ACTION_DIM)
+            action_real_len = 0
+
+        label = torch.tensor(self._get_verb_id(idx), dtype=torch.long)
+
+        # -- Scene vec --
+        if self.scene_rep:
+            start_obs, end_obs = self._get_scene_obs(idx)
+            delta = end_obs - start_obs
+            scene_vec = torch.from_numpy(np.concatenate([start_obs, delta]))
+        else:
+            scene_vec = torch.zeros(SCENE_REP_DIM)
+
+        # -- Sequence length for padding mask --
+        seq_len = 1  # CLS
+        if self.modality == "scene_token":
+            seq_len += 1
+        elif self.modality not in ("action_only", "scene_obs") + self.SCENE_FUSION_MODALITIES:
+            if self.delta_patches > 0:
+                seq_len += max(self.num_frames - 1, 1) * self.delta_patches
+            else:
+                seq_len += self.num_frames * self.num_patches
+        if self.modality != "vision_only":
+            seq_len += action_real_len
+
+        return frames, actions_tensor, scene_vec, label, seq_len
+
+    def _load_and_tokenize_actions(self, idx):
+        """Load actions and optionally tokenize. Returns (tensor, real_len)."""
+        actions = self._get_actions(idx)
+        L = actions.shape[0]
+
+        if self.action_tokenizer is not None:
+            # TokenizerAdapter: (T, D) → List[List[int]]
+            token_ids = self.action_tokenizer(actions)[0]
+            token_ids = list(token_ids)
+            L_tok = len(token_ids)
+            if L_tok < self.max_seq_len:
+                token_ids = token_ids + [0] * (self.max_seq_len - L_tok)
+            else:
+                token_ids = token_ids[:self.max_seq_len]
+            return torch.tensor(token_ids, dtype=torch.long), min(L_tok, self.max_seq_len)
+
+        # Native continuous actions
+        if L < self.max_seq_len:
+            actions_padded = np.pad(actions, ((0, self.max_seq_len - L), (0, 0)),
+                                    mode='constant')
+        else:
+            actions_padded = actions[:self.max_seq_len]
+        return torch.tensor(actions_padded, dtype=torch.float32), min(L, self.max_seq_len)
+
+    def _load_oracle_obs(self, idx, start_idx, end_idx):
+        """Load oracle obs (scene_obs) as the action input."""
+        total_steps = end_idx - start_idx + 1
+        if self.num_frames == 0:
+            sample_indices = list(range(start_idx, end_idx + 1))
+        elif self.num_frames == 2:
+            sample_indices = [start_idx, end_idx]
+        else:
+            positions = np.linspace(0, total_steps - 1, self.num_frames, dtype=int)
+            sample_indices = [start_idx + p for p in positions]
+
+        obs_list = [np.array(self._load_npz(si)[self.obs_key])
+                    for si in sample_indices]
+        obs = np.array(obs_list)
+        L = obs.shape[0]
+        if L < self.max_seq_len:
+            obs_padded = np.pad(obs, ((0, self.max_seq_len - L), (0, 0)),
+                                mode='constant')
+        else:
+            obs_padded = obs[:self.max_seq_len]
+        return torch.tensor(obs_padded, dtype=torch.float32), min(L, self.max_seq_len)
+
+
+# ======================================================================
+# Tokenizer training subclass
+# ======================================================================
+
+class CalvinTokenizerDataset(CalvinDataset):
+    """For tokenizer training: chunked actions + optional verb label + optional instruction.
+
+    Returns: (action_windows, verb_label, n_windows) by default.
+    With include_instruction=True: (action_windows, verb_label, instruction_str, n_windows)
+
+    Works for any action tokenizer supported by TokenizerAdapter
+    (fast, bin, vq_vae, vqvla/vq_bet, quest, oat) or raw continuous actions.
+    Set include_instruction=True for CLIP contrastive auxiliary loss.
+
+    Args:
+        action_tokenizer: a TokenizerAdapter from load_action_tokenizer(), or None
+            for raw continuous actions. Uniform interface: (T,D) → List[List[int]].
+        return_format: "tuple" or "dict".
+            "tuple": (action_windows, verb_label, [instruction,] n_windows)
+            "dict": {"action": Tensor, "verb_label": int, "instruction": str,
+                     "n_windows": int} — keys present based on configuration.
+    """
+
+    def __init__(self, data_dir, df, window_size=5, max_windows=16,
+                 verb_to_id=None, cache_actions=False,
+                 include_instruction=False,
+                 action_tokenizer=None, return_format="tuple"):
+        super().__init__(data_dir, df, verb_to_id=verb_to_id,
+                         cache_actions=cache_actions)
+        self.window_size = window_size
+        self.max_windows = max_windows
+        self.include_instruction = include_instruction
+        self.action_tokenizer = action_tokenizer
+        self.return_format = return_format
+
+    def __getitem__(self, idx):
+        actions = self._get_actions(idx)
+
+        if self.action_tokenizer is not None:
+            # TokenizerAdapter: (T, D) → List[List[int]], take first batch elem
+            token_ids = self.action_tokenizer(actions)  # List[List[int]]
+            token_ids = np.array(token_ids[0], dtype=np.int64).reshape(-1, 1)
+            padded_windows, n_windows = self._chunk_actions(
+                token_ids, self.window_size, self.max_windows)
+            padded_windows = padded_windows.squeeze(-1)
+            action_out = torch.from_numpy(padded_windows).long()
+        else:
+            padded_windows, n_windows = self._chunk_actions(
+                actions, self.window_size, self.max_windows)
+            action_out = torch.from_numpy(padded_windows)
+
+        if self.return_format == "dict":
+            out = {"action": action_out,
+                   "verb_label": torch.tensor(self._get_verb_id(idx), dtype=torch.long),
+                   "n_windows": torch.tensor(n_windows, dtype=torch.long)}
+            if self.include_instruction:
+                out["instruction"] = self._get_instruction(idx)
+            return out
+
+        # Default: tuple
+        result = (action_out,
+                  torch.tensor(self._get_verb_id(idx), dtype=torch.long))
+
+        if self.include_instruction:
+            result = result + (self._get_instruction(idx),)
+
+        return result + (torch.tensor(n_windows, dtype=torch.long),)
+
+
+# ======================================================================
+# Random-crop subclass (for tokenizer fitting: OAT, QueST)
+# ======================================================================
+
+class CalvinActionCropDataset(CalvinDataset):
+    """For tokenizer fitting: random fixed-length crop from each trajectory.
+
+    Returns: {"action": Tensor(horizon, action_dim)}
+    """
+
+    def __init__(self, data_dir, df, horizon=32, cache_actions=False,
+                 verb_to_id=None):
+        super().__init__(data_dir, df, verb_to_id=verb_to_id,
+                         cache_actions=cache_actions)
+        self.horizon = horizon
+
+    def __getitem__(self, idx):
+        actions = self._get_actions(idx)
+        T = actions.shape[0]
+
+        if T >= self.horizon:
+            s = np.random.randint(0, T - self.horizon + 1)
+            chunk = actions[s:s + self.horizon]
+        else:
+            chunk = np.pad(actions, ((0, self.horizon - T), (0, 0)),
+                           mode='constant').astype(np.float32)
+
+        return {"action": torch.from_numpy(chunk).float()}

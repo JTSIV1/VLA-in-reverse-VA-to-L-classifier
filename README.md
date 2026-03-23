@@ -5,217 +5,227 @@ changes in the world (action goal)? This project studies verb decodability from
 robotic manipulation data and uses those findings to build better action
 tokenizers for Vision-Language-Action (VLA) models.
 
-## Project overview
+## Datasets
 
-The project has three tracks:
+| Dataset | Split | Train | Val | Verbs | Action dim | Avg steps | Path on cluster |
+|---------|-------|------:|----:|------:|-----------:|----------:|-----------------|
+| CALVIN  | D→D   | 3,309 | 665 | 21    | 7          | ~61       | `/data/user_data/yashagar/task_D_D/` |
+| CALVIN  | ABCD→D| 15,207| 698 | 22    | 7          | ~61       | `/data/user_data/wenjiel2/datasets/task_ABCD_D/` |
+| CALVIN RLDS | D→D | 5,124 | 1,011 | — | 7 | ~61 | `/data/user_data/wenjiel2/datasets/calvin_rlds/` |
+| BridgeV2| —     | ~44K  | ~8K | ~25   | 7          | varies    | `/data/user_data/wenjiel2/datasets/bridge_actions/` |
+| DROID   | —     | ~44K  | ~8K | ~54   | 7          | ~385      | `/data/user_data/wenjiel2/datasets/droid_rlds/` |
 
-1. **Verb classification** — Train classifiers to predict verb labels from
-   action trajectories, visual observations, and simulator state. Establishes
-   which signals carry verb information and how they complement each other.
-
-2. **Action tokenizer decodability** — Measure how well different action
-   tokenizers (VQ-VAE, VQ-VLA, FAST, OAT) preserve verb identity. Train
-   verb-decodable tokenizers with auxiliary classification/contrastive losses.
-
-3. **VLA fine-tuning** — Plug verb-decodable tokenizers into VLA models
-   (OpenVLA-mini, RDT2, MiniVLA) and measure downstream task performance.
-
-### Datasets
-
-| Dataset | Split | Train | Val | Verbs | Action dim | Avg steps |
-|---------|-------|------:|----:|------:|-----------:|----------:|
-| CALVIN  | D→D   | 3,309 | 665 | 21    | 7          | ~61       |
-| CALVIN  | ABCD→D| 15,207| 698 | 22    | 7          | ~61       |
-| DROID   | —     | ~44K  | ~8K | ~54   | 7          | ~385      |
-
-CALVIN provides simulator state (`scene_obs`, 24-d) as a privileged goal signal.
-DROID is real-world and requires visual change (first/last frame delta) as a
-goal proxy.
+All dataset directories are world-readable (755).
 
 ## Repository structure
 
-```
-.
-├── Core ──────────────────────────────────────────────────────
-├── train_transformer.py          # Verb classifier model + training (CALVIN)
-├── train_droid.py                # Verb classifier training (DROID)
-├── test_transformer.py           # Checkpoint evaluation + confusion matrices
-├── config.py                     # Paths, hyperparameters, constants
-├── utils.py                      # Data loading, spaCy verb extraction
-├── image_encoders.py             # Vision: DINOv2-S, VC-1, R3M, scratch
-│
-├── Action tokenization ───────────────────────────────────────
-├── tokenization/
-│   ├── action_tokenizers.py      # Unified loader (native/FAST/VQ-VAE/OAT/bin)
-│   ├── fast_tokenizer.py         # FAST tokenizer (DCT + BPE)
-│   ├── vqvae_tokenizer.py        # VQ-VAE chunk tokenizer + verb-decodable variant
-│   ├── clip_action_language.py   # Contrastive action-language alignment
-│   ├── vqvla/                    # Vendored VQ-VLA (causal conv VAE + ResidualVQ)
-│   └── oat/                      # Vendored OAT/QueST tokenizer
-│
-├── VLA fine-tuning ───────────────────────────────────────────
-├── openvla_experiment/           # OpenVLA-mini fine-tuning on CALVIN
-│   ├── scripts/                  # Training, evaluation, probing scripts
-│   ├── tfds_builders/            # CALVIN → RLDS/TFDS converter
-│   └── data_conversion/          # Raw data format converters
-│
-├── Analysis ──────────────────────────────────────────────────
-├── analysis/                     # Post-hoc analysis modules
-│   ├── compute_verb_rsm.py       # Verb representation similarity matrices
-│   ├── unique_variance.py        # Information-theoretic decomposition
-│   ├── cluster_gather_results.py # Result aggregation across experiments
-│   ├── sklearn_*.py              # Baseline classifiers (RF, MLP)
-│   └── ...
-│
-├── Scripts ────────────────────────────────────────────────────
-├── scripts/
-│   ├── build_*.py                # Dataset builders (task types, L1 segments)
-│   ├── extract_droid_actions.py  # DROID RLDS → compact action .npz
-│   ├── download_droid_shards.sh  # Full DROID download (2TB)
-│   ├── submit_droid_*.sh         # Active SLURM job scripts
-│   ├── train_scene_mlp.py        # Specialized trainers (scene MLP, L1)
-│   ├── run_cluster_*.sh          # Generic SLURM launchers
-│   └── archived/                 # Old round-specific submit scripts (R1–R9)
-│
-├── Data ───────────────────────────────────────────────────────
-├── data/
-│   ├── verb_classes.txt          # 21 sparse verb vocabulary
-│   ├── episode_task_types.csv    # CALVIN task type labels
-│   ├── episode_abcd_d.csv        # CALVIN ABCD→D annotations
-│   ├── embeddings/               # Cached verb/instruction embeddings
-│   ├── l1_segments/              # Phase-level verb segments
-│   └── hierarchy_annotations/    # Gemini-annotated task hierarchy
-│
-├── Documentation ─────────────────────────────────────────────
-├── lab_notebooks/                # Experiment reports (see below)
-│
-└── Outputs (gitignored) ──────────────────────────────────────
-    ├── checkpoints/              # Model weights
-    ├── results/                  # Per-experiment metrics JSON
-    ├── figures/                  # Plots + confusion matrices
-    └── logs/                     # SLURM job logs
-```
+The four core directories are **`datasets/`**, **`tokenization/`**,
+**`verb_probe/`**, and **`policy/`**. 
 
-## Key results (CALVIN D→D)
+### `datasets/` — Data loading and building
 
-### Verb classification
+PyTorch Dataset classes for CALVIN, BridgeV2, and DROID, plus scripts to build
+derived datasets (Gemini annotation, RLDS/TFDS conversion).
 
-| Model | Accuracy | Macro F1 | Active |
-|-------|----------|----------|--------|
-| Action-only (native) | 39.5% | 38.7% | 21/21 |
-| Vision-only (VC-1 delta16) | 38.9% | 36.2% | 20/21 |
-| Multimodal (VC-1 late2) | 42.4% | 40.7% | 20/21 |
-| Scene obs (Random Forest) | 48.4% | — | — |
-| Action + scene obs (token fusion) | **43.1%** | **41.0%** | 21/21 |
+| File | Purpose |
+|------|---------|
+| `calvin_dataset.py` | `CalvinVerbProbeDataset`, `CalvinTokenizerDataset`, `CalvinActionCropDataset` |
+| `bridge_dataset.py` | `BridgeVerbDataset` for BridgeV2 subtask classification |
+| `build_gemini_dataset.py` | Build L0/L1 verb-labeled datasets from Gemini annotations |
+| `annotate_calvin_hierarchy.py` | Gemini VLM hierarchical episode annotation |
+| `build_episode_task_types.py` | Episode classification (fixture/block/etc.) |
+| `tfds_builders/` | CALVIN → RLDS/TFDS converters (D and ABCD splits) |
+| `tfrecord_parser.py` | TFRecord parser (no TF dependency) |
 
-All transformer results use 21 sparse verb classes (`--min_class_count 30`)
-with weighted cross-entropy (`--weighted_loss`).
+### `tokenization/` — Action tokenizers
 
-### Motion vs goal
+Unified interface for training and loading action tokenizers. Supports VQ-BeT,
+OAT, QueST, FAST, VQ-VAE, VQ-VLA, and bin tokenizers.
 
-Action trajectories (motion) and scene state changes (goal) carry
-**complementary** verb information:
-- **Motion dominates**: rotate, move, pick up — distinctive trajectories
-- **Goal dominates**: turn on, turn off, open, close — distinctive state changes
-- **Fusion rescues**: grasp, place, sweep — ambiguous without both signals
+| File | Purpose |
+|------|---------|
+| `train_tokenizer.py` | **Unified training/fitting** for all tokenizer types + aux losses |
+| `action_tokenizers.py` | `TokenizerAdapter` — uniform `adapter(actions) -> token_ids` interface |
+| `vqbet_tokenizer.py` | VQ-BeT (MLP + ResidualVQ) |
+| `vqvae_tokenizer.py` | VQ-VAE chunk tokenizer |
+| `fast_tokenizer.py` | FAST (DCT + BPE), vendored for Python 3.9 |
+| `codebook_utilization.py` | Codebook usage analysis |
+| `oat/` | Vendored OAT/QueST (RegisterEncoder + FSQ) |
+| `vqvla/` | Vendored VQ-VLA (causal conv VAE + ResidualVQ) |
+| `vq_bet_official/` | Vendored VQ-BeT reference implementation |
 
-### Action tokenizer verb decodability
+### `verb_probe/` — Verb classification
 
-| Tokenizer | Train verb acc | Codebook usage |
-|-----------|---------------|----------------|
-| VQ-VAE vanilla (lambda=0) | — | 15/512 (2.9%) |
-| VQ-VAE verb (lambda=0.1) | **51.0%** | 73/512 (14.3%) |
-| VQ-VLA fine-tuned (lambda=0.5) | 44.9% val | 256/256 |
+Transformer-based verb classifiers that test whether action representations
+(raw or tokenized) preserve verb identity.
 
-Adding a verb classification loss to VQ-VAE training improves codebook
-utilization 5x and produces verb-decodable codes without sacrificing
-reconstruction quality.
+| File | Purpose |
+|------|---------|
+| `train_verb_probe.py` | **Unified entry point** for CALVIN / Bridge / DROID probes |
+| `models.py` | `ActionToVerbTransformer`, vision encoders |
+| `image_encoders.py` | Pluggable vision encoders (DINOv2, VC-1, R3M, scratch) |
+| `training.py` | Shared training loop, criterion, optimizer, checkpointing |
+| `train_bridge_ctx.py` | Contextualized per-segment classifier for BridgeV2 |
+| `train_scene_mlp.py` | MLP baseline on oracle scene_obs features |
+| `test_transformer.py` | Checkpoint evaluation + confusion matrices |
 
-## Lab notebooks
+### `policy/` — VLA fine-tuning
 
-All experiment details are in `lab_notebooks/`, organized by track:
+Fine-tune OpenVLA or MiniVLA on CALVIN with different action tokenizers,
+then evaluate with NLL, verb probing, or simulator rollouts.
 
-### Verb classification (9 rounds)
-| Round | Focus | Key finding |
-|-------|-------|-------------|
-| R1 | Baselines | Vision-only collapses with scratch encoder |
-| R2 | R3M + FAST | AO native sp+wt = 39.5% baseline established |
-| R3 | Patch vision (DINOv2-S, VC-1) | VC-1 delta16 first vision model to match AO |
-| R3b | FAST scale x vocab sweep | DCT quantization loss is bottleneck, not seq length |
-| R3c | Oracle (scene_obs, robot_obs) | scene_obs RF=48.4%; transformer wrong arch for tabular |
-| R4 | Multimodal fusion | VC-1 late2 = 42.4% best multimodal |
-| R5 | MM ablations (d256, K49, mdrop) | No improvement; capacity mismatch is fundamental |
-| R6 | MM tokenizer sweep | Vision fusion rescues FAST but not VQ-VLA |
-| R7 | Scene obs + action fusion | Scene token + native = 43.1% best overall |
-| R8 | Verb granularity taxonomy | Fixture verbs easiest (counter-intuitive) |
-| R9 | L0 vs L1 decodability | Full-episode vs phase-segment comparison |
+| File | Purpose |
+|------|---------|
+| `train_policy.py` | **Unified launcher** for OpenVLA / MiniVLA training (generates SLURM jobs) |
+| `eval_policy.py` | **Unified launcher** for evaluation (NLL, verb, rollout, attention) |
+| `scripts/evaluate_openvla.py` | NLL + verb probe implementation |
+| `scripts/evaluate_openvla_rollout.py` | CALVIN rollout (1000 sequences, SR1–SR5) |
+| `scripts/analyze_attention.py` | Action→verb attention analysis (deprecated atm)|
+| `scripts/build_calvin_*.sh` | TFDS dataset build scripts |
+| `README.md` | Detailed pipeline guide |
 
-### Action tokenizer decodability (5 rounds)
-| Round | Focus |
-|-------|-------|
-| R1 | VQ-VAE + verb loss lambda sweep |
-| R2 | OpenVLA-mini fine-tuning with verb-decodable tokenizer |
-| R3 | Attention analysis of verb grounding |
-| R4 | RDT2-VQ fine-tuning (temporal token structure) |
-| R5 | MiniVLA fine-tuning (0.5B model) |
+### Supporting directories
 
-### Other tracks
-- **action_tokenizer_clip/** — Contrastive action-language alignment (2 rounds)
-- **syntax_analysis/** — Syntactic decomposition, object-verb coupling (3 rounds)
-- **action_v_llm_rsm/** — Verb RSM vs LLM representations (2 rounds)
-- **droid_verb_decodability/** — Scaling to DROID real-world data (in progress)
-- **targeted_paper_experiments/** — Clean comparison tables for paper
+| Directory | Purpose |
+|-----------|---------|
+| `analysis/` | Post-hoc analysis (RSMs, variance decomposition, clustering, ablations) |
+| `scripts/` | SLURM launchers for sweeps (`submit_calvind_*.sh`, `submit_bridge_*.sh`) |
+| `figures/` | Plot generation (sweeps, t-SNE, confusion matrices) |
+| `data/` | Static data files (verb vocab, episode CSVs, Gemini annotations) |
+| `lab_notebooks/` | Experiment reports organized by track |
+| `config.py` | Paths, hyperparameters, constants |
+| `utils.py` | Data loading, spaCy verb extraction, shared helpers |
 
-## Quick start
+## Usage
 
-```bash
-conda activate mmml
-
-# Train action-only verb classifier (CALVIN)
-python train_transformer.py \
-    --modality action_only --action_rep native \
-    --min_class_count 30 --weighted_loss \
-    --save_path checkpoints/ao_native.pth \
-    --epochs 100 --batch_size 16 --lr 1e-4 --max_seq_len 64
-
-# Evaluate checkpoint
-python test_transformer.py \
-    --model_path checkpoints/ao_native_best.pth \
-    --save_cm figures/ao_native_cm.png \
-    --save_metrics results/ao_native_metrics.json
-
-# Multimodal with VC-1 vision + late cross-attention
-python train_transformer.py \
-    --modality full --action_rep native \
-    --image_encoder vc1 --num_frames 2 --delta_patches 16 \
-    --cross_layers 2 --min_class_count 30 --weighted_loss \
-    --save_path checkpoints/mm_vc1.pth
-
-# Train on DROID (after data extraction)
-python train_droid.py \
-    --min_class_count 30 --weighted_loss \
-    --max_seq_len 512 --epochs 30 \
-    --save_path checkpoints/droid_ao.pth
-```
-
-## Architecture
-
-```
-[CLS] + [vision patches (optional)] + [action tokens] --> Transformer --> verb
-```
-
-- **Actions**: native (Linear 7->d), FAST (DCT+BPE), VQ-VAE, VQ-VLA, OAT, QueST
-- **Vision**: VC-1 / DINOv2-S delta patches (top-K changed between frames)
-- **Scene obs**: 24-d simulator state -> MLP -> 1 token (CALVIN only)
-- **Fusion**: late cross-attention in final K transformer layers
-- **Model**: d_model=128, 8 heads, 4 layers, dropout=0.1
-
-## Environment
+### Environment
 
 ```bash
 conda create -n mmml python=3.9 -y
 conda activate mmml
 pip install -r requirements.txt
+python -m spacy download en_core_web_sm
 ```
 
-Cluster: SLURM with `--partition=general` (GPU) or `--partition=cpu`.
+On the cluster, the existing `mmml` env is ready to use:
+
+```bash
+conda activate mmml
+```
+
+### 1. Train an action tokenizer
+
+`tokenization/train_tokenizer.py` is the unified entry point. It supports
+gradient-based tokenizers (VQ-BeT, OAT, QueST) and fit-once tokenizers (FAST, bin).
+
+```bash
+# VQ-BeT on CALVIN (default dataset)
+python tokenization/train_tokenizer.py --tokenizer vq_bet \
+    --epochs 200 --batch_size 64 --save_dir checkpoints/vqbet_vanilla
+
+# OAT on CALVIN
+python tokenization/train_tokenizer.py --tokenizer oat \
+    --epochs 200 --batch_size 64 --save_dir checkpoints/oat_vanilla
+
+# QueST on CALVIN
+python tokenization/train_tokenizer.py --tokenizer quest \
+    --epochs 200 --batch_size 64 --save_dir checkpoints/quest_vanilla
+
+# VQ-BeT on BridgeV2 (specify shard directory)
+python tokenization/train_tokenizer.py --tokenizer vq_bet \
+    --dataset bridge --shard_dir /data/user_data/wenjiel2/datasets/bridge_actions \
+    --epochs 200 --save_dir checkpoints/vqbet_bridge
+
+# Fit FAST tokenizer (one-off, no gradient training)
+python tokenization/train_tokenizer.py --tokenizer fast \
+    --save_dir checkpoints/fast_calvin
+```
+
+### 2. Add auxiliary losses
+
+Add `--verb_cls_lambda` for a verb classification head and/or `--clip_lambda`
+for a contrastive action-language head on the post-quantization latents.
+Gradients flow back through the quantizer's straight-through estimator.
+
+```bash
+# VQ-BeT + verb classification loss (lambda=0.5)
+python tokenization/train_tokenizer.py --tokenizer vq_bet \
+    --verb_cls_lambda 0.5 \
+    --epochs 200 --save_dir checkpoints/vqbet_verb05
+
+# OAT + CLIP contrastive loss (lambda=1.0)
+python tokenization/train_tokenizer.py --tokenizer oat \
+    --clip_lambda 1.0 \
+    --epochs 200 --save_dir checkpoints/oat_clip10
+
+```
+
+
+### 3. Probe verb decodability
+
+Train a verb classifier on tokenized actions to measure how much verb
+information survives quantization.
+
+```bash
+# Probe a trained VQ-BeT tokenizer
+python verb_probe/train_verb_probe.py \
+    --dataset calvin --modality action_only --action_rep vq_bet \
+    --tokenizer_ckpt checkpoints/vqbet_verb05/best.pth \
+    --min_class_count 30 --weighted_loss \
+    --save_path checkpoints/probe_vqbet_verb05.pth
+
+# Probe native (untokenized) actions as baseline
+python verb_probe/train_verb_probe.py \
+    --dataset calvin --modality action_only --action_rep native \
+    --min_class_count 30 --weighted_loss \
+    --save_path checkpoints/probe_native.pth
+```
+
+### 4. Train a VLA policy with a tokenizer (working on installing flash-attn)
+
+`policy/train_policy.py` generates and submits SLURM jobs for OpenVLA or
+MiniVLA fine-tuning on CALVIN.
+
+```bash
+# MiniVLA with vanilla VQ-VLA tokenizer
+python policy/train_policy.py --model minivla --tokenizer vqvla_vanilla
+
+# MiniVLA with verb-decodable VQ-VLA tokenizer
+python policy/train_policy.py --model minivla --tokenizer vqvla_verb
+
+# OpenVLA with bin tokenizer (LoRA fine-tuning)
+python policy/train_policy.py --model openvla --tokenizer bin
+
+# Dry run (print sbatch script without submitting)
+python policy/train_policy.py --model minivla --tokenizer oat --dry_run
+```
+
+### 5. Evaluate a trained policy (these probably need debugging)
+
+```bash
+# Teacher-forcing NLL
+python policy/eval_policy.py --mode nll --tokenizer vqvla_verb
+
+# Verb decodability through tokenizer round-trip
+python policy/eval_policy.py --mode verb --tokenizer vqvla_verb
+
+# CALVIN rollout (1000 sequences)
+python policy/eval_policy.py --mode rollout --tokenizer vqvla_verb
+
+# Attention analysis
+python policy/eval_policy.py --mode attention --tokenizer vqvla_verb
+```
+
+## Lab notebooks
+
+Experiment details live in `lab_notebooks/`, organized by track:
+
+- `verb_classification/` — 9 rounds of verb classifier experiments (R1–R9)
+- `action_tokenizer_cls_head/` — Tokenizer decodability experiments (5 rounds)
+- `calvind_sweep/` — CALVIN D tokenizer hyperparameter sweeps
+- `bridge_verb_decodability/` — BridgeV2 verb classification and tokenizer sweep
+- `action_tokenizer_clip/` — Contrastive action-language alignment
+- `syntax_analysis/` — Syntactic decomposition, object-verb coupling
+- `action_v_llm_rsm/` — Verb RSM vs LLM representations
+- `droid_verb_decodability/` — Scaling to DROID real-world data
+- `targeted_paper_experiments/` — Clean comparison tables for paper

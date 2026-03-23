@@ -179,7 +179,7 @@ def _build_encoder(encoder_name):
     Uses build_image_encoder from image_encoders.py.
     We call encoder.get_embeddings() for raw backbone features (no random proj).
     """
-    from image_encoders import build_image_encoder
+    from verb_probe.image_encoders import build_image_encoder
 
     encoder = build_image_encoder(
         encoder_name, d_model=128

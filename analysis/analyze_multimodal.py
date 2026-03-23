@@ -38,7 +38,8 @@ except ImportError:
         rho = 1 - 6 * d2 / (n * (n**2 - 1))
         return type('R', (), {'correlation': rho, 'pvalue': None})()
 
-from train_transformer import ActionToVerbTransformer, CalvinVerbDataset
+from verb_probe.models import ActionToVerbTransformer
+from datasets.calvin_dataset import CalvinVerbProbeDataset as CalvinVerbDataset
 from utils import load_calvin_to_dataframe
 from config import (
     VAL_DIR, D_MODEL, NHEAD, NUM_LAYERS, ACTION_DIM, PATCH_SIZE,

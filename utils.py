@@ -158,3 +158,25 @@ def visualize_frames(df, data_dir, num_samples=3):
 
     plt.tight_layout()
     plt.show()
+
+
+def load_calvin_raw(data_dir):
+    """Load CALVIN annotations WITHOUT verb filtering.
+
+    Returns DataFrame with (start_idx, end_idx, instruction) per episode.
+    Useful for contrastive training where all instructions are needed.
+    """
+    lang_path = os.path.join(data_dir, 'lang_annotations', 'auto_lang_ann.npy')
+    if not os.path.exists(lang_path):
+        raise FileNotFoundError(f"Annotations not found at {lang_path}")
+
+    lang_data = np.load(lang_path, allow_pickle=True).item()
+    instructions = lang_data['language']['ann']
+    indices = lang_data['info']['indx']
+
+    df = pd.DataFrame({
+        'start_idx': [idx[0] for idx in indices],
+        'end_idx': [idx[1] for idx in indices],
+        'instruction': instructions
+    })
+    return df

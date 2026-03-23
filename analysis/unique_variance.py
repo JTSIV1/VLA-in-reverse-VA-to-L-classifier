@@ -29,7 +29,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 from config import TRAIN_DIR, VAL_DIR, EPISODE_TEMPLATE, SCENE_OBS_KEY, MAX_SEQ_LEN
 from utils import load_calvin_to_dataframe
-from train_transformer import ActionToVerbTransformer, CalvinVerbDataset
+from verb_probe.models import ActionToVerbTransformer
+from datasets.calvin_dataset import CalvinVerbProbeDataset as CalvinVerbDataset
 
 # ═══════════════════════════════════════════════════════════════════════════
 # 1. SETUP

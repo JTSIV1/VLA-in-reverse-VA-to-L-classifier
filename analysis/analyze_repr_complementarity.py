@@ -24,7 +24,7 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 
 def load_model(ckpt_path):
     import sys; sys.path.insert(0, ROOT)
-    from train_transformer import ActionToVerbTransformer
+    from verb_probe.models import ActionToVerbTransformer
     ck = torch.load(ckpt_path, map_location="cpu")
     model = ActionToVerbTransformer(
         num_verbs=ck["num_verbs"],
@@ -80,7 +80,7 @@ def probe(X_tr, y_tr, X_val, y_val, label=""):
 
 def main():
     from config import TRAIN_DIR, VAL_DIR, MAX_SEQ_LEN
-    from train_transformer import CalvinVerbDataset
+    from datasets.calvin_dataset import CalvinVerbProbeDataset as CalvinVerbDataset
     from utils import load_calvin_to_dataframe
 
     ao_ckpt   = os.path.join(ROOT, "checkpoints", "r8_ao_native_best.pth")

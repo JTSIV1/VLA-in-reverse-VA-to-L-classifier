@@ -13,10 +13,10 @@ conda activate mmml
 
 cd /data/user_data/wenjiel2/Code/VLA-in-reverse-VA-to-L-classifier
 
-TAG="bridge_ctx_subtask_d128"
+TAG="bridge_ctx_subtask_d128_23cls_sqrtwt"
 JOBID=${SLURM_JOB_ID}
 
-python train_bridge_ctx.py \
+python verb_probe/train_bridge_ctx.py \
     --csv_path data/bridge_verb_segments.csv \
     --shard_dir /data/user_data/wenjiel2/datasets/bridge_actions \
     --batch_size 64 \
@@ -26,7 +26,8 @@ python train_bridge_ctx.py \
     --max_segments 10 \
     --d_model 128 \
     --num_layers 4 \
-    --min_class_count 30 \
+    --min_class_count 200 \
+    --weighted_loss \
     --weight_decay 0.01 \
     --label_smoothing 0.1 \
     --patience 15 \

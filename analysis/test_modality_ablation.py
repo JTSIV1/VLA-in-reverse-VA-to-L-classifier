@@ -20,7 +20,8 @@ from torch.utils.data import DataLoader
 from torchvision import transforms
 from sklearn.metrics import classification_report
 
-from train_transformer import ActionToVerbTransformer, CalvinVerbDataset
+from verb_probe.models import ActionToVerbTransformer
+from datasets.calvin_dataset import CalvinVerbProbeDataset as CalvinVerbDataset
 from utils import load_calvin_to_dataframe
 from config import (
     VAL_DIR, D_MODEL, NHEAD, NUM_LAYERS, CROSS_LAYERS, ACTION_DIM, PATCH_SIZE,

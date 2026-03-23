@@ -17,7 +17,8 @@ from torch.utils.data import DataLoader
 from torchvision import transforms
 from collections import defaultdict
 
-from train_transformer import ActionToVerbTransformer, CalvinVerbDataset, SCENE_FUSION_MODALITIES
+from verb_probe.models import ActionToVerbTransformer, SCENE_FUSION_MODALITIES
+from datasets.calvin_dataset import CalvinVerbProbeDataset as CalvinVerbDataset
 from utils import load_calvin_to_dataframe
 from config import (
     VAL_DIR, ACTION_DIM, PATCH_SIZE, IMAGE_SIZE, IMG_MEAN, IMG_STD,

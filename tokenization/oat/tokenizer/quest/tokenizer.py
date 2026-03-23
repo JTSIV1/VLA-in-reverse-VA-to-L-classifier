@@ -160,6 +160,25 @@ class QueSTTok(BaseTokenizer):
         recon_loss = F.mse_loss(recons, actions)
         return recon_loss + commit_loss
     
+    def encode_fsq_codes(self, actions: torch.Tensor) -> torch.Tensor:
+        """Return 4-dim post-FSQ codes with STE gradient (before project_out).
+
+        Same encoder path as encode(), but stops after project_in + quantize,
+        before project_out(4→256). Returns (B, T', 4) with STE gradient flow.
+        """
+        x = self.normalizer["action"].normalize(actions)
+        x = self.action_proj(x)
+        x = self.conv_block(x)
+        x = self.add_pos_emb(x)
+        if self.use_causal_encoder:
+            mask = nn.Transformer.generate_square_subsequent_mask(
+                x.size(1), device=x.device)
+            x = self.encoder(x, mask=mask)
+        else:
+            x = self.encoder(x)
+        z = self.vq.project_in(x)       # (B, T', 4)
+        return self.vq.quantize(z)       # (B, T', 4) with STE
+
     def encode(self, actions: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         # actions: (B, T, d)

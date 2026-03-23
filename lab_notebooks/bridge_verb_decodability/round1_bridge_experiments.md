@@ -52,26 +52,50 @@ Gemini 1.5 Pro to decompose 38K BridgeV2 episodes into temporally-segmented subt
 - **Macro recall: 8.12%** — model overwhelmingly predicts dominant classes
 - 48 verbs, chance = ~2.1%
 
-### Contextualized Subtask Classifier (job 6673121)
+### Contextualized Subtask Classifier
 
 **Motivation:** Isolated 7–12 frame segments lack context. The contextualized model
 sees the entire episode trajectory while classifying each segment individually.
 
-**Architecture:** `ContextualVerbClassifier` in `train_bridge_ctx.py`
+**Architecture:** `ContextualVerbClassifier` in `verb_probe/train_bridge_ctx.py`
 - Full episode actions (max_ep_len=64) encoded with learned positional embeddings
 - **All action tokens attend to all action tokens** via self-attention (full episode context)
 - Per-segment CLS tokens appended after action tokens (max_segments=10)
 - **Each CLS_i only attends to its segment's action frames + itself** via 3D attention mask
 - One forward pass classifies all segments in an episode simultaneously
 - Episode-level train/val split (no data leakage between segments of the same episode)
-- d_model=128, 4 layers, 8 heads, unweighted CE, label_smoothing=0.1
-- Script: `train_bridge_ctx.py`, SLURM: `scripts/submit_bridge_ctx_train.sh`
+- d_model=128, 4 layers, 8 heads, label_smoothing=0.1
 
-**Results:** Val loss was NaN throughout training (best val acc 2.8%).
-The 3D attention mask with `-inf` caused NaN propagation in softmax. Fixed by switching to
-`-1e9` and ensuring all CLS tokens have self-attention, but the resubmitted job still produced
-NaN — likely a deeper interaction between the per-sample 3D mask and PyTorch's TransformerEncoderLayer.
-**Status: blocked on NaN bug.**
+**NaN bug (fixed):** Early runs produced NaN val loss due to padded positions having
+all-masked attention rows in the 3D `src_mask`. Softmax over all `-inf` → NaN → propagates
+through K matrix to valid positions in subsequent layers. Fixed by using `-1e9` instead of
+`-inf` and adding self-attention diagonal so every position attends to at least itself.
+
+**Results:**
+
+| Setting | Job | Val Acc | Macro Recall |
+|---------|-----|---------|-------------|
+| Ctx unweighted | 6679478 | **39.3%** | 13.4% |
+| Ctx sqrt-weighted CE | 6683019 | 33.9% | **23.0%** |
+
+### Subtask vs High-Level Comparison
+
+| Setting | #Classes | Val Acc | Macro Recall | Chance |
+|---------|----------|---------|-------------|--------|
+| **High-level** raw d128/4L weighted | 17 | 24.8% | **62.0%** | 5.9% |
+| **Subtask** ctx sqrt-weighted | 48 | 33.9% | 23.0% | 2.1% |
+| **Subtask** ctx unweighted | 48 | **39.3%** | 13.4% | 2.1% |
+| **Subtask** isolated unweighted | 48 | 34.5% | 8.1% | 2.1% |
+
+**Key findings:**
+- Subtask achieves higher absolute accuracy (34–39%) despite 3× more classes — atomic verbs
+  are more stereotyped and easier to decode from actions than task-level verbs
+- High-level has much better macro recall (62% vs 23%) due to milder class imbalance
+  (65:1 ratio for 17 verbs vs 1300:1 for 48 verbs)
+- Episode context helps: ctx unweighted (39.3%) > isolated (34.5%) = +4.8pp accuracy,
+  and ctx sqrt-wt (23.0%) >> isolated (8.1%) = +14.9pp macro recall
+- Weighted CE with extreme imbalance: inverse-frequency explodes loss; sqrt-inverse-frequency
+  is stable and nearly doubles macro recall vs unweighted (23% vs 13%)
 
 ## Experiment B: High-Level Classification
 
@@ -173,6 +197,17 @@ Script: `scripts/submit_bridge_rep_sweep.sh`
 - Macro recall curves are noisy due to rare classes (e.g., `cover` has only 6 val samples)
   swinging between epochs under weighted CE
 
+## t-SNE Embedding Comparison
+
+![t-SNE All Models](../../figures/bridge_tsne_all.png)
+
+- **Raw actions** show the clearest verb clusters (sweep, open, close, pick up, fold/unfold)
+- **OAT latent** retains some structure but clusters are less distinct
+- **OAT discrete** has almost no separable clusters — quantization destroys verb-discriminative info
+- **Ctx subtask** (48 classes) shows some clustering despite high class count (sweep, approach, attach),
+  but most classes overlap heavily due to extreme imbalance and short segment lengths
+- Script: `figures/plot_bridge_tsne_all.py`
+
 ## Data Overview
 
 ![Bridge Overview](../../figures/bridge_overview.png)
@@ -196,7 +231,8 @@ Key observations:
    - BridgeV2 high-level (OAT latent): 17 verbs, 14.4% val acc, 44.6% macro recall
    - BridgeV2 high-level (OAT discrete): 17 verbs, 9.7% val acc, 32.8% macro recall
    - BridgeV2 subtask (isolated): 48 verbs, 34.5% val acc, 8.1% macro recall
-   - BridgeV2 subtask (contextualized): blocked (NaN bug)
+   - BridgeV2 subtask (ctx unweighted): 48 verbs, 39.3% val acc, 13.4% macro recall
+   - BridgeV2 subtask (ctx sqrt-weighted): 48 verbs, 33.9% val acc, 23.0% macro recall
 
 3. **Does OAT tokenization preserve verb information?**
    - **Answer: No — OAT loses significant verb info.** Raw 62% → Latent 45% → Discrete 33% macro recall.
