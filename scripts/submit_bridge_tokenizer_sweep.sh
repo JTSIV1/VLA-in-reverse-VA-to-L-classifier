@@ -32,12 +32,13 @@ submit_oat() {
 source /data/user_data/wenjiel2/miniconda3/etc/profile.d/conda.sh
 conda activate mmml
 cd /data/user_data/wenjiel2/Code/VLA-in-reverse-VA-to-L-classifier
-python -u tokenization/train_oat_bridge.py \
-    --epochs 300 --batch_size 256 --lr 5e-5 --cosine_lr \
+python -u tokenization/train_tokenizer.py \
+    --tokenizer oat --dataset bridge \
+    --epochs 500 --batch_size 256 --lr 5e-5 \
     --horizon $HORIZON --num_registers $NREG \
     --fsq_levels $FSQ \
-    --save_path ${SAVE_BASE}/oat_${TAG}/full.pth \
-    --log_path ${SAVE_BASE}/oat_${TAG}/log.json
+    --max_chunks_per_epoch 100000 \
+    --save_dir ${SAVE_BASE}/oat_${TAG} --tag ${TAG}
 "
     echo "  Submitted: $JOB_NAME"
 }
@@ -97,7 +98,7 @@ python -u tokenization/train_tokenizer.py \
     echo "  Submitted: $JOB_NAME"
 }
 
-# === OAT (3 configs) ===
+# === OAT (5 configs) ===
 if [[ "$MODE" == "all" || "$MODE" == "oat" ]]; then
     echo "=== OAT ==="
     # O1: horizon=16, 4 registers, FSQ=[8,5,5] → 200 codes
@@ -106,9 +107,13 @@ if [[ "$MODE" == "all" || "$MODE" == "oat" ]]; then
     submit_oat "h32_r8_v125" 32 8 "5 5 5"
     # O3: horizon=32, 8 registers, FSQ=[8,8,8] → 512 codes
     submit_oat "h32_r8_v512" 32 8 "8 8 8"
+    # O4: horizon=16, 4 registers, FSQ=[8,5,5,5] → 1000 codes
+    submit_oat "h16_r4_v1000" 16 4 "8 5 5 5"
+    # O5: horizon=32, 8 registers, FSQ=[8,8,8,8] → 4096 codes
+    submit_oat "h32_r8_v4096" 32 8 "8 8 8 8"
 fi
 
-# === QueST (3 configs) ===
+# === QueST (5 configs) ===
 if [[ "$MODE" == "all" || "$MODE" == "quest" ]]; then
     echo "=== QueST ==="
     # Q1: horizon=16, ds=4 → 4 tokens, FSQ=[8,5,5] → 200 codes
@@ -117,6 +122,10 @@ if [[ "$MODE" == "all" || "$MODE" == "quest" ]]; then
     submit_quest "h32_ds4_v125" 32 4 "5 5 5"
     # Q3: horizon=32, ds=4 → 8 tokens, FSQ=[8,8,8] → 512 codes
     submit_quest "h32_ds4_v512" 32 4 "8 8 8"
+    # Q4: horizon=16, ds=4 → 4 tokens, FSQ=[8,5,5,5] → 1000 codes
+    submit_quest "h16_ds4_v1000" 16 4 "8 5 5 5"
+    # Q5: horizon=32, ds=4 → 8 tokens, FSQ=[8,8,8,8] → 4096 codes
+    submit_quest "h32_ds4_v4096" 32 4 "8 8 8 8"
 fi
 
 # === VQ-BeT (3 configs) ===

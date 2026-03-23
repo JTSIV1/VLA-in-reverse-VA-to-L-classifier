@@ -79,6 +79,14 @@ class OATTok(BaseTokenizer):
 
         return loss
 
+    def encode_pre_fsq(self, samples: torch.Tensor) -> torch.Tensor:
+        """Return pre-FSQ 256-d register embeddings (before head projection + FSQ).
+
+        Returns (B, num_registers, emb_dim=256) with full gradient flow.
+        """
+        nsamples = self.normalizer['action'].normalize(samples)
+        return self.encoder._encode_transformer(nsamples)
+
     def encode(self, samples: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         # samples: (B, T, sample_dim)
 

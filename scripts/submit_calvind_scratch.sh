@@ -55,6 +55,9 @@ torchrun --standalone --nnodes 1 --nproc-per-node 1 vla-scripts/train.py \
     --run_root_dir ${RUN_DIR} \
     --image_aug True \
     --run_id_note ${TAG} \
+    --vla.expected_world_size 1 \
+    --vla.global_batch_size 16 \
+    --vla.per_device_batch_size 16 \
     --vla.action_tokenizer '${ACTION_TOK}'
 "
     echo "  Submitted: sc_${TAG}"
@@ -90,6 +93,15 @@ if [[ "$MODE" == "all" || "$MODE" == "quest" ]]; then
     submit "quest_h16f256d2"  "sweep:quest:${CKPT_BASE}/quest_h16_f256_d2/full.pth"
     submit "quest_h32f1000d4" "sweep:quest:${CKPT_BASE}/quest_h32_f1000_d4/full.pth"
     submit "quest_h16f256d4"  "sweep:quest:${CKPT_BASE}/quest_h16_f256_d4/full.pth"
+fi
+
+# Aux-trained winners (verb/clip λ=0.1 on best VQ-BeT and QueST configs)
+if [[ "$MODE" == "all" || "$MODE" == "aux" ]]; then
+    echo "--- Aux-trained ---"
+    submit "vb_c5e16g4_verb01"    "sweep:vq_bet:${CKPT_BASE}/vq_bet_verb0.1_c5e16g4_verb01/full.pth"
+    submit "vb_c5e16g4_clip01"    "sweep:vq_bet:${CKPT_BASE}/vq_bet_clip0.1_c5e16g4_clip01/full.pth"
+    submit "quest_h16d2_verb01"   "sweep:quest:${CKPT_BASE}/quest_verb0.1_h16d2_verb01/full.pth"
+    submit "quest_h16d2_clip01"   "sweep:quest:${CKPT_BASE}/quest_clip0.1_h16d2_clip01/full.pth"
 fi
 
 echo ""

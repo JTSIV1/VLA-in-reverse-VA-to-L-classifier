@@ -462,9 +462,12 @@ def build_quest(args):
     QueSTTok = _import_quest()
     levels = getattr(args, 'fsq_levels', [8, 5, 5, 5])
     ds = getattr(args, 'downsample_factor', TOKENIZER_DOWNSAMPLE_FACTOR)
+    vq_type = getattr(args, 'vq_type', 'fsq')
     tok = QueSTTok(
         action_dim=ACTION_DIM, horizon=args.horizon,
-        vq_type="fsq", fsq_level=levels,
+        vq_type=vq_type, fsq_level=levels,
+        vq_codebook_size=getattr(args, 'vq_codebook_size', 256),
+        vq_codebook_dim=getattr(args, 'vq_codebook_dim', 256),
         downsample_factor=ds)
     return tok
 
@@ -534,20 +537,21 @@ def extract_latents_vqbet(model, chunks, n_chunks):
     }
 
 
-def extract_latents_oat_quest(model, batch, device):
-    """Extract post-FSQ latents from OAT or QueST tokenizer.
+def extract_latents_oat_quest(model, batch, device, pre_fsq=False):
+    """Extract latents from OAT or QueST tokenizer for aux heads.
 
-    Aux heads (verb, CLIP) operate on the quantized FSQ output.
-    FSQ uses straight-through estimator (round_ste), so aux-head gradients
-    flow back through the quantizer to the encoder for joint training.
+    Args:
+        pre_fsq: If True and model is QueST, use pre-FSQ 256-d encoder output
+                 instead of post-FSQ 4-d codes. Gives aux heads a richer
+                 representation with full gradient flow (no FSQ bottleneck).
 
     Returns:
         dict with recon_loss, traj_latents (B, n_latent_tokens, latent_dim),
         real_counts.
 
-    Latent dim (post-FSQ):
-        OAT  — 4   (custom FSQ, no projections)
-        QueST — 256 (vector_quantize_pytorch FSQ with project_out: 4→256)
+    Latent dim:
+        post-FSQ (default): OAT=4, QueST=4
+        pre-FSQ (pre_fsq=True, QueST only): 256
     """
     batch = {k: v.to(device) for k, v in batch.items() if isinstance(v, torch.Tensor)}
     # CalvinTokenizerDataset returns (B, max_windows, ws, D); squeeze to (B, ws, D)
@@ -556,21 +560,29 @@ def extract_latents_oat_quest(model, batch, device):
     # Forward pass for recon loss (encoder + quantizer + decoder)
     recon_loss = model(batch)
 
-    # Second encoder+quantizer pass WITH grad for aux heads.
-    # FSQ straight-through estimator lets gradients flow to encoder.
-    # For QueST: use 4-dim FSQ codes (before project_out) so the verb head
-    # learns its own expansion, not the decoder's project_out(4→256).
+    # Second encoder pass WITH grad for aux heads.
     codes = None
-    if hasattr(model, 'encode_fsq_codes'):
+    use_fsq_codes = (hasattr(model, 'encode_fsq_codes')
+                     and getattr(model, 'vq_type', 'fsq') == 'fsq')
+
+    if pre_fsq and hasattr(model, 'encode_pre_fsq'):
+        # Pre-FSQ: 256-d encoder output before projection + FSQ.
+        # Works for both QueST (transformer encoder output) and OAT (register embeddings).
+        latents = model.encode_pre_fsq(batch['action'])  # (B, T', 256)
+    elif use_fsq_codes:
+        # QueST post-FSQ: 4-d quantized codes with STE gradient
         latents = model.encode_fsq_codes(batch['action'])  # (B, T', 4)
-        # FSQ codes are the rounded latents themselves
-        codes = latents.detach()
+        with torch.no_grad():
+            codes = model.vq.codes_to_indices(latents).unsqueeze(-1)
     else:
+        # OAT post-FSQ (4-d) or QueST vq_type='vq' (256-d post-VQ)
         encoded = model.encode(batch['action'])
         if isinstance(encoded, tuple):
-            latents = encoded[0]  # OAT: post-FSQ 4-dim
+            latents = encoded[0]
             if len(encoded) > 1:
-                codes = encoded[1].detach()  # OAT: tokens from FSQ
+                codes = encoded[1].detach()
+                if codes.ndim == 2:
+                    codes = codes.unsqueeze(-1)
         elif isinstance(encoded, dict):
             latents = encoded.get('latents', encoded.get('state', None))
         else:
@@ -731,6 +743,7 @@ def eval_epoch(model, loader, device, args,
             if codes.ndim == 3:
                 # (B, T, D) -> (B*T, D) — flatten token positions
                 codes = codes.reshape(-1, codes.size(-1))
+            # (B*T, D) or (B, groups) — each row is one code tuple
             all_codes.append(codes.cpu())
 
         totals['recon'] += result['recon_loss'].item()
@@ -744,12 +757,8 @@ def eval_epoch(model, loader, device, args,
             average='macro', zero_division=0)
 
     # Compute codebook utilization
-    codebook_util = None
-    if all_codes:
-        codes_cat = torch.cat(all_codes, dim=0)  # (N, D)
-        # Convert multi-dim codes to unique tuples
-        unique_codes = set(map(tuple, codes_cat.numpy().tolist()))
-        codebook_util = len(unique_codes)
+    from analysis.codebook_util import codes_to_unique_count
+    codebook_util = codes_to_unique_count(all_codes)
 
     return {k: v / max(n_batches, 1) for k, v in totals.items()} | {
         'verb_acc': 100.0 * correct / max(total, 1),
@@ -815,8 +824,13 @@ def eval_clip_retrieval(model, loader, device, extract_fn,
 # Extract function wrappers (adapt each tokenizer to uniform interface)
 # ======================================================================
 
-def make_extract_fn(tok_type, model):
-    """Return an extract_fn(model, batch, device) for the given tokenizer type."""
+def make_extract_fn(tok_type, model, pre_fsq=False):
+    """Return an extract_fn(model, batch, device) for the given tokenizer type.
+
+    Args:
+        pre_fsq: If True, QueST aux heads use 256-d pre-FSQ encoder output
+                 instead of 4-d post-FSQ codes. Ignored for VQ-BeT and OAT.
+    """
 
     if tok_type == 'vq_bet':
         def fn(model, batch, device):
@@ -824,8 +838,12 @@ def make_extract_fn(tok_type, model):
                 # Bridge flat chunks: (B, chunk_size * action_dim)
                 x = batch.to(device)
                 _, recon_loss, vq_loss = model(x)
+                # Get codebook indices for utilization tracking
+                with torch.no_grad():
+                    _, indices, _ = model.encode(x)  # (B, groups)
                 return {'recon_loss': recon_loss, 'vq_loss': vq_loss,
-                        'traj_latents': None, 'real_counts': None}
+                        'traj_latents': None, 'real_counts': None,
+                        'codes': indices.detach()}
             windows = batch[0].to(device)     # (B, max_windows, window_size, action_dim)
             n_windows = batch[-1]             # last element is always n_windows
             return extract_latents_vqbet(model, windows, n_windows)
@@ -834,15 +852,12 @@ def make_extract_fn(tok_type, model):
     if tok_type in ('oat', 'quest'):
         def fn(model, batch, device):
             if isinstance(batch, dict):
-                # From CalvinActionCropDataset or CalvinTokenizerDataset(return_format="dict")
                 action = batch["action"].to(device)
-                # CalvinTokenizerDataset returns (B, max_windows, ws, D); squeeze window dim
                 if action.ndim == 4:
-                    action = action.squeeze(1)  # (B, ws, D)
+                    action = action.squeeze(1)
                 action_dict = {"action": action}
-                return extract_latents_oat_quest(model, action_dict, device)
-            # Fallback for tuple format
-            return extract_latents_oat_quest(model, {k: v.to(device) for k, v in batch.items()}, device)
+                return extract_latents_oat_quest(model, action_dict, device, pre_fsq=pre_fsq)
+            return extract_latents_oat_quest(model, {k: v.to(device) for k, v in batch.items()}, device, pre_fsq=pre_fsq)
         return fn
 
     raise ValueError(f"Unknown tokenizer type: {tok_type}")
@@ -949,6 +964,12 @@ def main():
                         help="Number of register tokens for OAT (default: 8)")
     parser.add_argument("--downsample_factor", type=int, default=TOKENIZER_DOWNSAMPLE_FACTOR,
                         help="Temporal downsampling factor for QueST (default: 4)")
+    parser.add_argument("--vq_type", type=str, default="fsq", choices=["fsq", "vq"],
+                        help="QueST quantization type: fsq (default) or vq (learned codebook)")
+    parser.add_argument("--vq_codebook_size", type=int, default=256,
+                        help="Codebook size for QueST vq_type=vq (default: 256)")
+    parser.add_argument("--vq_codebook_dim", type=int, default=256,
+                        help="Codebook vector dimension for QueST vq_type=vq (default: 256)")
     parser.add_argument("--vqvla_config_dir", type=str, default=None)
     parser.add_argument("--vqvla_pretrained", type=str, default=None)
 
@@ -961,6 +982,9 @@ def main():
                         help="Lambda for verb classification head (0=disabled)")
     parser.add_argument("--clip_lambda", type=float, default=0.0,
                         help="Lambda for CLIP contrastive head (0=disabled)")
+    parser.add_argument("--pre_fsq_aux", action="store_true",
+                        help="QueST: attach aux heads to 256-d pre-FSQ encoder output "
+                             "instead of 4-d post-FSQ codes")
     parser.add_argument("--min_class_count", type=int, default=30,
                         help="Min samples per verb class (sparse filtering)")
     parser.add_argument("--weighted_verb_loss", action="store_true", default=True)
@@ -1111,7 +1135,8 @@ def main():
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Tokenizer model: {n_params:,} trainable params")
 
-    extract_fn = make_extract_fn(args.tokenizer, model)
+    extract_fn = make_extract_fn(args.tokenizer, model,
+                                   pre_fsq=getattr(args, 'pre_fsq_aux', False))
 
     # ── Build aux heads ─────────────────────────────────────────────────
     verb_head = None
@@ -1125,10 +1150,13 @@ def main():
         head_latent_dim = args.latent_dim
     elif args.tokenizer == 'vqvla':
         head_latent_dim = 128  # fixed by VQ-VLA architecture
-    elif args.tokenizer == 'oat':
-        head_latent_dim = 4  # OAT custom FSQ: no projections, output = len(levels)
-    elif args.tokenizer == 'quest':
-        head_latent_dim = 4  # QueST FSQ: use 4-dim codes before project_out (same as OAT)
+    elif args.tokenizer in ('oat', 'quest'):
+        if getattr(args, 'vq_type', 'fsq') == 'vq':
+            head_latent_dim = 256  # VQ mode: quantization in encoder_dim space
+        elif getattr(args, 'pre_fsq_aux', False):
+            head_latent_dim = 256  # pre-FSQ: emb_dim (both OAT and QueST)
+        else:
+            head_latent_dim = 4  # post-FSQ: len(fsq_levels)
     else:
         head_latent_dim = 128
 

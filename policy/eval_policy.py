@@ -90,6 +90,7 @@ def vqvla_extra_args(tokenizer):
 
 SLURM_CONFIGS = {
     "nll":       {"gres": "gpu:1", "mem": "48G", "time": "4:00:00",  "cpus": 4},
+    "real_l1":   {"gres": "gpu:1", "mem": "48G", "time": "4:00:00",  "cpus": 4},
     "verb":      {"gres": "gpu:1", "mem": "32G", "time": "2:00:00",  "cpus": 4},
     "rollout":   {"gres": "gpu:1", "mem": "64G", "time": "24:00:00", "cpus": 8},
     "attention": {"gres": "gpu:1", "mem": "64G", "time": "8:00:00",  "cpus": 4},
@@ -107,6 +108,16 @@ def build_eval_command(mode, tokenizer, dataset, args):
         return (
             f"python -m policy.scripts.evaluate_openvla "
             f"--condition {cond} --eval_nll "
+            f"--checkpoint_dir {ckpt_dir} "
+            f"--data_root_dir {DATA_DIR} "
+            f"--max_nll_batches {args.max_nll_batches} "
+            f"--output_dir results/stage3/{cond} "
+            f"{extra}"
+        )
+    elif mode == "real_l1":
+        return (
+            f"python -m policy.scripts.evaluate_openvla "
+            f"--condition {cond} --eval_real_l1 "
             f"--checkpoint_dir {ckpt_dir} "
             f"--data_root_dir {DATA_DIR} "
             f"--max_nll_batches {args.max_nll_batches} "
@@ -215,7 +226,7 @@ def main():
         epilog=__doc__,
     )
     parser.add_argument("--mode", required=True,
-                        choices=["nll", "verb", "rollout", "attention"],
+                        choices=["nll", "real_l1", "verb", "rollout", "attention"],
                         help="Evaluation mode")
     parser.add_argument("--tokenizer", required=True,
                         help="Tokenizer condition (or 'all' for all 4)")
@@ -253,7 +264,7 @@ def main():
         script = build_sbatch_script(args.mode, tok, args.dataset, eval_cmd, args)
 
         # For NLL/rollout, check checkpoint exists
-        if args.mode in ("nll", "rollout", "attention"):
+        if args.mode in ("nll", "real_l1", "rollout", "attention"):
             ckpt = get_openvla_ckpt_dir(tok, args.dataset)
             if not os.path.isdir(ckpt) and not args.dry_run:
                 print(f"  [SKIP] {tok}: checkpoint not found at {ckpt}")

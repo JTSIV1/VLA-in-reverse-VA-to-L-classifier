@@ -467,6 +467,205 @@ def run_nll_eval(condition: str, checkpoint_dir: str, vqvla_checkpoint_dir: str,
     }
 
 
+# ── Real L1: decode(pred_tokens) vs original continuous actions ──────────────
+
+def run_real_l1_eval(condition: str, checkpoint_dir: str,
+                     sweep_tokenizer_type: str, sweep_checkpoint_path: str,
+                     vqvla_checkpoint_dir: str,
+                     data_root_dir: str, max_batches: int, device: str) -> dict:
+    """
+    Compute L1 between decoded predicted actions and the ORIGINAL continuous
+    ground-truth actions (not re-encoded/decoded GT tokens).
+
+    For each val example:
+      1. Teacher-force the model to get predicted action tokens
+      2. Decode predicted tokens → continuous action (step 0 of chunk)
+      3. Compare against raw continuous action from the RLDS dataset
+    """
+    print("\n=== Real L1 Evaluation (pred vs raw GT) ===")
+
+    os.environ.setdefault("PRISMATIC_DATA_ROOT", data_root_dir)
+
+    import torch
+    import tensorflow_datasets as tfds
+    from transformers import AutoConfig, AutoImageProcessor, AutoModelForVision2Seq, AutoProcessor
+    from prismatic.extern.hf.configuration_prismatic import OpenVLAConfig
+    from prismatic.extern.hf.modeling_prismatic import OpenVLAForActionPrediction
+    from prismatic.extern.hf.processing_prismatic import PrismaticImageProcessor, PrismaticProcessor
+    from prismatic.util.data_utils import PaddedCollatorForActionPrediction
+    from prismatic.vla.action_tokenizer import ActionTokenizer
+    from prismatic.vla.datasets import RLDSBatchTransform, RLDSDataset
+    from prismatic.vla.datasets.rlds.utils.data_utils import save_dataset_statistics
+    from prismatic.models.backbones.llm.prompting import PurePromptBuilder
+
+    AutoConfig.register("openvla", OpenVLAConfig)
+    AutoImageProcessor.register(OpenVLAConfig, PrismaticImageProcessor)
+    AutoProcessor.register(OpenVLAConfig, PrismaticProcessor)
+    AutoModelForVision2Seq.register(OpenVLAConfig, OpenVLAForActionPrediction)
+
+    print(f"Loading processor and model from {checkpoint_dir} ...")
+    processor = AutoProcessor.from_pretrained(checkpoint_dir, trust_remote_code=True)
+    vla = AutoModelForVision2Seq.from_pretrained(
+        checkpoint_dir,
+        torch_dtype=torch.bfloat16,
+        low_cpu_mem_usage=True,
+        trust_remote_code=True,
+    ).to(device)
+    vla.eval()
+    print("Model loaded.")
+
+    # Create action tokenizer
+    if condition == "bin":
+        action_tokenizer = ActionTokenizer(processor.tokenizer)
+        future_horizon = 0
+    elif sweep_tokenizer_type:
+        from prismatic.vla.calvin_sweep_action_tokenizer import CalvinSweepActionTokenizer
+        action_tokenizer = CalvinSweepActionTokenizer(
+            processor.tokenizer, sweep_tokenizer_type, sweep_checkpoint_path,
+            use_extra=True,
+        )
+        future_horizon = action_tokenizer.required_future_horizon
+    elif vqvla_checkpoint_dir:
+        from prismatic.vla.calvin_vq_action_tokenizer import CalvinVQActionTokenizer
+        action_tokenizer = CalvinVQActionTokenizer(
+            processor.tokenizer, vqvla_checkpoint_dir=vqvla_checkpoint_dir,
+        )
+        future_horizon = action_tokenizer.required_future_horizon
+    else:
+        raise ValueError(f"Unknown condition: {condition}")
+
+    # Build val dataloader (same as NLL eval)
+    batch_transform = RLDSBatchTransform(
+        action_tokenizer,
+        processor.tokenizer,
+        image_transform=processor.image_processor.apply_transform,
+        prompt_builder_fn=PurePromptBuilder,
+    )
+    val_dataset = RLDSDataset(
+        data_root_dir=Path(data_root_dir),
+        data_mix="calvin_dataset",
+        batch_transform=batch_transform,
+        resize_resolution=tuple(vla.config.image_sizes),
+        shuffle_buffer_size=1000,
+        train=False,
+        image_aug=False,
+        future_action_window_size=future_horizon,
+    )
+    collator = PaddedCollatorForActionPrediction(
+        processor.tokenizer.model_max_length,
+        processor.tokenizer.pad_token_id,
+        padding_side="right",
+    )
+    dataloader = DataLoader(
+        val_dataset, batch_size=8, sampler=None,
+        collate_fn=collator, num_workers=0,
+    )
+
+    # Also load raw continuous actions from RLDS val split
+    # We iterate both the tokenized dataloader and raw RLDS in parallel
+    rlds_path = os.path.join(data_root_dir, "calvin_dataset", "1.0.0")
+    raw_ds = tfds.builder_from_directory(rlds_path).as_dataset(split="val")
+    # Flatten episodes into (image, action) steps for alignment
+    raw_actions_iter = _rlds_raw_action_iterator(raw_ds)
+
+    n_codes = getattr(action_tokenizer, 'n_codes_per_chunk', 7)
+
+    all_pred_actions = []
+    all_gt_actions = []
+    n_batches = 0
+
+    with torch.no_grad():
+        for batch in dataloader:
+            if max_batches > 0 and n_batches >= max_batches:
+                break
+
+            pixel_values = batch["pixel_values"].to(torch.bfloat16).to(device)
+            input_ids = batch["input_ids"].to(device)
+            attention_mask = batch["attention_mask"].to(device)
+            labels = batch["labels"].to(device)
+
+            with torch.autocast("cuda", dtype=torch.bfloat16):
+                output = vla(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    pixel_values=pixel_values,
+                )
+
+            num_patches = vla.vision_backbone.featurizer.patch_embed.num_patches
+            action_logits = output.logits[:, num_patches:-1]
+            action_preds = action_logits.argmax(dim=2)
+            action_gt = labels[:, 1:].to(device)
+            mask = (action_tokenizer.action_token_end_idx > action_gt) & \
+                   (action_gt > action_tokenizer.action_token_begin_idx)
+
+            # Decode predicted tokens → continuous actions
+            pred_flat = action_preds[mask].cpu().numpy()
+            n = (len(pred_flat) // n_codes) * n_codes
+            if n == 0:
+                n_batches += 1
+                continue
+
+            pred_cont = action_tokenizer.decode_token_ids_to_actions(pred_flat[:n])
+            if isinstance(pred_cont, torch.Tensor):
+                pred_cont = pred_cont.cpu().numpy()
+            # pred_cont: (n_chunks, 7) — decoded first-step actions
+
+            # Get raw GT actions for this batch from the RLDS iterator
+            batch_size = pixel_values.shape[0]
+            raw_gt = []
+            for _ in range(batch_size):
+                try:
+                    raw_action = next(raw_actions_iter)  # (7,)
+                    raw_gt.append(raw_action)
+                except StopIteration:
+                    break
+            if len(raw_gt) < batch_size:
+                print(f"  Warning: ran out of raw actions at batch {n_batches}")
+                break
+
+            raw_gt = np.array(raw_gt, dtype=np.float32)  # (B, 7)
+            # pred_cont has n_chunks = n // n_codes entries
+            # raw_gt has B entries — they should align 1:1 for bin (n_codes=7, n_chunks=B)
+            # For chunk tokenizers, n_chunks might differ from B
+            n_compare = min(len(pred_cont), len(raw_gt))
+            all_pred_actions.append(pred_cont[:n_compare])
+            all_gt_actions.append(raw_gt[:n_compare])
+
+            n_batches += 1
+            if n_batches % 50 == 0:
+                preds_so_far = np.concatenate(all_pred_actions)
+                gts_so_far = np.concatenate(all_gt_actions)
+                l1_so_far = np.abs(preds_so_far - gts_so_far).mean()
+                print(f"  [{n_batches} batches] real_l1={l1_so_far:.4f}")
+
+    if all_pred_actions:
+        all_preds = np.concatenate(all_pred_actions)
+        all_gts = np.concatenate(all_gt_actions)
+        real_l1 = float(np.abs(all_preds - all_gts).mean())
+        per_dim_l1 = [float(np.abs(all_preds[:, d] - all_gts[:, d]).mean()) for d in range(7)]
+        print(f"\nReal L1 eval done ({n_batches} batches, {len(all_preds)} steps):")
+        print(f"  Real L1 (overall): {real_l1:.4f}")
+        print(f"  Per-dim L1: {['%.4f' % v for v in per_dim_l1]}")
+    else:
+        real_l1, per_dim_l1 = None, None
+        print("  No predictions collected.")
+
+    return {
+        "real_l1": real_l1,
+        "per_dim_l1": per_dim_l1,
+        "n_batches": n_batches,
+        "n_steps": len(all_preds) if all_pred_actions else 0,
+    }
+
+
+def _rlds_raw_action_iterator(raw_ds):
+    """Yield (7,) continuous actions from RLDS dataset, one step at a time."""
+    for episode in raw_ds:
+        steps = episode["steps"]
+        for step in steps:
+            yield step["action"].numpy().astype(np.float32)
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def parse_args():
@@ -493,6 +692,14 @@ def parse_args():
     p.add_argument("--min_class_count", type=int, default=30,
                    help="Min train samples for a verb class to be included")
 
+    # Real L1 eval args
+    p.add_argument("--eval_real_l1", action="store_true",
+                   help="Compute L1 between decoded predictions and original continuous GT actions")
+    p.add_argument("--sweep_tokenizer_type", type=str, default="",
+                   help="Sweep tokenizer type (vq_bet, oat, quest)")
+    p.add_argument("--sweep_checkpoint_path", type=str, default="",
+                   help="Path to sweep tokenizer checkpoint (full.pth)")
+
     # Output
     p.add_argument("--output_dir", type=str, default=DEFAULT_OUT)
     p.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
@@ -517,6 +724,20 @@ def main():
             device=args.device,
         )
         results["nll_eval"] = nll_metrics
+
+    if args.eval_real_l1:
+        assert args.checkpoint_dir, "--checkpoint_dir required for --eval_real_l1"
+        real_l1_metrics = run_real_l1_eval(
+            condition=args.condition,
+            checkpoint_dir=args.checkpoint_dir,
+            sweep_tokenizer_type=args.sweep_tokenizer_type,
+            sweep_checkpoint_path=args.sweep_checkpoint_path,
+            vqvla_checkpoint_dir=args.vqvla_checkpoint_dir,
+            data_root_dir=args.data_root_dir,
+            max_batches=args.max_nll_batches,
+            device=args.device,
+        )
+        results["real_l1_eval"] = real_l1_metrics
 
     if args.eval_verb_probe:
         verb_metrics = run_verb_probe(

@@ -66,28 +66,30 @@ class RegisterEncoder(nn.Module):
         self.head = LinearHead(emb_dim, latent_dim)
         self.num_registers = num_registers
 
-    def forward(self, sample: torch.Tensor) -> torch.Tensor:
-        # sample: (B, T, sample_dim)
-        # return latents: (B, num_registers, latent_dim)
+    def _encode_transformer(self, sample: torch.Tensor) -> torch.Tensor:
+        """Run transformer, return register tokens before head projection.
 
+        Returns: (B, num_registers, emb_dim) — 256-d register representations.
+        """
         B, T, _ = sample.shape
-        
-        # proj & pos emb
-        sample_emb = self.sample_emb(sample)    # (B, T, emb_dim)
-        sample_emb = self.pos_emb(sample_emb)   # (B, T, emb_dim)
 
-        # pad registers
-        x = torch.cat([    # (B, T + num_registers, emb_dim)
+        sample_emb = self.sample_emb(sample)
+        sample_emb = self.pos_emb(sample_emb)
+
+        x = torch.cat([
             sample_emb,
             self.registers.unsqueeze(0).expand(B, -1, -1)
         ], dim=1)
-        
-        # transformer forward
+
         causal_last_attn_mask = create_causal_last_mask(T, self.num_registers, str(sample.device))
         x = self.transformer(x, block_mask=causal_last_attn_mask)
-        
-        # extract register tokens and project to latent space
-        latents = self.head(x[:, T:])       # (B, num_registers, latent_dim)
-        
+
+        return x[:, T:]  # (B, num_registers, emb_dim)
+
+    def forward(self, sample: torch.Tensor) -> torch.Tensor:
+        # sample: (B, T, sample_dim)
+        # return latents: (B, num_registers, latent_dim)
+        register_emb = self._encode_transformer(sample)
+        latents = self.head(register_emb)       # (B, num_registers, latent_dim)
         return latents
     
