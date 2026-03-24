@@ -271,16 +271,71 @@ higher recon loss than VQ-BeT/QueST.
 ### Aux Loss Retraining (HP Sweep Winners)
 
 Retrain the best VQ-BeT and QueST configs with verb classification and CLIP contrastive
-heads (λ=0.1 for both, matching the original sweep's winning lambda).
+heads (λ=0.1 for both). Three QueST variants tested to address the FSQ bottleneck:
+post-FSQ (4-d aux input), pre-FSQ (256-d), and VQ (learned 512-d codebook replacing FSQ).
 
-| Job ID | Tokenizer | Config | Aux Head | Lambda |
-|--------|-----------|--------|----------|--------|
-| 6724609 | VQ-BeT | c5/e16/g4 | verb | 0.1 |
-| 6724610 | VQ-BeT | c5/e16/g4 | clip | 0.1 |
-| 6724611 | QueST | h16/f256/d2 | verb | 0.1 |
-| 6724612 | QueST | h16/f256/d2 | clip | 0.1 |
+Checkpoints: `checkpoints/calvind_hp_sweep/`
 
-Checkpoints saved to `checkpoints/calvind_hp_sweep/{c5e16g4_verb01,c5e16g4_clip01,h16d2_verb01,h16d2_clip01}/`.
+#### VQ-BeT c5/e16/g4 (aux heads on 512-d post-RVQ z_q)
+
+| Condition | Val Recon | Val Verb Acc | Val mF1 | Val R@1 | Val R@5 | Val R@10 |
+|-----------|-----------|-------------|---------|---------|---------|----------|
+| vanilla | **0.0085** | — | — | — | — | — |
+| + verb λ=0.1 | 0.0100 | **38.6%** | **40.3%** | — | — | — |
+| + clip λ=0.1 | 0.0098 | — | — | **3.1%** | **14.5%** | **27.7%** |
+
+VQ-BeT handles aux losses well — recon increases only 18%, and the 512-d z_q representation
+is rich enough for the aux heads to learn verb/CLIP structure effectively.
+
+#### QueST h16/f256/d2 — FSQ post-FSQ (aux heads on 4-d quantized codes)
+
+| Condition | Val Recon | Val Verb Acc | Val mF1 | Val R@1 | Val R@5 | Val R@10 |
+|-----------|-----------|-------------|---------|---------|---------|----------|
+| vanilla | **0.0121** | — | — | — | — | — |
+| + verb λ=0.1 | 0.0249 | 13.5% | 15.8% | — | — | — |
+| + clip λ=0.1 | 0.0302 | — | — | 1.7% | 7.1% | 11.7% |
+
+Recon doubles with aux loss. Verb accuracy is very low (13.5%) because aux heads operate
+on 4-d post-FSQ codes — too low-dimensional for meaningful verb classification.
+
+#### QueST h16/f256/d2 — FSQ pre-FSQ (aux heads on 256-d encoder output)
+
+| Condition | Val Recon | Val Verb Acc | Val mF1 | Val R@1 | Val R@5 | Val R@10 |
+|-----------|-----------|-------------|---------|---------|---------|----------|
+| + verb λ=0.1 | 0.0208 | 18.3% | 18.6% | — | — | — |
+| + clip λ=0.1 | 0.0262 | — | — | 2.1% | 7.6% | 13.6% |
+
+Attaching aux heads to the 256-d pre-FSQ encoder output (before `project_in` compresses
+to 4-d for FSQ) improves all metrics: verb acc +4.8pp, recon loss -16%, R@10 +1.9pp.
+Still far behind VQ-BeT because the improvement is in gradient quality, not representation
+richness — the quantized tokens are still 4-d FSQ codes.
+
+#### QueST h16/d2 — VQ (learned codebook replacing FSQ, 256 codes × 512-d)
+
+| Condition | Val Recon | Val Verb Acc | Val mF1 | Val R@1 | Val R@5 | Val R@10 |
+|-----------|-----------|-------------|---------|---------|---------|----------|
+| vanilla | 0.0153 | — | — | — | — | — |
+| + verb λ=0.1 | 0.0239 | 14.3% | 14.8% | — | — | — |
+| + clip λ=0.1 | 0.0329 | — | — | 1.8% | 6.8% | 12.1% |
+
+Replacing FSQ with VQ (512-d learned codebook) did not help — verb accuracy (14.3%) is
+comparable to post-FSQ (13.5%), and recon is worse than FSQ vanilla (0.0153 vs 0.0121).
+The bottleneck is not codebook richness but QueST's encoder architecture: the causal conv
++ transformer compresses temporal structure well for reconstruction but does not naturally
+organize actions by verb semantics.
+
+#### Summary: Aux Head Attachment Point Matters
+
+| Tokenizer | Aux input | Val Verb Acc | Val R@10 | Val Recon |
+|-----------|----------|-------------|----------|-----------|
+| **VQ-BeT** | **512-d z_q** | **38.6%** | **27.7%** | **0.0100** |
+| QueST (pre-FSQ) | 256-d encoder | 18.3% | 13.6% | 0.0208 |
+| QueST (VQ) | 256-d post-VQ | 14.3% | 12.1% | 0.0239 |
+| QueST (post-FSQ) | 4-d codes | 13.5% | 11.7% | 0.0249 |
+
+VQ-BeT's MLP encoder + ResidualVQ produces latents that are 2-3× more amenable to
+semantic supervision than QueST's causal conv + transformer + FSQ/VQ, regardless of
+the quantization method or aux head attachment point.
 
 ---
 
@@ -305,50 +360,75 @@ on CALVIN-D only (no OXE pretraining).
 | materialize.py (sweep: prefix) | `<openvla-mini>/prismatic/vla/materialize.py` |
 | Checkpoints | `runs/calvind_scratch/` |
 
-### Conditions (10 → 7 active)
+### Conditions (14 total, 11 active)
 Uses HP sweep checkpoints (`checkpoints/calvind_hp_sweep/`):
 
-| # | Tag | Tokenizer | Config | Tokens | Codebook | Tok Recon | Status |
-|---|-----|-----------|--------|--------|----------|-----------|--------|
-| 1 | sc_bin_baseline | Bin | 256 bins | 7 | 256 | N/A | **Done** |
-| 2 | sc_vb_c5e16g4 | VQ-BeT | c5/e16/g4 | 4 | 16 (×4) | 0.0085 | **Done** |
-| 3 | sc_vb_c5e64g2 | VQ-BeT | c5/e64/g2 | 2 | 64 (×2) | 0.0089 | **Done** |
-| 4 | sc_vb_c10e16g4 | VQ-BeT | c10/e16/g4 | 4 | 16 (×4) | 0.0119 | **Done** |
-| 5 | ~~sc_oat_h32f256r8~~ | ~~OAT~~ | ~~h32/f256/r8~~ | ~~8~~ | ~~256~~ | ~~0.0452~~ | Cancelled |
-| 6 | ~~sc_oat_h32f1000r8~~ | ~~OAT~~ | ~~h32/f1000/r8~~ | ~~8~~ | ~~1000~~ | ~~0.0461~~ | Cancelled |
-| 7 | ~~sc_oat_h32f256r4~~ | ~~OAT~~ | ~~h32/f256/r4~~ | ~~4~~ | ~~256~~ | ~~0.0484~~ | Cancelled |
-| 8 | sc_quest_h16f256d2 | QueST | h16/f256/d2 | 8 | 256 | 0.0121 | Running |
-| 9 | sc_quest_h32f1000d4 | QueST | h32/f1000/d4 | 8 | 1000 | 0.0138 | Running |
-| 10 | sc_quest_h16f256d4 | QueST | h16/f256/d4 | 4 | 256 | 0.0158 | Running |
+**Vanilla tokenizer configs (top-3 per tokenizer):**
+
+| # | Tag | Tokenizer | Config | Tokens | Codebook | Tok Recon |
+|---|-----|-----------|--------|--------|----------|-----------|
+| 1 | sc_bin_baseline | Bin | 256 bins | 7 | 256 | N/A |
+| 2 | sc_vb_c5e16g4 | VQ-BeT | c5/e16/g4 | 4 | 16 (×4) | 0.0085 |
+| 3 | sc_vb_c5e64g2 | VQ-BeT | c5/e64/g2 | 2 | 64 (×2) | 0.0089 |
+| 4 | sc_vb_c10e16g4 | VQ-BeT | c10/e16/g4 | 4 | 16 (×4) | 0.0119 |
+| 5 | ~~sc_oat_h32f256r8~~ | ~~OAT~~ | ~~h32/f256/r8~~ | ~~8~~ | ~~256~~ | ~~0.0452~~ |
+| 6 | ~~sc_oat_h32f1000r8~~ | ~~OAT~~ | ~~h32/f1000/r8~~ | ~~8~~ | ~~1000~~ | ~~0.0461~~ |
+| 7 | ~~sc_oat_h32f256r4~~ | ~~OAT~~ | ~~h32/f256/r4~~ | ~~4~~ | ~~256~~ | ~~0.0484~~ |
+| 8 | sc_quest_h16f256d2 | QueST | h16/f256/d2 | 8 | 256 | 0.0121 |
+| 9 | sc_quest_h32f1000d4 | QueST | h32/f1000/d4 | 8 | 1000 | 0.0138 |
+| 10 | sc_quest_h16f256d4 | QueST | h16/f256/d4 | 4 | 256 | 0.0158 |
+
+**Aux-trained tokenizer configs** (verb/clip λ=0.1, best VQ-BeT + QueST):
+
+| # | Tag | Tokenizer | Aux | Tok Recon |
+|---|-----|-----------|-----|-----------|
+| 11 | sc_vb_c5e16g4_verb01 | VQ-BeT c5/e16/g4 | verb λ=0.1 | 0.0100 |
+| 12 | sc_vb_c5e16g4_clip01 | VQ-BeT c5/e16/g4 | clip λ=0.1 | 0.0098 |
+| 13 | sc_quest_h16d2_verb01 | QueST h16/f256/d2 | verb λ=0.1 (post-FSQ) | 0.0249 |
+| 14 | sc_quest_h16d2_clip01 | QueST h16/f256/d2 | clip λ=0.1 (post-FSQ) | 0.0302 |
 
 All 3 OAT conditions were cancelled due to poor tokenizer reconstruction (0.045–0.048,
 4-5× worse than VQ-BeT/QueST) and severe codebook collapse (5–10% utilization).
 
-### Training Progress (as of 2026-03-23)
+### Training Results (frozen vision backbone, ~521M trainable params)
 
-| Condition | Steps | Train Loss | Token Acc | Notes |
-|-----------|-------|-----------|-----------|-------|
-| bin_baseline | 50000 | 2.52 | 29.5% | Done |
-| vb_c5e16g4 | 50000 | 1.32 | 28.1% | Done |
-| vb_c5e64g2 | 50000 | 1.33 | 21.9% | Done |
-| vb_c10e16g4 | 50000 | 1.19 | 43.8% | Done |
-| quest_h16f256d2 | 44203 | 0.51 | 77.3% | Running |
-| quest_h32f1000d4 | 2639 | 1.00 | 68.1% | Running |
-| quest_h16f256d4 | 18784 | 0.67 | 67.2% | Running |
+All 11 conditions trained with `--vla.freeze_vision_backbone True` for 50K steps.
+Vision backbone (DINOv2 + SigLIP, 731M params) is frozen; only projector (28M) +
+LLM (494M) are trained.
+
+| Condition | Final Loss | Token Acc | Best Loss | Best Checkpoint |
+|-----------|-----------|-----------|-----------|-----------------|
+| bin_baseline | 1.991 | 34.8% | 1.991 | `runs/calvind_scratch/…--bin_baseline--image_aug/checkpoints/step-050000-epoch-02-loss=1.9909.pt` |
+| vb_c5e16g4 | 0.865 | 57.8% | 0.684 | `…--vb_c5e16g4--…/checkpoints/step-015000-epoch-00-loss=0.6836.pt` |
+| vb_c5e64g2 | 0.734 | 53.1% | 0.696 | `…--vb_c5e64g2--…/checkpoints/step-047500-epoch-02-loss=0.6957.pt` |
+| vb_c10e16g4 | 0.953 | 54.7% | 0.631 | `…--vb_c10e16g4--…/checkpoints/step-045000-epoch-01-loss=0.6310.pt` |
+| vb_c5e16g4_verb01 | 0.640 | 67.2% | 0.568 | `…--vb_c5e16g4_verb01--…/checkpoints/step-045000-epoch-01-loss=0.5677.pt` |
+| vb_c5e16g4_clip01 | 0.661 | 57.8% | 0.561 | `…--vb_c5e16g4_clip01--…/checkpoints/step-040000-epoch-01-loss=0.5609.pt` |
+| quest_h16f256d2 | 0.564 | 70.3% | 0.467 | `…--quest_h16f256d2--…/checkpoints/step-047500-epoch-02-loss=0.4672.pt` |
+| quest_h32f1000d4 | 0.646 | 72.5% | 0.504 | `…--quest_h32f1000d4--…/checkpoints/step-047500-epoch-02-loss=0.5039.pt` |
+| quest_h16f256d4 | 0.398 | 81.2% | 0.362 | `…--quest_h16f256d4--…/checkpoints/step-032500-epoch-01-loss=0.3615.pt` |
+| quest_h16d2_verb01 | 0.514 | 72.7% | 0.397 | `…--quest_h16d2_verb01--…/checkpoints/step-035000-epoch-01-loss=0.3969.pt` |
+| quest_h16d2_clip01 | 0.476 | 74.2% | 0.415 | `…--quest_h16d2_clip01--…/checkpoints/step-042500-epoch-01-loss=0.4153.pt` |
+
+All checkpoint paths are relative to the project root. The full prefix for `…` is:
+`prism-qwen25-dinosiglip-224px+0_5b+mx-calvin-d-bin+n0+b16+x7`.
 
 **Important caveat on token accuracy**: Token accuracy is not directly comparable across
-tokenizers. A tokenizer with fewer effective codes (collapsed codebook) will have artificially
-high token accuracy because prediction is easier. The training L1 metric is also misleading:
-it computes `L1(decode(pred_tokens), decode(gt_tokens))` rather than
-`L1(decode(pred_tokens), raw_continuous_gt)`. When both pred and GT decode to the same
-degenerate code, L1 is zero even though the actual action error is large.
+tokenizers. A tokenizer with fewer tokens per step or smaller codebook will have higher
+token accuracy because prediction is easier. True policy quality requires Real L1 evaluation.
 
-### Evaluation Plan
+### Real L1 Evaluation
 
-A proper **Real L1** eval script has been added to `policy/scripts/evaluate_openvla.py`
-(`--eval_real_l1` flag). This computes `L1(decode(pred_tokens), original_continuous_actions)`
-by loading raw GT actions from the RLDS val split, giving a fair metric across all tokenizers.
-Will be run on best checkpoints once training completes.
+Real L1 eval computes `L1(decode(pred_tokens), original_continuous_actions)` using raw GT
+actions from the RLDS val split. This is the only fair metric across tokenizers since it
+measures actual action reconstruction quality after the predict→decode pipeline.
+
+Script: `policy/scripts/evaluate_openvla.py --eval_real_l1 --fsdp_checkpoint <best.pt>`
+Launcher: `python policy/eval_policy.py --family scratch --mode real_l1 --condition all`
+
+| Condition | Real L1 | Per-dim L1 |
+|-----------|---------|------------|
+| *Eval jobs submitted (6766059–6766069), results pending* | | |
 
 Where `<openvla-mini>` = `/data/user_data/wenjiel2/Code/openvla-mini`
 
