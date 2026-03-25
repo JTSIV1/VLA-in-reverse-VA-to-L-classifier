@@ -36,7 +36,7 @@ policy training with OpenVLA-mini.
 - **Action normalization**: LinearNormalizer (limits mode, [-1, 1])
 
 ---
-
+zZ
 ## 2. Auxiliary Heads
 
 ### Verb Classification Head

@@ -1,0 +1,33 @@
+{
+  "description": "DROID real-robot manipulation dataset filtered to the single-verb subset used for tokenizer training. Observations keep the left exterior camera, the left wrist camera, and a compact 14-d proprioceptive state.",
+  "fileFormat": "tfrecord",
+  "location": {
+    "urls": [
+      "https://droid-dataset.github.io/"
+    ]
+  },
+  "moduleName": "__main__",
+  "name": "droid_dataset",
+  "releaseNotes": {
+    "1.0.0": "Initial release from raw DROID RLDS shards, filtered to the single-verb metadata cache used by the tokenizer sweep."
+  },
+  "splits": [
+    {
+      "filepathTemplate": "{DATASET}-{SPLIT}.{FILEFORMAT}-{SHARD_X_OF_Y}",
+      "name": "train",
+      "numBytes": "52026570",
+      "shardLengths": [
+        "4"
+      ]
+    },
+    {
+      "filepathTemplate": "{DATASET}-{SPLIT}.{FILEFORMAT}-{SHARD_X_OF_Y}",
+      "name": "val",
+      "numBytes": "17719193",
+      "shardLengths": [
+        "1"
+      ]
+    }
+  ],
+  "version": "1.0.0"
+}

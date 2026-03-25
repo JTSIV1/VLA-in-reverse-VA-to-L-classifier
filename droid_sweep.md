@@ -74,6 +74,12 @@ without destroying the tokenizer's reconstruction objective.
 | OAT model | `tokenization/oat/tokenizer/oat/tokenizer.py` | OAT tokenizer |
 | QueST model | `tokenization/oat/tokenizer/quest/tokenizer.py` | QueST tokenizer |
 | Sweep submission | `scripts/submit_droid_sweep.sh` | SLURM launcher for DROID vanilla / verb / clip sweeps |
+| HP sweep submission | `scripts/submit_droid_hp_sweep.sh` | SLURM launcher for the 18-config DROID HP sweep |
+| HP aux retraining | `scripts/submit_droid_hp_aux.sh` | Retrain chosen HP winners with verb / CLIP losses |
+| DROID TFDS build | `policy/scripts/build_droid_tfds.sh` | Builds filtered DROID TFDS cache for policy training |
+| Base OpenVLA policy | `scripts/submit_droid_policy.sh` | OpenVLA fine-tuning on the base-sweep winners |
+| HP OpenVLA policy | `scripts/submit_droid_hp_policy.sh` | OpenVLA fine-tuning on HP-sweep shortlist checkpoints |
+| MiniVLA scratch policy | `scripts/submit_droid_scratch.sh` | From-scratch MiniVLA training on DROID |
 | Verb probe notes | `lab_notebooks/droid_verb_decodability/round1_setup.md` | DROID dataset setup and earlier action-only probing context |
 
 ### Tokenizer Checkpoints
@@ -208,6 +214,10 @@ Findings:
 
 No DROID analogue of the CALVIN HP sweep has been run yet.
 
+The launch code now exists:
+- `scripts/submit_droid_hp_sweep.sh`
+- `scripts/submit_droid_hp_aux.sh`
+
 That means the report does **not** contain per-tokenizer tables over varying architectural
 configs such as:
 - VQ-BeT chunk size / codebook size / quantizer groups
@@ -224,9 +234,17 @@ The CALVIN report includes a second stage where the chosen HP winners are retrai
 That has **not** been done for DROID, because there is currently no completed DROID HP sweep
 from which to select winners.
 
+The retraining launcher now exists at `scripts/submit_droid_hp_aux.sh`.
+
 ### MiniVLA / OpenVLA Policy Training
 
 No downstream DROID MiniVLA or OpenVLA policy training has been run yet.
+
+The build / launch code now exists at:
+- `policy/scripts/build_droid_tfds.sh`
+- `scripts/submit_droid_policy.sh`
+- `scripts/submit_droid_hp_policy.sh`
+- `scripts/submit_droid_scratch.sh`
 
 Evidence:
 - No DROID policy run directories were found under `runs/`

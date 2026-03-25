@@ -35,8 +35,10 @@ import os
 import sys
 import time as time_mod
 import argparse
+from functools import lru_cache
 
 import numpy as np
+import pandas as pd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -52,7 +54,7 @@ _TOKENIZATION_DIR = os.path.dirname(os.path.abspath(__file__))
 if _TOKENIZATION_DIR not in sys.path:
     sys.path.insert(0, _TOKENIZATION_DIR)
 
-from utils import load_calvin_to_dataframe
+from utils import extract_verb, load_calvin_to_dataframe
 from config import (
     DATA_DIR, VAL_DIR, ACTION_KEY, EPISODE_TEMPLATE, ACTION_DIM,
     TOKENIZER_HORIZON,
@@ -68,6 +70,31 @@ from datasets.calvin_dataset import (
 
 import glob as _glob
 from torch.utils.data import Dataset as _Dataset
+
+
+DROID_ACTIONS_DIR = "/data/user_data/wenjiel2/datasets/droid_actions"
+DROID_METADATA_CACHE = os.path.join(_PROJECT_ROOT, "data", "droid_tokenizer_metadata.csv")
+
+DROID_VERB_MERGE_MAP = {
+    'flip over': 'flip',
+    'fold up': 'fold',
+    'stack up': 'stack',
+    'press down': 'press',
+    'slide out': 'slide',
+    'slide up': 'slide',
+    'slide down': 'slide',
+    'put down': 'put',
+    'pull out': 'pull',
+    'pull up': 'pull',
+    'pull down': 'pull',
+    'push down': 'push',
+    'push up': 'push',
+    'push in': 'push',
+    'pour out': 'pour',
+    'move up': 'move',
+    'lift up': 'lift',
+    'turn over': 'flip',
+}
 
 
 class BridgeActionChunkDataset(_Dataset):
@@ -128,6 +155,225 @@ class BridgeFlatChunkDataset(_Dataset):
         return torch.tensor(chunk.flatten(), dtype=torch.float32)
 
 
+def _np_scalar_to_str(value):
+    if isinstance(value, np.ndarray):
+        if value.ndim == 0:
+            return str(value.item())
+        return str(value.tolist())
+    return str(value)
+
+
+@lru_cache(maxsize=16)
+def _load_droid_shard_cached(shard_path):
+    return np.load(shard_path, allow_pickle=True)
+
+
+def _iter_droid_shard_records(shard_path):
+    data = _load_droid_shard_cached(shard_path)
+    action_keys = sorted(
+        (k for k in data.files if k.startswith("actions_")),
+        key=lambda key: int(key.split("_")[1]),
+    )
+    for action_key in action_keys:
+        episode_idx = int(action_key.split("_")[1])
+        actions = data[action_key]
+        yield {
+            'shard_path': shard_path,
+            'episode_idx': episode_idx,
+            'episode_path': _np_scalar_to_str(data[f'episode_path_{episode_idx}']),
+            'instruction': _np_scalar_to_str(data[f'lang1_{episode_idx}']),
+            'instruction2': _np_scalar_to_str(data[f'lang2_{episode_idx}']),
+            'instruction3': _np_scalar_to_str(data[f'lang3_{episode_idx}']),
+            'length': int(actions.shape[0]),
+        }
+
+
+def load_droid_metadata(actions_dir, metadata_cache=None, rebuild=False,
+                        max_shards=None):
+    metadata_cache = metadata_cache or DROID_METADATA_CACHE
+    if os.path.exists(metadata_cache) and not rebuild:
+        print(f"Loading DROID metadata from {metadata_cache}")
+        return pd.read_csv(metadata_cache)
+
+    shard_files = sorted(_glob.glob(os.path.join(actions_dir, "shard_*.npz")))
+    if max_shards is not None:
+        shard_files = shard_files[:max_shards]
+    if not shard_files:
+        raise FileNotFoundError(f"No DROID shard_*.npz files found under {actions_dir}")
+
+    print(f"Building DROID metadata from {len(shard_files)} shards...")
+    rows = []
+    for shard_path in tqdm(shard_files, desc="Scanning DROID shards"):
+        rows.extend(_iter_droid_shard_records(shard_path))
+
+    df = pd.DataFrame(rows)
+    if df.empty:
+        raise RuntimeError(f"No DROID episodes found under {actions_dir}")
+
+    df['verbs'] = df['instruction'].apply(extract_verb)
+    df = df[df['verbs'].apply(len) == 1].copy()
+    df = df[~df['instruction'].str.contains(r'\bthen\b', case=False, na=False)].copy()
+    and_mask = (
+        df['instruction'].str.contains(r'\band\b', case=False, na=False)
+        & ~df['instruction'].str.lower().str.startswith('go')
+    )
+    df = df[~and_mask].copy()
+    df['primary_verb'] = df['verbs'].apply(lambda verbs: verbs[0]).replace(DROID_VERB_MERGE_MAP)
+    df = df.drop(columns=['verbs']).reset_index(drop=True)
+
+    os.makedirs(os.path.dirname(metadata_cache), exist_ok=True)
+    df.to_csv(metadata_cache, index=False)
+    print(f"Saved DROID metadata to {metadata_cache} ({len(df)} episodes)")
+    return df
+
+
+def split_episode_dataframe(df, val_fraction=0.1, seed=42,
+                            max_train_episodes=None, max_val_episodes=None):
+    rng = np.random.RandomState(seed)
+    perm = rng.permutation(len(df))
+    n_val = max(1, int(len(df) * val_fraction))
+    val_df = df.iloc[perm[:n_val]].reset_index(drop=True)
+    train_df = df.iloc[perm[n_val:]].reset_index(drop=True)
+    if max_train_episodes is not None:
+        train_df = train_df.head(max_train_episodes).reset_index(drop=True)
+    if max_val_episodes is not None:
+        val_df = val_df.head(max_val_episodes).reset_index(drop=True)
+    return train_df, val_df
+
+
+class DroidDatasetBase(_Dataset):
+    def __init__(self, df, verb_to_id=None):
+        self.df = df.reset_index(drop=True)
+        self._verb_col = 'primary_verb' if 'primary_verb' in self.df.columns else 'verb'
+        if verb_to_id is not None:
+            self.verb_to_id = verb_to_id
+        elif self._verb_col in self.df.columns:
+            unique_verbs = sorted(self.df[self._verb_col].dropna().unique())
+            self.verb_to_id = {verb: idx for idx, verb in enumerate(unique_verbs)}
+        else:
+            self.verb_to_id = {}
+        self.id_to_verb = {idx: verb for verb, idx in self.verb_to_id.items()}
+
+    def __len__(self):
+        return len(self.df)
+
+    def _get_row(self, idx):
+        return self.df.iloc[idx]
+
+    def _get_actions(self, idx):
+        row = self._get_row(idx)
+        shard = _load_droid_shard_cached(row['shard_path'])
+        return shard[f"actions_{int(row['episode_idx'])}"].astype(np.float32)
+
+    def _get_instruction(self, idx):
+        return self._get_row(idx)['instruction']
+
+    def _get_verb_id(self, idx):
+        verb = self._get_row(idx).get(self._verb_col, None)
+        return self.verb_to_id.get(verb, 0) if verb else 0
+
+    def _chunk_actions(self, actions, window_size, max_windows, sample_windows=False):
+        T, action_dim = actions.shape
+        n_windows = T // window_size
+        if n_windows == 0:
+            padded = np.pad(actions, ((0, window_size - T), (0, 0)), mode='edge')
+            windows = padded.reshape(1, window_size, action_dim)
+            n_windows = 1
+        else:
+            usable = n_windows * window_size
+            windows = actions[:usable].reshape(n_windows, window_size, action_dim)
+
+        if n_windows > max_windows:
+            if sample_windows:
+                choose = np.sort(np.random.choice(n_windows, max_windows, replace=False))
+                windows = windows[choose]
+            else:
+                windows = windows[:max_windows]
+            n_windows = max_windows
+
+        padded_windows = np.zeros((max_windows, window_size, action_dim), dtype=np.float32)
+        padded_windows[:n_windows] = windows
+        return padded_windows, n_windows
+
+
+class DroidActionCropDataset(DroidDatasetBase):
+    def __init__(self, df, horizon=32, random_crop=True, verb_to_id=None):
+        super().__init__(df, verb_to_id=verb_to_id)
+        self.horizon = horizon
+        self.random_crop = random_crop
+
+    def __getitem__(self, idx):
+        actions = self._get_actions(idx)
+        T = actions.shape[0]
+        if T >= self.horizon:
+            if self.random_crop:
+                start = np.random.randint(0, T - self.horizon + 1)
+            else:
+                start = max((T - self.horizon) // 2, 0)
+            chunk = actions[start:start + self.horizon]
+        else:
+            chunk = np.pad(actions, ((0, self.horizon - T), (0, 0)), mode='constant').astype(np.float32)
+        return {"action": torch.tensor(chunk.tolist(), dtype=torch.float32)}
+
+
+class DroidFlatCropDataset(DroidDatasetBase):
+    def __init__(self, df, chunk_size=5, random_crop=True, verb_to_id=None):
+        super().__init__(df, verb_to_id=verb_to_id)
+        self.chunk_size = chunk_size
+        self.random_crop = random_crop
+
+    def __getitem__(self, idx):
+        actions = self._get_actions(idx)
+        T = actions.shape[0]
+        if T >= self.chunk_size:
+            if self.random_crop:
+                start = np.random.randint(0, T - self.chunk_size + 1)
+            else:
+                start = max((T - self.chunk_size) // 2, 0)
+            chunk = actions[start:start + self.chunk_size]
+        else:
+            chunk = np.pad(actions, ((0, self.chunk_size - T), (0, 0)), mode='edge')
+        return torch.tensor(chunk.reshape(-1).tolist(), dtype=torch.float32)
+
+
+class DroidTokenizerDataset(DroidDatasetBase):
+    def __init__(self, df, window_size=5, max_windows=16,
+                 include_instruction=False, verb_to_id=None,
+                 return_format="tuple", sample_windows=False):
+        super().__init__(df, verb_to_id=verb_to_id)
+        self.window_size = window_size
+        self.max_windows = max_windows
+        self.include_instruction = include_instruction
+        self.return_format = return_format
+        self.sample_windows = sample_windows
+
+    def __getitem__(self, idx):
+        actions = self._get_actions(idx)
+        padded_windows, n_windows = self._chunk_actions(
+            actions, self.window_size, self.max_windows,
+            sample_windows=self.sample_windows,
+        )
+        action_out = torch.tensor(padded_windows.tolist(), dtype=torch.float32)
+
+        if self.return_format == "dict":
+            out = {
+                "action": action_out,
+                "verb_label": torch.tensor(self._get_verb_id(idx), dtype=torch.long),
+                "n_windows": torch.tensor(n_windows, dtype=torch.long),
+            }
+            if self.include_instruction:
+                out["instruction"] = self._get_instruction(idx)
+            return out
+
+        result = (
+            action_out,
+            torch.tensor(self._get_verb_id(idx), dtype=torch.long),
+        )
+        if self.include_instruction:
+            result = result + (self._get_instruction(idx),)
+        return result + (torch.tensor(n_windows, dtype=torch.long),)
+
+
 def load_bridge_actions(shard_dir):
     """Load all BridgeV2 action trajectories from shards."""
     shard_files = sorted(_glob.glob(os.path.join(shard_dir, "shard_*.npz")))
@@ -147,6 +393,27 @@ def fit_bridge_normalizer(actions_list):
     all_actions = np.concatenate(actions_list, axis=0)
     normalizer = LinearNormalizer()
     normalizer.fit({"action": all_actions}, mode="limits")
+    return normalizer
+
+
+def fit_droid_normalizer(df, max_episodes=2000):
+    """Fit LinearNormalizer on sampled DROID actions."""
+    from oat.model.common.normalizer import LinearNormalizer
+
+    sample_df = df
+    if max_episodes and len(df) > max_episodes:
+        sample_df = df.sample(n=max_episodes, random_state=42).reset_index(drop=True)
+
+    actions_list = []
+    for row in tqdm(sample_df.itertuples(index=False), total=len(sample_df), desc="Fitting DROID normalizer"):
+        shard = _load_droid_shard_cached(row.shard_path)
+        actions = shard[f"actions_{int(row.episode_idx)}"].astype(np.float32)
+        actions_list.append(actions)
+
+    all_actions = np.concatenate(actions_list, axis=0)
+    all_actions_t = torch.tensor(all_actions.tolist(), dtype=torch.float32)
+    normalizer = LinearNormalizer()
+    normalizer.fit({"action": all_actions_t}, mode="limits")
     return normalizer
 
 
@@ -558,7 +825,14 @@ def extract_latents_oat_quest(model, batch, device, pre_fsq=False):
     if batch['action'].ndim == 4:
         batch['action'] = batch['action'].squeeze(1)
     # Forward pass for recon loss (encoder + quantizer + decoder)
-    recon_loss = model(batch)
+    vq_loss = torch.tensor(0.0, device=device)
+    if getattr(model, 'vq_type', 'fsq') == 'vq' and hasattr(model, 'encode') and hasattr(model, 'decode'):
+        latents_q, indices, commit_loss = model.encode(batch['action'])
+        recon = model.decode(latents_q)
+        recon_loss = F.mse_loss(recon, batch['action'])
+        vq_loss = commit_loss
+    else:
+        recon_loss = model(batch)
 
     # Second encoder pass WITH grad for aux heads.
     codes = None
@@ -598,7 +872,7 @@ def extract_latents_oat_quest(model, batch, device, pre_fsq=False):
 
     return {
         'recon_loss': recon_loss,
-        'vq_loss': torch.tensor(0.0, device=device),
+        'vq_loss': vq_loss,
         'traj_latents': latents,
         'real_counts': torch.full((B,), n_tokens, dtype=torch.long, device=device),
         'codes': codes,  # (B, T', D) FSQ codes or None
@@ -892,6 +1166,9 @@ def fit_fast(args):
     """Fit FAST tokenizer (DCT + BPE). No gradient training."""
     FASTTokenizer, collect_trajectories = _import_fast()
 
+    if args.dataset == "droid":
+        raise ValueError("FAST fitting is currently only wired for CALVIN in this script")
+
     train_df = load_calvin_to_dataframe(args.data_dir)
     trajectories = collect_trajectories(train_df, args.data_dir)
     print(f"Collected {len(trajectories)} trajectories for FAST fitting")
@@ -919,15 +1196,27 @@ def main():
     parser.add_argument("--tag", type=str, default="",
                         help="Optional suffix appended to auto-generated run name")
     parser.add_argument("--dataset", type=str, default="calvin",
-                        choices=["calvin", "bridge"],
+                        choices=["calvin", "bridge", "droid"],
                         help="Dataset to train on (default: calvin)")
     parser.add_argument("--data_dir", type=str, default=DATA_DIR)
     parser.add_argument("--val_dir", type=str, default=VAL_DIR)
     parser.add_argument("--shard_dir", type=str,
                         default="/data/user_data/wenjiel2/datasets/bridge_actions",
                         help="BridgeV2 action shard directory (only used with --dataset bridge)")
+    parser.add_argument("--droid_actions_dir", type=str, default=DROID_ACTIONS_DIR,
+                        help="DROID action shard directory (used with --dataset droid)")
+    parser.add_argument("--droid_metadata_cache", type=str, default=None,
+                        help="Optional CSV cache path for DROID metadata")
+    parser.add_argument("--rebuild_droid_metadata", action="store_true",
+                        help="Rebuild the cached DROID metadata CSV from shard files")
+    parser.add_argument("--max_shards", type=int, default=None,
+                        help="Optional cap on number of DROID shards scanned when building metadata")
     parser.add_argument("--val_fraction", type=float, default=0.1,
-                        help="Fraction of episodes for validation (Bridge only)")
+                        help="Fraction of episodes for validation (Bridge/DROID only)")
+    parser.add_argument("--max_train_episodes", type=int, default=None,
+                        help="Optional cap on training episodes after split (useful for smoke tests)")
+    parser.add_argument("--max_val_episodes", type=int, default=None,
+                        help="Optional cap on validation episodes after split (useful for smoke tests)")
 
     # Training
     parser.add_argument("--epochs", type=int, default=100)
@@ -1031,6 +1320,9 @@ def main():
     has_clip = args.clip_lambda > 0
     include_instruction = has_clip
 
+    train_df = None
+    val_df = None
+
     if args.dataset == "bridge":
         # Bridge: load shards, split by episode
         all_actions = load_bridge_actions(args.shard_dir)
@@ -1049,6 +1341,60 @@ def main():
             val_ds = BridgeFlatChunkDataset(val_actions, chunk_size=args.chunk_size)
         else:
             raise ValueError(f"Bridge dataset not supported for tokenizer {args.tokenizer}")
+    elif args.dataset == "droid":
+        droid_df = load_droid_metadata(
+            args.droid_actions_dir,
+            metadata_cache=args.droid_metadata_cache,
+            rebuild=args.rebuild_droid_metadata,
+            max_shards=args.max_shards,
+        )
+        train_df, val_df = split_episode_dataframe(
+            droid_df,
+            val_fraction=args.val_fraction,
+            seed=42,
+            max_train_episodes=args.max_train_episodes,
+            max_val_episodes=args.max_val_episodes,
+        )
+        print(f"Train: {len(train_df)} episodes, Val: {len(val_df)} episodes")
+
+        if has_verb and args.min_class_count > 0:
+            verb_col = 'primary_verb' if 'primary_verb' in train_df.columns else 'verb'
+            verb_counts = train_df[verb_col].value_counts()
+            keep_verbs = set(verb_counts[verb_counts >= args.min_class_count].index)
+            train_df = train_df[train_df[verb_col].isin(keep_verbs)].reset_index(drop=True)
+            val_df = val_df[val_df[verb_col].isin(keep_verbs)].reset_index(drop=True)
+            print(f"Filtered to {len(keep_verbs)} verb classes, {len(train_df)} train / {len(val_df)} val")
+
+        if args.tokenizer in ('oat', 'quest') and not has_verb and not has_clip:
+            train_ds = DroidActionCropDataset(train_df, horizon=args.horizon, random_crop=True)
+            val_ds = DroidActionCropDataset(val_df, horizon=args.horizon, random_crop=False)
+        elif args.tokenizer in ('oat', 'quest'):
+            train_ds = DroidTokenizerDataset(
+                train_df, window_size=args.horizon, max_windows=1,
+                include_instruction=include_instruction, return_format="dict",
+                sample_windows=True,
+            )
+            val_ds = DroidTokenizerDataset(
+                val_df, window_size=args.horizon, max_windows=1,
+                include_instruction=include_instruction, return_format="dict",
+                verb_to_id=train_ds.verb_to_id, sample_windows=False,
+            )
+        elif args.tokenizer in ('vq_vae', 'vq_bet') and not has_verb and not has_clip:
+            train_ds = DroidFlatCropDataset(train_df, chunk_size=args.chunk_size, random_crop=True)
+            val_ds = DroidFlatCropDataset(val_df, chunk_size=args.chunk_size, random_crop=False)
+        else:
+            ws = args.window_size
+            if args.tokenizer in ('vq_vae', 'vq_bet'):
+                ws = args.chunk_size
+            train_ds = DroidTokenizerDataset(
+                train_df, window_size=ws, max_windows=args.max_windows,
+                include_instruction=include_instruction, sample_windows=True,
+            )
+            val_ds = DroidTokenizerDataset(
+                val_df, window_size=ws, max_windows=args.max_windows,
+                include_instruction=include_instruction,
+                verb_to_id=train_ds.verb_to_id, sample_windows=False,
+            )
     else:
         # CALVIN: load dataframes
         train_df = load_calvin_to_dataframe(args.data_dir)
@@ -1107,6 +1453,8 @@ def main():
     # ── Fit normalizer ────────────────────────────────────────────────────
     if args.dataset == "bridge":
         normalizer = fit_bridge_normalizer(train_actions)
+    elif args.dataset == "droid":
+        normalizer = fit_droid_normalizer(train_df)
     else:
         normalizer = fit_normalizer(args.data_dir)
 
@@ -1389,6 +1737,7 @@ def main():
 
     # Save config
     config = {
+        'dataset': args.dataset,
         'tokenizer': args.tokenizer,
         'run_name': run_name,
         'verb_cls_lambda': args.verb_cls_lambda,

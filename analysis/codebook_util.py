@@ -11,7 +11,6 @@ Usage standalone:
     python analysis/codebook_util.py --ckpt_dir checkpoints/bridge_sweep --dataset bridge
 """
 import torch
-import numpy as np
 
 
 def codes_to_unique_count(codes_list):
@@ -28,5 +27,5 @@ def codes_to_unique_count(codes_list):
     if not codes_list:
         return None
     codes_cat = torch.cat(codes_list, dim=0)  # (N, D)
-    unique = set(map(tuple, codes_cat.long().numpy().tolist()))
+    unique = set(map(tuple, codes_cat.long().cpu().tolist()))
     return len(unique)
