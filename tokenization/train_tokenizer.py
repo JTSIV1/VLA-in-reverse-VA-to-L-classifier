@@ -108,7 +108,7 @@ def build_oat(args):
     levels = getattr(args, 'fsq_levels', [8, 5, 5, 5])
     num_registers = getattr(args, 'num_registers', OAT_NUM_REGISTERS)
     latent_dim = len(levels)
-    cs = args.chunk_size
+    cs = getattr(args, 'horizon', getattr(args, 'chunk_size', 32))
     enc = RegisterEncoder(
         sample_dim=ACTION_DIM, sample_horizon=cs,
         emb_dim=256, head_dim=64, depth=2, pdropout=0.1,
@@ -555,8 +555,8 @@ def parse_args():
         if not hasattr(args, key):
             setattr(args, key, default)
 
-    # For QueST, chunk_size must equal horizon (dataset chunking = model horizon)
-    if args.tokenizer == 'quest' and hasattr(args, 'horizon'):
+    # For OAT/QueST, chunk_size must equal horizon (dataset chunking = model horizon)
+    if args.tokenizer in ('quest', 'oat') and hasattr(args, 'horizon'):
         args.chunk_size = args.horizon
 
     # Derive verb_cls_lambda / clip_lambda from aux_head + aux_lambda

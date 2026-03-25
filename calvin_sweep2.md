@@ -162,8 +162,11 @@ All 9 tokenizers trained successfully. Early stopping with patience=15 on total 
 | h32/f1000/d4 vanilla | 0.0138 | 0.0109 | V2 better |
 | h16/f256/d4 vanilla | 0.0158 | 0.0111 | V2 better |
 
-Reconstruction improved across the board because the horizon fix ensures the dataset
-chunks match the model's expected input size.
+Reconstruction improved across the board because the `chunk_size` bug also affected
+**training**, not just inference. V1 checkpoints show `chunk_size=4` (VQ-BeT default)
+while `horizon=16/32` — meaning the dataset fed 4-step chunks to a model expecting
+16/32-step inputs. V2 correctly syncs `chunk_size=horizon`, so training data matches
+the model architecture. V1 also used batch_size=64 vs V2's 32 (minor factor).
 
 ### Aux Head Verb Accuracy (V1 mean-pool vs V2 CLS-token)
 
