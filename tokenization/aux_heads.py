@@ -12,6 +12,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from utils import SemanticLoss
+
 
 # ======================================================================
 # LoRA
@@ -342,7 +344,10 @@ def get_head_latent_dim(tokenizer_type, latent_dim=64):
 def build_aux_heads(tokenizer_type, device,
                     latent_dim=64,
                     num_verbs=0, verb_class_weights=None,
-                    clip_config=None):
+                    clip_config=None,
+                    loss_function='ce',
+                    semantic_temp=0.1,
+                    id_to_verb=None):
     """Build auxiliary heads for tokenizer training.
 
     Args:
@@ -369,12 +374,24 @@ def build_aux_heads(tokenizer_type, device,
         result['verb_head'] = VerbHead(head_latent_dim, num_verbs).to(device)
         print(f"Verb head: {head_latent_dim} -> CLS -> {num_verbs} classes")
 
-        if verb_class_weights is not None:
-            w = verb_class_weights.to(device)
-            result['verb_criterion'] = nn.CrossEntropyLoss(
-                weight=w, ignore_index=-1)
+        if loss_function == 'semantic':
+            if id_to_verb is None:
+                raise ValueError("id_to_verb mapping is required for SemanticLoss")
+            
+            result['verb_criterion'] = SemanticLoss(
+                id_to_verb=id_to_verb,
+                temperature=semantic_temp,
+                class_weights=verb_class_weights 
+            ).to(device)
+            print(f"Using SemanticLoss with temperature {semantic_temp}")
         else:
-            result['verb_criterion'] = nn.CrossEntropyLoss(ignore_index=-1)
+            if verb_class_weights is not None:
+                w = verb_class_weights.to(device)
+                result['verb_criterion'] = nn.CrossEntropyLoss(
+                    weight=w, ignore_index=-1)
+            else:
+                result['verb_criterion'] = nn.CrossEntropyLoss(ignore_index=-1)
+            print("Using standard CrossEntropyLoss")
 
     # ── CLIP head ──────────────────────────────────────────────────────
     if clip_config is not None:

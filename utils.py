@@ -12,6 +12,9 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from functools import lru_cache
+import torch
+import torch.nn as nn
+import warnings
 
 from config import (
     SPACY_MODEL, LANG_ANNOTATIONS_SUBDIR, LANG_ANNOTATIONS_FILE,
@@ -180,3 +183,39 @@ def load_calvin_raw(data_dir):
         'instruction': instructions
     })
     return df
+
+class SemanticLoss(nn.Module):
+    def __init__(self, id_to_verb, temperature=0.1, class_weights=None):
+        super().__init__()
+        num_verbs = len(id_to_verb)
+        similarity_matrix = torch.zeros((num_verbs, num_verbs))
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            for i in range(num_verbs):
+                doc1 = nlp(id_to_verb[i])
+                for j in range(num_verbs):
+                    doc2 = nlp(id_to_verb[j])
+                    if doc1.has_vector and doc2.has_vector and doc1.vector_norm and doc2.vector_norm:
+                        similarity_matrix[i, j] = doc1.similarity(doc2)
+                    else:
+                        similarity_matrix[i, j] = 1.0 if i == j else 0.0
+
+        soft_targets = torch.nn.functional.softmax(similarity_matrix / temperature, dim=1)
+        
+        self.register_buffer('soft_targets', soft_targets)
+        
+        if class_weights is not None:
+            self.register_buffer('class_weights', class_weights)
+        else:
+            self.class_weights = None
+
+    def forward(self, logits, targets):
+        batch_soft_targets = self.soft_targets[targets]
+        log_probs = torch.nn.functional.log_softmax(logits, dim=1)
+        loss = -(batch_soft_targets * log_probs).sum(dim=1)
+        
+        if self.class_weights is not None:
+            loss = loss * self.class_weights[targets]
+            
+        return loss.mean()
