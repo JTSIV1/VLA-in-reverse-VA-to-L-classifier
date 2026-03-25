@@ -153,12 +153,31 @@ class QueSTTok(BaseTokenizer):
     def set_normalizer(self, normalizer: LinearNormalizer):
         self.normalizer.load_state_dict(normalizer.state_dict())
 
-    def forward(self, batch) -> torch.Tensor:
+    def forward(self, batch):
+        """Training forward pass.
+
+        Returns:
+            dict with recon_loss, vq_loss, latents (B, T', 256) pre-FSQ,
+            codes (B, T') quantized indices.
+        """
         actions = batch['action']
-        quants, _, commit_loss = self.encode(actions)
+        # Encoder → pre-FSQ 256-d
+        pre_fsq = self.encode_pre_fsq(actions)  # (B, T', 256)
+        # Quantize
+        if self.vq_type == 'vq':
+            quants, indices, commit_loss = self.vq(pre_fsq)
+        else:
+            quants, indices = self.vq(pre_fsq)
+            commit_loss = torch.tensor(0.0, device=actions.device)
+        # Decode
         recons = self.decode(quants)
         recon_loss = F.mse_loss(recons, actions)
-        return recon_loss + commit_loss
+        return {
+            'recon_loss': recon_loss,
+            'vq_loss': commit_loss,
+            'latents': pre_fsq,         # 256-d for aux heads
+            'codes': indices.detach(),
+        }
     
     def encode_fsq_codes(self, actions: torch.Tensor) -> torch.Tensor:
         """Return 4-dim post-FSQ codes with STE gradient (before project_out).

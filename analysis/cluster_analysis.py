@@ -47,7 +47,7 @@ from config import (
     IMAGE_SIZE,
 )
 from utils import load_calvin_to_dataframe
-from fast_tokenizer import load_fast_tokenizer, tokenize_trajectory
+from tokenization.fast.fast_tokenizer import load_fast_tokenizer, tokenize_trajectory
 
 
 def _load_action(idx, data_dir, action_key, template):
@@ -586,15 +586,11 @@ def main():
         if args.action_rep == "fast":
             print(f"Loading FAST tokenizer from {args.tokenizer_path} ...")
             tokenizer = load_fast_tokenizer(args.tokenizer_path)
-        elif args.action_rep in ("bin", "quest", "oat"):
-            from action_tokenizers import load_action_tokenizer
-
-            print(f"Loading {args.action_rep} tokenizer ...")
-            tokenizer = load_action_tokenizer(
-                args.action_rep,
-                train_dir=TRAIN_DIR,
-                horizon=TOKENIZER_HORIZON,
-                max_tokens=args.max_len,
+        elif args.action_rep in ("quest", "oat", "vq_bet"):
+            # TODO: migrate to CalvinTokenizerDataset + extract_episode_batch
+            raise NotImplementedError(
+                f"action_rep={args.action_rep} in cluster_analysis requires "
+                "CalvinTokenizerDataset (see verb_probe/train_verb_probe.py)"
             )
 
         features, verb_labels = build_features(

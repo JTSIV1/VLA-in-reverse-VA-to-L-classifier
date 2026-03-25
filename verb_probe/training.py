@@ -66,7 +66,8 @@ def build_optimizer_scheduler(model, lr, weight_decay, total_steps,
 
 def train_one_epoch(model, dataloader, criterion, optimizer, scheduler,
                     device, grad_clip, epoch, total_epochs,
-                    use_aux=False, aux_weight=0.0, track_per_class_loss=False):
+                    use_aux=False, aux_weight=0.0, track_per_class_loss=False,
+                    batch_transform_fn=None):
     """Run one training epoch with the standard batch format.
 
     Batch format: (frames, actions, scene_vecs, labels, seq_lengths)
@@ -75,6 +76,9 @@ def train_one_epoch(model, dataloader, criterion, optimizer, scheduler,
         use_aux: if True, call model.forward_with_aux and add aux losses
         aux_weight: weight for auxiliary losses (only used if use_aux=True)
         track_per_class_loss: if True, track per-sample CE loss per class
+        batch_transform_fn: optional callable(batch, device) -> standard tuple.
+            When provided, the raw batch from the DataLoader is passed through
+            this function before processing (e.g. for on-the-fly encoding).
 
     Returns:
         dict with keys: loss, acc, lr, per_class_train (optional)
@@ -89,12 +93,16 @@ def train_one_epoch(model, dataloader, criterion, optimizer, scheduler,
 
     pbar = tqdm(enumerate(dataloader), total=len(dataloader),
                 desc=f"Epoch {epoch}/{total_epochs}")
-    for batch_idx, (frames, actions, scene_vecs, labels, seq_lengths) in pbar:
-        frames = frames.to(device)
-        actions = actions.to(device)
-        labels = labels.to(device)
-        scene_vecs = scene_vecs.to(device)
-        seq_lengths = seq_lengths.to(device)
+    for batch_idx, batch in pbar:
+        if batch_transform_fn is not None:
+            frames, actions, scene_vecs, labels, seq_lengths = batch_transform_fn(batch, device)
+        else:
+            frames, actions, scene_vecs, labels, seq_lengths = batch
+            frames = frames.to(device)
+            actions = actions.to(device)
+            labels = labels.to(device)
+            scene_vecs = scene_vecs.to(device)
+            seq_lengths = seq_lengths.to(device)
 
         optimizer.zero_grad()
 
@@ -159,12 +167,13 @@ def train_one_epoch(model, dataloader, criterion, optimizer, scheduler,
 
 
 def validate(model, dataloader, criterion, device, num_verbs, id_to_verb,
-             pass_seq_lengths=True):
+             pass_seq_lengths=True, batch_transform_fn=None):
     """Run validation with the standard batch format.
 
     Args:
         pass_seq_lengths: if False, pass seq_lengths=None to model
             (e.g. for vision_only where all tokens are real)
+        batch_transform_fn: optional callable(batch, device) -> standard tuple.
 
     Returns:
         dict with keys: loss, acc, macro_recall, per_class_val,
@@ -179,13 +188,16 @@ def validate(model, dataloader, criterion, device, num_verbs, id_to_verb,
     val_class_loss_sum = defaultdict(float)
 
     with torch.no_grad():
-        for frames, actions, scene_vecs, labels, seq_lengths in tqdm(
-                dataloader, desc="  Validating"):
-            frames = frames.to(device)
-            actions = actions.to(device)
-            labels = labels.to(device)
-            scene_vecs = scene_vecs.to(device)
-            seq_lengths = seq_lengths.to(device)
+        for batch in tqdm(dataloader, desc="  Validating"):
+            if batch_transform_fn is not None:
+                frames, actions, scene_vecs, labels, seq_lengths = batch_transform_fn(batch, device)
+            else:
+                frames, actions, scene_vecs, labels, seq_lengths = batch
+                frames = frames.to(device)
+                actions = actions.to(device)
+                labels = labels.to(device)
+                scene_vecs = scene_vecs.to(device)
+                seq_lengths = seq_lengths.to(device)
 
             sl = seq_lengths if pass_seq_lengths else None
             logits = model(frames, actions, seq_lengths=sl,
@@ -288,7 +300,8 @@ def run_training_loop(model, train_loader, val_loader, criterion,
                       checkpoint_metadata_fn,
                       use_aux=False, pass_seq_lengths=True,
                       track_per_class_loss=False,
-                      attn_frac_fn=None):
+                      attn_frac_fn=None,
+                      batch_transform_fn=None):
     """Full training loop used by all verb probe scripts.
 
     Args:
@@ -302,6 +315,9 @@ def run_training_loop(model, train_loader, val_loader, criterion,
         track_per_class_loss: track per-sample loss per class in training
         attn_frac_fn: optional callable(model, val_loader, device) -> dict
             for logging cross-modal attention fractions
+        batch_transform_fn: optional callable(batch, device) -> standard tuple.
+            When provided, raw DataLoader batches are transformed before
+            processing (e.g. on-the-fly tokenizer encoding for latent probe).
 
     Returns:
         best_val_acc, best_epoch
@@ -321,7 +337,8 @@ def run_training_loop(model, train_loader, val_loader, criterion,
             model, train_loader, criterion, optimizer, scheduler,
             device, grad_clip, epoch, args.epochs,
             use_aux=use_aux, aux_weight=aux_weight,
-            track_per_class_loss=track_per_class_loss)
+            track_per_class_loss=track_per_class_loss,
+            batch_transform_fn=batch_transform_fn)
 
         print(f"--- Epoch {epoch}: Loss={train_result['loss']:.4f} "
               f"Acc={train_result['acc']:.1f}% LR={train_result['lr']:.2e}")
@@ -329,7 +346,8 @@ def run_training_loop(model, train_loader, val_loader, criterion,
         # --- Validate ---
         val_result = validate(
             model, val_loader, criterion, device, num_verbs, id_to_verb,
-            pass_seq_lengths=pass_seq_lengths)
+            pass_seq_lengths=pass_seq_lengths,
+            batch_transform_fn=batch_transform_fn)
 
         print(f"    Val: Loss={val_result['loss']:.4f} "
               f"Acc={val_result['acc']:.1f}% "
@@ -395,4 +413,16 @@ def run_training_loop(model, train_loader, val_loader, criterion,
         print(f"\nFinal checkpoint saved to {args.save_path}")
 
     print(f"\nBest val acc: {best_val_acc:.1f}% @ epoch {best_epoch}")
+
+    # Generate training curves if log exists
+    if args.log_path and os.path.exists(args.log_path):
+        try:
+            from verb_probe.analysis import plot_training_curves
+            curves_path = args.log_path.replace(".json", "_curves.png")
+            plot_training_curves(args.log_path, curves_path)
+            import matplotlib.pyplot as plt
+            plt.close("all")
+        except Exception as e:
+            print(f"Warning: could not generate training curves: {e}")
+
     return best_val_acc, best_epoch

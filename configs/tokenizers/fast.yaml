@@ -1,0 +1,3 @@
+# FAST: DCT + BPE (fit-once, no gradient training)
+fast_vocab_size: 1024
+fast_scale: 10.0

@@ -77,7 +77,8 @@ class CalvinOpenVLAModel:
       Successive calls pop from the buffer; only calls the LLM once per 5 env steps.
     """
 
-    def __init__(self, condition, checkpoint_dir, vqvla_checkpoint_dir, device):
+    def __init__(self, condition, checkpoint_dir, vqvla_checkpoint_dir, device,
+                 sweep_tokenizer_type="", sweep_checkpoint_path=""):
         from transformers import AutoConfig, AutoImageProcessor, AutoModelForVision2Seq, AutoProcessor
         from prismatic.extern.hf.configuration_prismatic import OpenVLAConfig
         from prismatic.extern.hf.modeling_prismatic import OpenVLAForActionPrediction
@@ -104,18 +105,35 @@ class CalvinOpenVLAModel:
         self.vla.eval()
 
         # ── Action tokenizer ───────────────────────────────────────────────────
-        if condition == "bin":
+        self._action_buffer = None
+        self._n_action_tokens = 7  # default for bin
+        self._is_chunk_tokenizer = False
+
+        if sweep_tokenizer_type and sweep_checkpoint_path:
+            from prismatic.vla.calvin_sweep_action_tokenizer import CalvinSweepActionTokenizer
+            self.action_tokenizer = CalvinSweepActionTokenizer(
+                self.processor.tokenizer,
+                sweep_tokenizer_type, sweep_checkpoint_path,
+                device=device, use_extra=True,
+            )
+            self._action_buffer = []
+            self._n_action_tokens = self.action_tokenizer.n_codes_per_chunk
+            self._is_chunk_tokenizer = True
+            print(f"Sweep tokenizer: {sweep_tokenizer_type}, "
+                  f"{self._n_action_tokens} tokens/chunk, "
+                  f"chunk_size={self.action_tokenizer.chunk_size}")
+        elif condition == "bin":
             from prismatic.vla.action_tokenizer import ActionTokenizer
             self.action_tokenizer = ActionTokenizer(self.processor.tokenizer)
-            self._action_buffer   = None   # not used for bin
         elif condition.startswith("vq_"):
             from prismatic.vla.calvin_vq_action_tokenizer import CalvinVQActionTokenizer
             self.action_tokenizer = CalvinVQActionTokenizer(
                 self.processor.tokenizer,
                 vqvla_checkpoint_dir=vqvla_checkpoint_dir,
             )
-            self._action_buffer = []       # buffer for decoded 5-step chunks
-            self._vq_groups     = self.action_tokenizer.vq_vae.vqvae_groups      # 4
+            self._action_buffer = []
+            self._n_action_tokens = self.action_tokenizer.vq_vae.vqvae_groups
+            self._is_chunk_tokenizer = True
         else:
             raise ValueError(f"Unknown condition: {condition}")
 
@@ -135,20 +153,18 @@ class CalvinOpenVLAModel:
         Returns:
             action: (7,) float32 — delta_xyz + delta_euler + gripper
         """
-        # ── VQ: pop from buffer if actions remain from previous chunk ──────────
-        if self.condition.startswith("vq_") and self._action_buffer:
-            return self._action_buffer.pop(0)
+        # Pop from buffer if actions remain from previous chunk
+        if self._is_chunk_tokenizer and self._action_buffer:
+            return np.array(self._action_buffer.pop(0), dtype=np.float32)
 
-        # ── Build model input ──────────────────────────────────────────────────
-        rgb = obs["rgb_obs"]["rgb_static"]                  # (H, W, 3) uint8
+        # Build model input
+        rgb = obs["rgb_obs"]["rgb_static"]
         image = Image.fromarray(rgb).convert("RGB")
-
         prompt = f"In: {goal}\nOut:"
         inputs = self.processor(prompt, image).to(self.device, dtype=torch.bfloat16)
 
-        # ── Generate action tokens ─────────────────────────────────────────────
-        if self.condition == "bin":
-            # generate 7 tokens (one per action dim), then unnormalize
+        if not self._is_chunk_tokenizer:
+            # Bin: generate 7 tokens, unnormalize
             with torch.no_grad():
                 action = self.vla.predict_action(
                     **inputs,
@@ -157,45 +173,147 @@ class CalvinOpenVLAModel:
                 )
             return action.astype(np.float32)
 
+        # Chunk tokenizer (VQ-VLA, VQ-BeT, OAT, QueST): generate n_action_tokens
+        n_tokens = self._n_action_tokens
+        with torch.no_grad():
+            generated = self.vla.generate(
+                **inputs,
+                max_new_tokens=n_tokens,
+                do_sample=False,
+            )
+        code_token_ids = generated[0, -n_tokens:].cpu().numpy()
+
+        # Decode token IDs → full action chunk for rollout
+        actions = self.action_tokenizer.decode_full_chunk(code_token_ids)
+        if isinstance(actions, torch.Tensor):
+            actions = actions.cpu().numpy()
+        actions = np.atleast_2d(actions).astype(np.float32)  # (chunk_size, 7)
+
+        # Buffer remaining steps, return first
+        if len(actions) > 1:
+            self._action_buffer.extend(actions[1:].tolist())
+        return actions[0]
+
+
+class CalvinFSDPModel:
+    """
+    Wraps a native prismatic VLA loaded from an FSDP .pt checkpoint
+    (MiniVLA from-scratch training) to implement the CalvinBaseModel interface.
+    """
+
+    def __init__(self, fsdp_checkpoint, device,
+                 sweep_tokenizer_type="", sweep_checkpoint_path=""):
+        from prismatic.models import load_vla
+        from transformers import GenerationMixin
+
+        self.device = device
+
+        print("Loading native VLA from FSDP checkpoint: {} ...".format(fsdp_checkpoint))
+        self.vla = load_vla(fsdp_checkpoint, load_for_training=False)
+        self.vla = self.vla.to(device)
+        self.vla.eval()
+
+        self._image_transform = self.vla.vision_backbone.get_image_transform()
+        self._tokenizer = self.vla.llm_backbone.tokenizer
+        self._GenerationMixin = GenerationMixin  # bypass PrismaticVLM.generate()
+
+        # Action tokenizer setup
+        self._action_buffer = None
+        self._n_action_tokens = 7
+        self._is_chunk_tokenizer = False
+
+        if sweep_tokenizer_type and sweep_checkpoint_path:
+            from prismatic.vla.calvin_sweep_action_tokenizer import CalvinSweepActionTokenizer
+            self.action_tokenizer = CalvinSweepActionTokenizer(
+                self._tokenizer,
+                sweep_tokenizer_type, sweep_checkpoint_path,
+                device=device, use_extra=True,
+            )
+            self._action_buffer = []
+            self._n_action_tokens = self.action_tokenizer.n_codes_per_chunk
+            self._is_chunk_tokenizer = True
+            print("Sweep tokenizer: {}, {} tokens/chunk, chunk_size={}".format(
+                sweep_tokenizer_type, self._n_action_tokens,
+                self.action_tokenizer.chunk_size))
         else:
-            # VQ: generate n_groups (4) code tokens
-            n_tokens = self._vq_groups
+            # Bin — use the model's built-in action tokenizer
+            self.action_tokenizer = self.vla.action_tokenizer
+
+        print("FSDP model ready.")
+
+    def reset(self):
+        """Called by CALVIN between episodes."""
+        if self._action_buffer is not None:
+            self._action_buffer.clear()
+
+    def step(self, obs: dict, goal: str) -> np.ndarray:
+        """
+        Args:
+            obs:  CALVIN observation dict; obs["rgb_obs"]["rgb_static"] is (H, W, 3) uint8
+            goal: language instruction string
+
+        Returns:
+            action: (7,) float32 — delta_xyz + delta_euler + gripper
+        """
+        # Pop from buffer if actions remain from previous chunk
+        if self._is_chunk_tokenizer and self._action_buffer:
+            return np.array(self._action_buffer.pop(0), dtype=np.float32)
+
+        rgb = obs["rgb_obs"]["rgb_static"]
+        image = Image.fromarray(rgb).convert("RGB")
+
+        if not self._is_chunk_tokenizer:
+            # Bin: use native predict_action (handles prompt, tokenization, unnorm)
             with torch.no_grad():
-                generated = self.vla.generate(
-                    **inputs,
-                    max_new_tokens=n_tokens,
+                action = self.vla.predict_action(
+                    image, goal,
+                    unnorm_key="calvin_dataset",
                     do_sample=False,
                 )
-            # Extract last n_tokens as code token IDs
-            code_token_ids = generated[0, -n_tokens:].cpu().numpy()      # (4,)
-            # Decode: token_id = tokenizer_len - 1 - code_id → code_id = tokenizer_len - 1 - token_id
-            tok_len  = len(self.processor.tokenizer)
-            code_ids = tok_len - 1 - code_token_ids                      # (4,) in [0, 255]
-            code_ids = np.clip(code_ids, 0, self.action_tokenizer.vq_vae.vqvae_n_embed - 1)
+            return action.astype(np.float32)
 
-            # VQ decode: code_ids → z_q → 5 continuous actions
-            actions_5 = self._vq_decode(code_ids)                        # (5, 7)
+        # Chunk tokenizer: build native inputs and generate n_action_tokens
+        prompt_builder = self.vla.get_prompt_builder()
+        prompt_builder.add_turn(
+            role="human",
+            message="What action should the robot take to {}?".format(goal.lower()),
+        )
+        prompt_text = prompt_builder.get_prompt()
 
-            # Buffer steps 1–4, return step 0
-            self._action_buffer.extend(actions_5[1:].tolist())
-            return actions_5[0].astype(np.float32)
+        input_ids = self._tokenizer(
+            prompt_text, truncation=True, return_tensors="pt"
+        ).input_ids.to(self.device)
 
-    def _vq_decode(self, code_ids: np.ndarray) -> np.ndarray:
-        """Decode VQ code IDs (4,) → continuous actions (5, 7)."""
-        import torch as _torch
-        codes = _torch.from_numpy(code_ids.astype(np.int64)).unsqueeze(0)  # (1, 4)
-        vq_vae = self.action_tokenizer.vq_vae
+        pixel_values = self._image_transform(image)
+        if isinstance(pixel_values, torch.Tensor):
+            pixel_values = pixel_values[None, ...].to(self.device)
+        elif isinstance(pixel_values, dict):
+            pixel_values = {k: v[None, ...].to(self.device) for k, v in pixel_values.items()}
 
-        with _torch.no_grad():
-            z_q    = vq_vae.draw_code_forward(codes)            # (1, latent_dim)
-            decoded = vq_vae.get_action_from_latent(z_q)        # (1, 5, 7) or similar
-            if hasattr(decoded, "sample"):
-                decoded = decoded.sample
-            if isinstance(decoded, _torch.Tensor):
-                actions = decoded.squeeze(0).cpu().numpy()       # (5, 7)
-            else:
-                actions = np.array(decoded).squeeze(0)
-        return actions.astype(np.float32)
+        n_tokens = self._n_action_tokens
+        autocast_dtype = self.vla.llm_backbone.half_precision_dtype
+        with torch.no_grad(), torch.autocast("cuda", dtype=autocast_dtype, enabled=self.vla.enable_mixed_precision_training):
+            # Bypass PrismaticVLM.generate(image, prompt_text) — call
+            # GenerationMixin.generate(input_ids=..., pixel_values=...) directly
+            generated = self._GenerationMixin.generate(
+                self.vla,
+                input_ids=input_ids,
+                pixel_values=pixel_values,
+                max_new_tokens=n_tokens,
+                do_sample=False,
+            )
+        code_token_ids = generated[0, -n_tokens:].cpu().numpy()
+
+        # Decode token IDs → full action chunk for rollout
+        actions = self.action_tokenizer.decode_full_chunk(code_token_ids)
+        if isinstance(actions, torch.Tensor):
+            actions = actions.cpu().numpy()
+        actions = np.atleast_2d(actions).astype(np.float32)  # (chunk_size, 7)
+
+        # Buffer remaining steps, return first
+        if len(actions) > 1:
+            self._action_buffer.extend(actions[1:].tolist())
+        return actions[0]
 
 
 # ── CALVIN evaluation loop ─────────────────────────────────────────────────────
@@ -266,6 +384,9 @@ def run_rollout_eval(
     num_sequences: int,
     ep_len: int,
     device: str,
+    sweep_tokenizer_type: str = "",
+    sweep_checkpoint_path: str = "",
+    fsdp_checkpoint: str = "",
 ) -> dict:
     from calvin_agent.evaluation.multistep_sequences import get_sequences
     from calvin_agent.evaluation.utils import print_and_save, get_log_dir
@@ -274,13 +395,23 @@ def run_rollout_eval(
 
     os.makedirs(output_dir, exist_ok=True)
 
-    # Load model
-    model = CalvinOpenVLAModel(
-        condition=condition,
-        checkpoint_dir=checkpoint_dir,
-        vqvla_checkpoint_dir=vqvla_checkpoint_dir,
-        device=device,
-    )
+    # Load model — FSDP native or HuggingFace
+    if fsdp_checkpoint:
+        model = CalvinFSDPModel(
+            fsdp_checkpoint=fsdp_checkpoint,
+            device=device,
+            sweep_tokenizer_type=sweep_tokenizer_type,
+            sweep_checkpoint_path=sweep_checkpoint_path,
+        )
+    else:
+        model = CalvinOpenVLAModel(
+            condition=condition,
+            checkpoint_dir=checkpoint_dir,
+            vqvla_checkpoint_dir=vqvla_checkpoint_dir,
+            device=device,
+            sweep_tokenizer_type=sweep_tokenizer_type,
+            sweep_checkpoint_path=sweep_checkpoint_path,
+        )
 
     # Build CALVIN env
     print("Building CALVIN env ...")
@@ -337,13 +468,17 @@ def run_rollout_eval(
 # ── CLI ────────────────────────────────────────────────────────────────────────
 
 def parse_args():
-    p = argparse.ArgumentParser(description="CALVIN rollout evaluation for fine-tuned OpenVLA")
+    p = argparse.ArgumentParser(description="CALVIN rollout evaluation for fine-tuned OpenVLA / MiniVLA")
     p.add_argument("--condition", required=True,
-                   choices=["bin", "vq_vanilla", "vq_verb", "vq_verb01"])
+                   help="Condition label (e.g. bin, vq_verb, vb_c5e16g4, quest_h16f256d2)")
     p.add_argument("--checkpoint_dir", required=True,
-                   help="Merged fine-tuned OpenVLA checkpoint directory")
+                   help="Fine-tuned VLA checkpoint directory")
     p.add_argument("--vqvla_checkpoint_dir", default="",
-                   help="VQ-VLA tokenizer checkpoint (required for vq_* conditions)")
+                   help="VQ-VLA tokenizer checkpoint (for old vq_* conditions)")
+    p.add_argument("--sweep_tokenizer_type", default="",
+                   help="Sweep tokenizer type: vq_bet, oat, quest")
+    p.add_argument("--sweep_checkpoint_path", default="",
+                   help="Path to sweep tokenizer checkpoint (full.pth)")
     p.add_argument("--dataset_path", default="/data/user_data/yashagar/task_D_D",
                    help="Path to CALVIN dataset root (contains training/ and validation/)")
     p.add_argument("--output_dir", default=os.path.join(PROJECT_ROOT, "results", "rollout"))
@@ -351,6 +486,8 @@ def parse_args():
                    help="Number of evaluation sequences (standard=1000)")
     p.add_argument("--ep_len", type=int, default=EP_LEN,
                    help="Max environment steps per subtask")
+    p.add_argument("--fsdp_checkpoint", default="",
+                   help="Path to FSDP .pt checkpoint (native prismatic format, for MiniVLA scratch)")
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     return p.parse_args()
 
@@ -366,6 +503,9 @@ def main():
         num_sequences=args.num_sequences,
         ep_len=args.ep_len,
         device=args.device,
+        sweep_tokenizer_type=args.sweep_tokenizer_type,
+        sweep_checkpoint_path=args.sweep_checkpoint_path,
+        fsdp_checkpoint=args.fsdp_checkpoint,
     )
 
 

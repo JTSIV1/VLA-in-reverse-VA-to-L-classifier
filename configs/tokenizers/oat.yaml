@@ -1,0 +1,7 @@
+# OAT: register encoder + FSQ
+chunk_size: 16
+sampling: random
+fsq_levels: [8, 5, 5, 5]
+num_registers: 8
+latent_dim: 64
+vq_weight: 5.0

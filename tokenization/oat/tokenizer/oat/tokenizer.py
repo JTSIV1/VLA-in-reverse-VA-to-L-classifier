@@ -63,21 +63,35 @@ class OATTok(BaseTokenizer):
     def set_normalizer(self, normalizer: LinearNormalizer):
         self.normalizer.load_state_dict(normalizer.state_dict())
 
-    def forward(self, batch) -> torch.Tensor:
+    def forward(self, batch):
+        """Training forward pass.
+
+        Returns:
+            dict with recon_loss, vq_loss, latents (B, T', 256) pre-FSQ,
+            codes (B, T') FSQ indices.
+        """
         samples = batch['action']
-        
+
         # normalize
         nsamples = self.normalizer['action'].normalize(samples)
-        
-        # encode & quantize
-        latents = self.encoder(nsamples)
-        latents, _ = self.quantizer(latents)
+
+        # encode: get both pre-FSQ (256-d) and post-head (4-d) representations
+        pre_fsq = self.encoder._encode_transformer(nsamples)  # (B, T', 256)
+        post_head = self.encoder.head(pre_fsq)                # (B, T', 4)
+
+        # quantize
+        quant, tokens = self.quantizer(post_head)
 
         # decode
-        recons = self.decoder(latents)
-        loss = F.mse_loss(recons, nsamples)
+        recons = self.decoder(quant)
+        recon_loss = F.mse_loss(recons, nsamples)
 
-        return loss
+        return {
+            'recon_loss': recon_loss,
+            'vq_loss': torch.tensor(0.0, device=samples.device),
+            'latents': pre_fsq,        # 256-d for aux heads
+            'codes': tokens.detach(),   # FSQ indices
+        }
 
     def encode_pre_fsq(self, samples: torch.Tensor) -> torch.Tensor:
         """Return pre-FSQ 256-d register embeddings (before head projection + FSQ).

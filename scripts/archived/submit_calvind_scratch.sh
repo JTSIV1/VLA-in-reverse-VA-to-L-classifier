@@ -58,6 +58,7 @@ torchrun --standalone --nnodes 1 --nproc-per-node 1 vla-scripts/train.py \
     --vla.expected_world_size 1 \
     --vla.global_batch_size 16 \
     --vla.per_device_batch_size 16 \
+    --vla.freeze_vision_backbone True \
     --vla.action_tokenizer '${ACTION_TOK}'
 "
     echo "  Submitted: sc_${TAG}"

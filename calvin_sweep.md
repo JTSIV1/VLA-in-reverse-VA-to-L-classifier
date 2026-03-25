@@ -340,7 +340,48 @@ the quantization method or aux head attachment point.
 ---
 
 
-## 7. Policy Training: From-Scratch MiniVLA (Qwen2.5-0.5B)
+## 7. Verb Decodability Probe (Post-Hoc)
+
+After the HP sweep, we measure how much verb information is preserved in each
+tokenizer's representations — independent of any downstream policy. For each
+of the 27 HP-sweep checkpoints (6 VQ-BeT + 6 OAT + 6 QueST vanilla + 9 aux),
+we freeze the tokenizer, encode all CALVIN episodes, and train simple
+classifiers on two representation types:
+
+1. **Latent**: mean-pooled continuous encoder output per episode
+   - VQ-BeT: post-quantization z_q (512-d)
+   - OAT/QueST: pre-FSQ encoder output (256-d)
+2. **Token ID histogram**: normalized frequency of each codebook index per episode
+
+Classifiers: LogisticRegression + RandomForest (sklearn, no GPU needed).
+
+### Scripts
+
+| Resource | Path |
+|----------|------|
+| Probe script | `tokenization/verb_probe_tokenizer.py` |
+| SLURM submission | `scripts/submit_verb_probe.sh` |
+| Results | `checkpoints/calvind_hp_sweep/<config>/verb_probe/verb_probe_results.json` |
+
+### Usage
+
+```bash
+# Single config
+python tokenization/verb_probe_tokenizer.py \
+    --tokenizer_type vq_bet \
+    --checkpoint checkpoints/calvind_hp_sweep/vq_bet_c5_e16_g4/full.pth
+
+# All configs via SLURM (CPU partition)
+bash scripts/submit_verb_probe.sh
+```
+
+### Results
+
+*TODO: fill in after jobs complete*
+
+---
+
+## 8. Policy Training: From-Scratch MiniVLA (Qwen2.5-0.5B)
 
 Second round using the HP sweep winners (Section 6). Trains MiniVLA from scratch
 on CALVIN-D only (no OXE pretraining).
@@ -426,9 +467,30 @@ measures actual action reconstruction quality after the predict→decode pipelin
 Script: `policy/scripts/evaluate_openvla.py --eval_real_l1 --fsdp_checkpoint <best.pt>`
 Launcher: `python policy/eval_policy.py --family scratch --mode real_l1 --condition all`
 
-| Condition | Real L1 | Per-dim L1 |
-|-----------|---------|------------|
-| *Eval jobs submitted (6766059–6766069), results pending* | | |
+| Condition | Tokenizer | Real L1 | Token Acc | Tok Recon |
+|-----------|-----------|---------|-----------|-----------|
+| bin_baseline | Bin 256 | 0.630 | 34.8% | N/A |
+| vb_c5e16g4 | VQ-BeT c5/e16/g4 | 0.357 | 57.8% | 0.0085 |
+| vb_c5e64g2 | VQ-BeT c5/e64/g2 | 0.348 | 53.1% | 0.0089 |
+| vb_c10e16g4 | VQ-BeT c10/e16/g4 | 0.337 | 54.7% | 0.0119 |
+| vb_c5e16g4_verb01 | VQ-BeT + verb λ=0.1 | **0.323** | 67.2% | 0.0100 |
+| vb_c5e16g4_clip01 | VQ-BeT + clip λ=0.1 | 0.348 | 57.8% | 0.0098 |
+| quest_h16f256d2 | QueST h16/f256/d2 | 0.304 | 70.3% | 0.0121 |
+| quest_h32f1000d4 | QueST h32/f1000/d4 | 0.315 | 72.5% | 0.0138 |
+| quest_h16f256d4 | QueST h16/f256/d4 | 0.318 | 81.2% | 0.0158 |
+| quest_h16d2_verb01 | QueST + verb λ=0.1 | **0.303** | 72.7% | 0.0249 |
+| quest_h16d2_clip01 | QueST + clip λ=0.1 | 0.317 | 74.2% | 0.0302 |
+
+**Key findings**:
+- **quest_h16d2_verb01 has the lowest Real L1 (0.303)**, followed by quest_h16f256d2 (0.304).
+- **Verb-supervised tokenizers help**: VQ-BeT verb01 (0.323) beats all vanilla VQ-BeT configs.
+  QueST verb01 (0.303) also edges ahead of vanilla QueST (0.304).
+- **QueST > VQ-BeT > Bin** in Real L1: all QueST variants (0.30–0.32) beat all VQ-BeT variants
+  (0.32–0.36), which beat bin (0.63). The ranking matches tokenizer recon quality.
+- **Bin baseline is 2× worse than best**: 0.630 vs 0.303. Bin tokenizer wastes capacity encoding
+  each action dim independently (7 tokens/step) without leveraging temporal structure.
+
+Results saved in `results/scratch/<condition>/eval_<label>.json`.
 
 Where `<openvla-mini>` = `/data/user_data/wenjiel2/Code/openvla-mini`
 

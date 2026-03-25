@@ -57,8 +57,8 @@ Find the best action tokenizer configuration for BridgeV2 by sweeping horizon, c
 | **OAT** | h16_r4_v200 | 0.000709 | 200 | 200 | 100% | done (ep 297) |
 | **OAT** | h32_r8_v125 | 0.00241 | 125 | 125 | 100% | done (ep 292) |
 | **OAT** | h32_r8_v512 | 0.00108 | 512 | 512 | 100% | done (ep 300) |
-| **OAT** | h16_r4_v1000 | — | — | 1000 | — | running (j6746796) |
-| **OAT** | h32_r8_v4096 | — | — | 4096 | — | running (j6746797) |
+| **OAT** | h16_r4_v1000 | 0.00316 | 563 | 1000 | 56.3% | done (early stop ep 178) |
+| **OAT** | h32_r8_v4096 | 0.00333 | ~3089 | 4096 | 75.4% | done (early stop ep 214) |
 | **QueST** | h16_ds4_v200 | 0.00077 | 200 | 200 | 100% | done (ep 261) |
 | **QueST** | h32_ds4_v125 | 0.00079 | 125 | 125 | 100% | done (ep 300) |
 | **QueST** | h32_ds4_v512 | 0.00061 | 511 | 512 | 99.8% | done (ep 300) |

@@ -1,11 +1,8 @@
-"""VQ-BeT action tokenizer.
+"""VQ-BeT action tokenizer (nn.Module wrapper).
 
-MLP encoder/decoder + ResidualVQ, adapted from:
-  https://github.com/jayLEE0301/vq_bet_official/blob/main/vqvae/vqvae.py
-
-Much smaller than VQ-VLA (~250K vs ~3.5M params) while using residual
-quantization (multiple codebook groups) for better expressiveness than
-a single-codebook VQ-VAE.
+MLP encoder/decoder + ResidualVQ, adapted from vqvae.py in this directory.
+This is the version used by train_tokenizer.py — a clean nn.Module with
+forward(), encode(), decode() matching the OAT/QueST tokenizer interface.
 
 Default architecture:
   Encoder: Linear(chunk_dim -> 128) -> ReLU -> Linear(128 -> 128) -> ReLU -> Linear(128 -> latent_dim)
@@ -80,9 +77,7 @@ class VQBeTTokenizer(nn.Module):
             codebook_size=n_embed,
         )
 
-        # Vocab size = n_embed (each group has same codebook size)
         self.vocab_size = n_embed
-        # Total discrete states = n_embed ^ groups
         self.total_codes = n_embed ** groups
 
         # Action normalizer (fitted externally via set_normalizer)
@@ -94,7 +89,6 @@ class VQBeTTokenizer(nn.Module):
     def _normalize_flat(self, x):
         """Normalize flat chunks (B, chunk_size * action_dim) via the fitted normalizer."""
         B = x.size(0)
-        # Reshape to (B, chunk_size, action_dim) for normalizer
         x_3d = x.view(B, self.chunk_size, self.action_dim)
         x_3d = self.normalizer['action'].normalize(x_3d)
         return x_3d.view(B, -1)
@@ -117,22 +111,16 @@ class VQBeTTokenizer(nn.Module):
             commit_loss: scalar commitment loss
         """
         x_norm = self._normalize_flat(x)
-        z = self.encoder(x_norm)           # (B, latent_dim)
-        z = z.unsqueeze(1)                 # (B, 1, latent_dim) for ResidualVQ
+        z = self.encoder(x_norm)
+        z = z.unsqueeze(1)
         quantized, indices, commit_loss = self.vq_layer(z)
-        quantized = quantized.squeeze(1)   # (B, latent_dim)
-        indices = indices.squeeze(1)       # (B, groups)
+        quantized = quantized.squeeze(1)
+        indices = indices.squeeze(1)
         commit_loss = commit_loss.sum()
         return quantized, indices, commit_loss
 
     def decode(self, quantized):
-        """Decode quantized latents to reconstructed chunks (normalized space).
-
-        Args:
-            quantized: (B, latent_dim)
-        Returns:
-            recon: (B, chunk_size * action_dim) in normalized space
-        """
+        """Decode quantized latents to reconstructed chunks (normalized space)."""
         return self.decoder(quantized)
 
     def forward(self, x):
@@ -141,29 +129,27 @@ class VQBeTTokenizer(nn.Module):
         Args:
             x: (B, chunk_size * action_dim) flat chunks (raw actions)
         Returns:
-            recon: (B, chunk_size * action_dim) in normalized space
-            recon_loss: scalar (MSE in normalized space)
-            vq_loss: scalar (commitment loss from ResidualVQ)
+            dict with recon_loss, vq_loss, latents (B, latent_dim),
+            codes (B, groups).
         """
         x_norm = self._normalize_flat(x)
         z = self.encoder(x_norm)
         z = z.unsqueeze(1)
         quantized, indices, commit_loss = self.vq_layer(z)
-        quantized = quantized.squeeze(1)
-        indices = indices.squeeze(1)
+        quantized = quantized.squeeze(1)  # (B, latent_dim)
+        indices = indices.squeeze(1)      # (B, groups)
         commit_loss = commit_loss.sum()
         recon = self.decoder(quantized)
         recon_loss = F.mse_loss(recon, x_norm)
-        return recon, recon_loss, commit_loss
+        return {
+            'recon_loss': recon_loss,
+            'vq_loss': commit_loss,
+            'latents': quantized,   # post-VQ, gradient via STE
+            'codes': indices.detach(),
+        }
 
     def get_code(self, x):
-        """Get codebook indices for a batch of chunks.
-
-        Args:
-            x: (B, chunk_size * action_dim)
-        Returns:
-            indices: (B, groups) int64
-        """
+        """Get codebook indices for a batch of chunks."""
         with torch.no_grad():
             _, indices, _ = self.encode(x)
         return indices
@@ -176,8 +162,7 @@ class VQBeTTokenizer(nn.Module):
         Returns:
             recon: (B, chunk_size * action_dim)
         """
-        # Look up codebook vectors and sum (residual)
-        indices = indices.unsqueeze(1)  # (B, 1, groups)
+        indices = indices.unsqueeze(1)
         quantized = self.vq_layer.get_output_from_indices(indices)
-        quantized = quantized.squeeze(1)  # (B, latent_dim)
+        quantized = quantized.squeeze(1)
         return self.decode(quantized)

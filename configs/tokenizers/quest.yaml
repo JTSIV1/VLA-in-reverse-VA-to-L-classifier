@@ -1,0 +1,10 @@
+# QueST: causal conv + FSQ
+chunk_size: 16
+sampling: random
+fsq_levels: [8, 5, 5, 5]
+downsample_factor: 4
+vq_type: fsq
+vq_codebook_size: 256
+vq_codebook_dim: 256
+latent_dim: 64
+vq_weight: 5.0

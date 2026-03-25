@@ -1,0 +1,7 @@
+# VQ-VLA: pretrained VQ-VLA tokenizer (fine-tuning)
+chunk_size: 5
+max_chunks: 16
+latent_dim: 128
+vq_weight: 5.0
+# vqvla_config_dir: null   # set via CLI or override YAML
+# vqvla_pretrained: null    # set via CLI or override YAML

@@ -666,6 +666,180 @@ def _rlds_raw_action_iterator(raw_ds):
             yield step["action"].numpy().astype(np.float32)
 
 
+# ── FSDP Real L1: native prismatic checkpoint eval ──────────────────────────
+
+def run_fsdp_real_l1_eval(fsdp_checkpoint: str,
+                          sweep_tokenizer_type: str, sweep_checkpoint_path: str,
+                          data_root_dir: str, max_batches: int, device: str) -> dict:
+    """
+    Real L1 eval for FSDP (native prismatic) checkpoints.
+
+    Loads the model via prismatic's native load_vla() instead of HuggingFace
+    AutoModelForVision2Seq, which doesn't support the FSDP .pt format.
+    """
+    print("\n=== FSDP Real L1 Evaluation ===")
+    print(f"Checkpoint: {fsdp_checkpoint}")
+
+    os.environ.setdefault("PRISMATIC_DATA_ROOT", data_root_dir)
+
+    import torch
+    import tensorflow_datasets as tfds
+    from torch.utils.data import DataLoader
+    from prismatic.models import load_vla
+    from prismatic.vla.materialize import get_vla_dataset_and_collator
+    from prismatic.models.backbones.llm.prompting import PurePromptBuilder
+
+    # Load native model from FSDP .pt checkpoint
+    print("Loading native VLA from FSDP checkpoint...")
+    vla = load_vla(fsdp_checkpoint, load_for_training=False)
+    vla = vla.to(device)
+    vla.eval()
+    print("Model loaded.")
+
+    image_transform = vla.vision_backbone.get_image_transform()
+    tokenizer = vla.llm_backbone.get_tokenizer()
+    num_patches = vla.vision_backbone.num_patches
+
+    # Build action tokenizer string
+    is_bin = not (sweep_tokenizer_type and sweep_checkpoint_path)
+    if not is_bin:
+        action_tok_str = "sweep:{}:{}".format(sweep_tokenizer_type, sweep_checkpoint_path)
+    else:
+        action_tok_str = "action_tokenizer"  # bin
+
+    # For bin tokenizer, load normalization stats to unnormalize predictions
+    # (bin decode returns normalized [-1,1], sweep tokenizers unnormalize internally)
+    unnorm_q01, unnorm_q99, unnorm_mask = None, None, None
+    if is_bin:
+        run_dir = Path(fsdp_checkpoint).parents[1]
+        stats_path = run_dir / "dataset_statistics.json"
+        if stats_path.exists():
+            with open(stats_path) as f:
+                stats = json.load(f)
+            action_stats = stats["calvin_dataset"]["action"]
+            unnorm_q01 = np.array(action_stats["q01"], dtype=np.float32)
+            unnorm_q99 = np.array(action_stats["q99"], dtype=np.float32)
+            unnorm_mask = np.array(action_stats.get("mask", [True]*7), dtype=bool)
+            print("Loaded unnorm stats: q01={}, q99={}".format(
+                unnorm_q01.round(3).tolist(), unnorm_q99.round(3).tolist()))
+
+    # Build val dataset using native image transforms
+    dataset, action_tokenizer, collator = get_vla_dataset_and_collator(
+        data_root_dir=Path(data_root_dir),
+        data_mix="calvin_dataset",
+        image_transform=image_transform,
+        tokenizer=tokenizer,
+        prompt_builder_fn=PurePromptBuilder,
+        default_image_resolution=(3, 224, 224),
+        padding_side="right",
+        train=False,
+        image_aug=False,
+        action_tokenizer=action_tok_str,
+    )
+    dataloader = DataLoader(dataset, batch_size=8, sampler=None,
+                            collate_fn=collator, num_workers=0)
+
+    # Raw RLDS GT actions for comparison
+    rlds_path = os.path.join(data_root_dir, "calvin_dataset", "1.0.0")
+    raw_ds = tfds.builder_from_directory(rlds_path).as_dataset(split="val")
+    raw_actions_iter = _rlds_raw_action_iterator(raw_ds)
+
+    n_codes = getattr(action_tokenizer, 'n_codes_per_chunk', 7)
+    all_pred_actions, all_gt_actions = [], []
+    n_batches = 0
+
+    with torch.no_grad():
+        for batch in dataloader:
+            if max_batches > 0 and n_batches >= max_batches:
+                break
+
+            # Handle dict (native DINOSigLIP) or tensor pixel_values
+            pv = batch["pixel_values"]
+            if isinstance(pv, dict):
+                pixel_values = {k: v.to(torch.bfloat16).to(device) for k, v in pv.items()}
+            else:
+                pixel_values = pv.to(torch.bfloat16).to(device)
+
+            input_ids = batch["input_ids"].to(device)
+            attention_mask = batch["attention_mask"].to(device)
+            labels = batch["labels"].to(device)
+
+            with torch.autocast("cuda", dtype=torch.bfloat16):
+                output = vla(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    pixel_values=pixel_values,
+                )
+
+            action_logits = output.logits[:, num_patches:-1]
+            action_preds = action_logits.argmax(dim=2)
+            action_gt = labels[:, 1:].to(device)
+            mask = (action_tokenizer.action_token_end_idx > action_gt) & \
+                   (action_gt > action_tokenizer.action_token_begin_idx)
+
+            pred_flat = action_preds[mask].cpu().numpy()
+            n = (len(pred_flat) // n_codes) * n_codes
+            if n == 0:
+                n_batches += 1
+                continue
+
+            pred_cont = action_tokenizer.decode_token_ids_to_actions(pred_flat[:n])
+            if isinstance(pred_cont, torch.Tensor):
+                pred_cont = pred_cont.cpu().numpy()
+            # Bin tokenizer returns flat (N,); reshape to (-1, 7)
+            if pred_cont.ndim == 1:
+                pred_cont = pred_cont.reshape(-1, 7)
+            # Bin tokenizer returns normalized [-1,1]; unnormalize to match raw GT
+            if unnorm_q01 is not None:
+                pred_cont = np.where(
+                    unnorm_mask,
+                    0.5 * (pred_cont + 1) * (unnorm_q99 - unnorm_q01) + unnorm_q01,
+                    pred_cont,
+                )
+
+            batch_size = input_ids.shape[0]
+            raw_gt = []
+            for _ in range(batch_size):
+                try:
+                    raw_gt.append(next(raw_actions_iter))
+                except StopIteration:
+                    break
+            if len(raw_gt) < batch_size:
+                print("  Warning: ran out of raw actions at batch {}".format(n_batches))
+                break
+            raw_gt = np.array(raw_gt, dtype=np.float32)
+
+            n_compare = min(len(pred_cont), len(raw_gt))
+            all_pred_actions.append(pred_cont[:n_compare])
+            all_gt_actions.append(raw_gt[:n_compare])
+
+            n_batches += 1
+            if n_batches % 50 == 0:
+                preds_so_far = np.concatenate(all_pred_actions)
+                gts_so_far = np.concatenate(all_gt_actions)
+                l1_so_far = np.abs(preds_so_far - gts_so_far).mean()
+                print("  [{} batches] real_l1={:.4f}".format(n_batches, l1_so_far))
+
+    if all_pred_actions:
+        all_preds = np.concatenate(all_pred_actions)
+        all_gts = np.concatenate(all_gt_actions)
+        real_l1 = float(np.abs(all_preds - all_gts).mean())
+        per_dim_l1 = [float(np.abs(all_preds[:, d] - all_gts[:, d]).mean()) for d in range(7)]
+        print("\nReal L1 eval done ({} batches, {} steps):".format(n_batches, len(all_preds)))
+        print("  Real L1 (overall): {:.4f}".format(real_l1))
+        print("  Per-dim L1: {}".format(['%.4f' % v for v in per_dim_l1]))
+    else:
+        real_l1, per_dim_l1 = None, None
+        print("  No predictions collected.")
+
+    return {
+        "real_l1": real_l1,
+        "per_dim_l1": per_dim_l1,
+        "n_batches": n_batches,
+        "n_steps": len(all_preds) if all_pred_actions else 0,
+    }
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def parse_args():
@@ -699,6 +873,8 @@ def parse_args():
                    help="Sweep tokenizer type (vq_bet, oat, quest)")
     p.add_argument("--sweep_checkpoint_path", type=str, default="",
                    help="Path to sweep tokenizer checkpoint (full.pth)")
+    p.add_argument("--fsdp_checkpoint", type=str, default="",
+                   help="Path to FSDP .pt checkpoint file (native prismatic format)")
 
     # Output
     p.add_argument("--output_dir", type=str, default=DEFAULT_OUT)
@@ -726,17 +902,29 @@ def main():
         results["nll_eval"] = nll_metrics
 
     if args.eval_real_l1:
-        assert args.checkpoint_dir, "--checkpoint_dir required for --eval_real_l1"
-        real_l1_metrics = run_real_l1_eval(
-            condition=args.condition,
-            checkpoint_dir=args.checkpoint_dir,
-            sweep_tokenizer_type=args.sweep_tokenizer_type,
-            sweep_checkpoint_path=args.sweep_checkpoint_path,
-            vqvla_checkpoint_dir=args.vqvla_checkpoint_dir,
-            data_root_dir=args.data_root_dir,
-            max_batches=args.max_nll_batches,
-            device=args.device,
-        )
+        if args.fsdp_checkpoint:
+            # Native prismatic FSDP checkpoint (MiniVLA from scratch)
+            real_l1_metrics = run_fsdp_real_l1_eval(
+                fsdp_checkpoint=args.fsdp_checkpoint,
+                sweep_tokenizer_type=args.sweep_tokenizer_type,
+                sweep_checkpoint_path=args.sweep_checkpoint_path,
+                data_root_dir=args.data_root_dir,
+                max_batches=args.max_nll_batches,
+                device=args.device,
+            )
+        else:
+            # HuggingFace format checkpoint (OpenVLA 7B + LoRA)
+            assert args.checkpoint_dir, "--checkpoint_dir or --fsdp_checkpoint required for --eval_real_l1"
+            real_l1_metrics = run_real_l1_eval(
+                condition=args.condition,
+                checkpoint_dir=args.checkpoint_dir,
+                sweep_tokenizer_type=args.sweep_tokenizer_type,
+                sweep_checkpoint_path=args.sweep_checkpoint_path,
+                vqvla_checkpoint_dir=args.vqvla_checkpoint_dir,
+                data_root_dir=args.data_root_dir,
+                max_batches=args.max_nll_batches,
+                device=args.device,
+            )
         results["real_l1_eval"] = real_l1_metrics
 
     if args.eval_verb_probe:

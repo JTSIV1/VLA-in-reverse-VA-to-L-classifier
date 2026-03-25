@@ -7,7 +7,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'tokenization'))
 
 from tokenization.train_tokenizer import build_oat, build_quest
-from tokenization.vqbet_tokenizer import VQBeTTokenizer
+from tokenization.vq_bet_official.vqvae.tokenizer import VQBeTTokenizer
 
 SHARD_DIR = '/data/user_data/wenjiel2/datasets/bridge_actions'
 CKPT_BASE = 'checkpoints/bridge_sweep'

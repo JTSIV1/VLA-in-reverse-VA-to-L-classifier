@@ -7,9 +7,7 @@ segment (from Gemini decomposition).
 
 Subclasses define __getitem__ for specific consumers:
 - CalvinVerbProbeDataset: verb classification from full action sequences
-- CalvinTokenizerDataset: action chunks for tokenizer training / fine-tuning
-  (set include_instruction=True for CLIP contrastive auxiliary loss)
-- CalvinActionCropDataset: random fixed-length crops for tokenizer fitting
+- CalvinTokenizerDataset: action chunks for tokenizer training (recon, verb, CLIP)
 """
 
 import os
@@ -165,8 +163,9 @@ class CalvinDataset(Dataset):
     def _chunk_actions(self, actions, window_size, max_windows):
         """Chunk raw (T, D) actions into fixed-size windows with padding.
 
-        Returns: (padded_windows, n_windows) where padded_windows is
-            np.ndarray of shape (max_windows, window_size, action_dim).
+        Returns: (padded_windows, positions, n_windows) where
+            padded_windows: (max_windows, window_size, action_dim)
+            positions: (max_windows,) normalized start positions in [0, 1]
         """
         T, action_dim = actions.shape
 
@@ -186,7 +185,12 @@ class CalvinDataset(Dataset):
         padded_windows = np.zeros(
             (max_windows, window_size, action_dim), dtype=np.float32)
         padded_windows[:n_windows] = windows
-        return padded_windows, n_windows
+
+        positions = np.zeros(max_windows, dtype=np.float32)
+        for i in range(n_windows):
+            positions[i] = (i * window_size) / max(T - 1, 1)
+
+        return padded_windows, positions, n_windows
 
     # ------------------------------------------------------------------
     # Action caching
@@ -380,95 +384,81 @@ class CalvinVerbProbeDataset(CalvinDataset):
 # ======================================================================
 
 class CalvinTokenizerDataset(CalvinDataset):
-    """For tokenizer training: chunked actions + optional verb label + optional instruction.
+    """Unified CALVIN dataset for tokenizer training (recon, verb, CLIP).
 
-    Returns: (action_windows, verb_label, n_windows) by default.
-    With include_instruction=True: (action_windows, verb_label, instruction_str, n_windows)
-
-    Works for any action tokenizer supported by TokenizerAdapter
-    (fast, bin, vq_vae, vqvla/vq_bet, quest, oat) or raw continuous actions.
-    Set include_instruction=True for CLIP contrastive auxiliary loss.
+    Always returns episode dict format matching BridgeTokenizerDataset:
+    {
+        'chunks':      (max_chunks, chunk_size, action_dim),
+        'positions':   (max_chunks,) — normalized start positions in [0, 1],
+        'n_valid':     int — number of real chunks,
+        'verb_label':  int — verb class id (-1 if unknown),
+        'instruction': str — episode instruction (empty if not provided),
+    }
 
     Args:
-        action_tokenizer: a TokenizerAdapter from load_action_tokenizer(), or None
-            for raw continuous actions. Uniform interface: (T,D) → List[List[int]].
-        return_format: "tuple" or "dict".
-            "tuple": (action_windows, verb_label, [instruction,] n_windows)
-            "dict": {"action": Tensor, "verb_label": int, "instruction": str,
-                     "n_windows": int} — keys present based on configuration.
+        sampling: 'random' — sample K random overlapping windows.
+                  'sequential' — tile non-overlapping chunks.
     """
 
-    def __init__(self, data_dir, df, window_size=5, max_windows=16,
-                 verb_to_id=None, cache_actions=False,
-                 include_instruction=False,
-                 action_tokenizer=None, return_format="tuple"):
+    def __init__(self, data_dir, df, chunk_size=5, max_chunks=16,
+                 sampling='random', verb_to_id=None, cache_actions=False,
+                 include_instruction=False):
         super().__init__(data_dir, df, verb_to_id=verb_to_id,
                          cache_actions=cache_actions)
-        self.window_size = window_size
-        self.max_windows = max_windows
+        self.chunk_size = chunk_size
+        self.max_chunks = max_chunks
+        self.sampling = sampling
         self.include_instruction = include_instruction
-        self.action_tokenizer = action_tokenizer
-        self.return_format = return_format
 
     def __getitem__(self, idx):
         actions = self._get_actions(idx)
+        T = len(actions)
+        cs = self.chunk_size
+        adim = actions.shape[1]
 
-        if self.action_tokenizer is not None:
-            # TokenizerAdapter: (T, D) → List[List[int]], take first batch elem
-            token_ids = self.action_tokenizer(actions)  # List[List[int]]
-            token_ids = np.array(token_ids[0], dtype=np.int64).reshape(-1, 1)
-            padded_windows, n_windows = self._chunk_actions(
-                token_ids, self.window_size, self.max_windows)
-            padded_windows = padded_windows.squeeze(-1)
-            action_out = torch.from_numpy(padded_windows).long()
+        if self.sampling == 'random':
+            starts, n_valid = self._random_starts(T, cs)
         else:
-            padded_windows, n_windows = self._chunk_actions(
-                actions, self.window_size, self.max_windows)
-            action_out = torch.from_numpy(padded_windows)
+            starts, n_valid = self._sequential_starts(T, cs)
 
-        if self.return_format == "dict":
-            out = {"action": action_out,
-                   "verb_label": torch.tensor(self._get_verb_id(idx), dtype=torch.long),
-                   "n_windows": torch.tensor(n_windows, dtype=torch.long)}
-            if self.include_instruction:
-                out["instruction"] = self._get_instruction(idx)
-            return out
+        chunks = np.zeros((self.max_chunks, cs, adim), dtype=np.float32)
+        positions = np.zeros(self.max_chunks, dtype=np.float32)
 
-        # Default: tuple
-        result = (action_out,
-                  torch.tensor(self._get_verb_id(idx), dtype=torch.long))
+        for i, s in enumerate(starts[:n_valid]):
+            end = s + cs
+            if end <= T:
+                chunks[i] = actions[s:end]
+            elif T > s:
+                chunks[i] = np.pad(actions[s:], ((0, end - T), (0, 0)), mode='edge')
+            else:
+                chunks[i] = np.pad(actions, ((0, cs - T), (0, 0)), mode='edge')
+            positions[i] = s / max(T - 1, 1)
 
+        instruction = ""
         if self.include_instruction:
-            result = result + (self._get_instruction(idx),)
+            instruction = self._get_instruction(idx)
 
-        return result + (torch.tensor(n_windows, dtype=torch.long),)
+        return {
+            'chunks': torch.tensor(chunks, dtype=torch.float32),
+            'positions': torch.tensor(positions, dtype=torch.float32),
+            'n_valid': torch.tensor(n_valid, dtype=torch.long),
+            'verb_label': torch.tensor(self._get_verb_id(idx), dtype=torch.long),
+            'instruction': instruction,
+        }
 
-
-# ======================================================================
-# Random-crop subclass (for tokenizer fitting: OAT, QueST)
-# ======================================================================
-
-class CalvinActionCropDataset(CalvinDataset):
-    """For tokenizer fitting: random fixed-length crop from each trajectory.
-
-    Returns: {"action": Tensor(horizon, action_dim)}
-    """
-
-    def __init__(self, data_dir, df, horizon=32, cache_actions=False,
-                 verb_to_id=None):
-        super().__init__(data_dir, df, verb_to_id=verb_to_id,
-                         cache_actions=cache_actions)
-        self.horizon = horizon
-
-    def __getitem__(self, idx):
-        actions = self._get_actions(idx)
-        T = actions.shape[0]
-
-        if T >= self.horizon:
-            s = np.random.randint(0, T - self.horizon + 1)
-            chunk = actions[s:s + self.horizon]
+    def _random_starts(self, T, cs):
+        max_start = max(0, T - cs)
+        if max_start > 0:
+            n_possible = max_start + 1
+            n_valid = min(self.max_chunks, n_possible)
+            starts = np.sort(np.random.choice(n_possible, n_valid, replace=False))
         else:
-            chunk = np.pad(actions, ((0, self.horizon - T), (0, 0)),
-                           mode='constant').astype(np.float32)
+            starts = np.array([0])
+            n_valid = 1
+        return starts, n_valid
 
-        return {"action": torch.from_numpy(chunk).float()}
+    def _sequential_starts(self, T, cs):
+        n_chunks = max(1, -(-T // cs))  # ceiling division
+        n_valid = min(n_chunks, self.max_chunks)
+        starts = np.array([i * cs for i in range(n_valid)])
+        return starts, n_valid

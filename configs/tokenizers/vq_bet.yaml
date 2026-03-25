@@ -1,0 +1,9 @@
+# VQ-BeT: chunk-based MLP + ResidualVQ
+chunk_size: 4
+sampling: sequential
+num_codes: 512
+latent_dim: 64
+vq_groups: 4
+hidden_dim: 128
+num_mlp_layers: 1
+vq_weight: 1.0
