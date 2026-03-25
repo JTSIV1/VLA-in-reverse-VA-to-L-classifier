@@ -128,8 +128,9 @@ def build_quest(args):
     levels = getattr(args, 'fsq_levels', [8, 5, 5, 5])
     ds = getattr(args, 'downsample_factor', TOKENIZER_DOWNSAMPLE_FACTOR)
     vq_type = getattr(args, 'vq_type', 'fsq')
+    horizon = getattr(args, 'horizon', getattr(args, 'chunk_size', 32))
     tok = QueSTTok(
-        action_dim=ACTION_DIM, horizon=args.chunk_size,
+        action_dim=ACTION_DIM, horizon=horizon,
         vq_type=vq_type, fsq_level=levels,
         vq_codebook_size=getattr(args, 'vq_codebook_size', 256),
         vq_codebook_dim=getattr(args, 'vq_codebook_dim', 256),
@@ -524,16 +525,20 @@ def parse_args():
         if "=" not in item:
             parser.error(f"--set values must be KEY=VALUE, got: {item}")
         key, val = item.split("=", 1)
-        # Auto-cast: try int, then float, then bool, then string
-        for cast in (int, float):
-            try:
-                val = cast(val)
-                break
-            except ValueError:
-                continue
+        # Auto-cast: list, int, float, bool, or string
+        if val.startswith("[") and val.endswith("]"):
+            import ast
+            val = ast.literal_eval(val)
         else:
-            if val.lower() in ("true", "false"):
-                val = val.lower() == "true"
+            for cast in (int, float):
+                try:
+                    val = cast(val)
+                    break
+                except ValueError:
+                    continue
+            else:
+                if val.lower() in ("true", "false"):
+                    val = val.lower() == "true"
         setattr(args, key, val)
 
     # ── Ensure all expected tokenizer attrs exist with sensible fallbacks
@@ -549,6 +554,10 @@ def parse_args():
     for key, default in _defaults.items():
         if not hasattr(args, key):
             setattr(args, key, default)
+
+    # For QueST, chunk_size must equal horizon (dataset chunking = model horizon)
+    if args.tokenizer == 'quest' and hasattr(args, 'horizon'):
+        args.chunk_size = args.horizon
 
     # Derive verb_cls_lambda / clip_lambda from aux_head + aux_lambda
     args.verb_cls_lambda = args.aux_lambda if args.aux_head == 'verb' else 0.0
