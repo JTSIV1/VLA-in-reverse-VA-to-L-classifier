@@ -247,6 +247,9 @@ class ActionToVerbTransformer(nn.Module):
         if modality != "vision_only":
             if action_rep == "native":
                 self.action_proj = nn.Linear(action_dim, d_model)
+            elif action_rep == "gampt_continuous":
+                # Ablation C: project raw 14-D primitive features directly (no quantization)
+                self.action_proj = nn.Linear(14, d_model)
             else:
                 # Tokenized: discrete token IDs -> learned embeddings
                 assert action_vocab_size is not None, "Must provide action_vocab_size for tokenized action representation"
@@ -360,7 +363,7 @@ class ActionToVerbTransformer(nn.Module):
         # Action embeddings + temporal position + type
         if self.modality != "vision_only":
             action_len = trajectories.size(1)
-            if self.action_rep == "native":
+            if self.action_rep in ("native", "gampt_continuous"):
                 action_emb = self.action_proj(trajectories)
             else:
                 action_emb = self.action_embed(trajectories)
@@ -541,7 +544,7 @@ class CalvinVerbDataset(Dataset):
                  image_encoder="scratch", img_size=IMAGE_SIZE[0],
                  num_frames=2, delta_patches=0,
                  vqvae_chunk_size=4, vqvla_tokenizer=None, num_patches=64,
-                 scene_rep=False):
+                 scene_rep=False, action_rep="native"):
         """CALVIN dataset loader with modality ablation support.
         Args:
             modality: "full", "action_only", "vision_only", "scene_token", "scene_concat", "scene_film", etc.
@@ -560,6 +563,7 @@ class CalvinVerbDataset(Dataset):
         self.transform = transform
         self.max_seq_len = max_seq_len
         self.modality = modality
+        self.action_rep = action_rep
         self.action_tokenizer = action_tokenizer
         self.vqvla_tokenizer = vqvla_tokenizer
         self.vqvae_chunk_size = vqvae_chunk_size
@@ -662,19 +666,28 @@ class CalvinVerbDataset(Dataset):
             L = actions.shape[0]
 
             if self.action_tokenizer is not None:
-                token_ids = self.action_tokenizer(actions[np.newaxis])  # List[List[int]]
-                if isinstance(token_ids, list) and len(token_ids) > 0 and isinstance(token_ids[0], list):
-                    token_ids = token_ids[0]
-                token_ids = list(token_ids)
-
-                L_tok = len(token_ids)
-                if L_tok < self.max_seq_len:
-                    token_ids = token_ids + [0] * (self.max_seq_len - L_tok)
+                if self.action_rep == "gampt_continuous":
+                    # Ablation C: raw scaled 14-D primitive features, no quantization
+                    _, feats_scaled = self.action_tokenizer.get_primitive_features(actions)
+                    n_prims = min(len(feats_scaled), self.max_seq_len)
+                    padded = np.zeros((self.max_seq_len, 14), dtype=np.float32)
+                    padded[:n_prims] = feats_scaled[:n_prims]
+                    actions_tensor = torch.tensor(padded, dtype=torch.float32)
+                    action_real_len = n_prims
                 else:
-                    token_ids = token_ids[:self.max_seq_len]
+                    token_ids = self.action_tokenizer(actions[np.newaxis])  # List[List[int]]
+                    if isinstance(token_ids, list) and len(token_ids) > 0 and isinstance(token_ids[0], list):
+                        token_ids = token_ids[0]
+                    token_ids = list(token_ids)
 
-                actions_tensor = torch.tensor(token_ids, dtype=torch.long)
-                action_real_len = min(L_tok, self.max_seq_len)
+                    L_tok = len(token_ids)
+                    if L_tok < self.max_seq_len:
+                        token_ids = token_ids + [0] * (self.max_seq_len - L_tok)
+                    else:
+                        token_ids = token_ids[:self.max_seq_len]
+
+                    actions_tensor = torch.tensor(token_ids, dtype=torch.long)
+                    action_real_len = min(L_tok, self.max_seq_len)
             elif self.vqvla_tokenizer is not None:
                 # VQ-VLA tokenization: (T, 7) → (T//8)*4 int64 codes (~28 for T=61)
                 from tokenization.vqvae_tokenizer import tokenize_trajectory_vqvla
@@ -807,6 +820,16 @@ def main(args):
         )
         action_vocab_size = tok.vocab_size
         print(f"Loaded GAMPT tokenizer (k={args.gampt_k}, vocab_size={action_vocab_size})")
+    elif args.action_rep == "gampt_continuous":
+        # Ablation C: same tokenizer as gampt but used for primitive features, not token IDs
+        tok = load_action_tokenizer(
+            "gampt",
+            train_dir=args.data_dir,
+            gampt_ckpt=args.gampt_ckpt,
+            gampt_k=args.gampt_k,
+        )
+        action_vocab_size = None  # uses nn.Linear(14, d_model), not nn.Embedding
+        print(f"Loaded GAMPT tokenizer for continuous features (k={args.gampt_k})")
 
     # --- Load dataframes ---
     print(f"Loading training data from {args.data_dir}...")
@@ -851,7 +874,8 @@ def main(args):
                                 delta_patches=delta_patches,
                                 vqvae_chunk_size=vqvae_chunk_size,
                                 vqvla_tokenizer=vqvla_tok,
-                                scene_rep=use_scene_rep)
+                                scene_rep=use_scene_rep,
+                                action_rep=args.action_rep)
     dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True,
                             num_workers=args.num_workers)
 
@@ -865,7 +889,8 @@ def main(args):
                                     delta_patches=delta_patches,
                                     vqvae_chunk_size=vqvae_chunk_size,
                                     vqvla_tokenizer=vqvla_tok,
-                                    scene_rep=use_scene_rep)
+                                    scene_rep=use_scene_rep,
+                                    action_rep=args.action_rep)
     val_dataset.verb_to_id = dataset.verb_to_id
     val_dataset.id_to_verb = dataset.id_to_verb
     valid_mask = val_df['primary_verb'].isin(dataset.verb_to_id.keys())
@@ -1194,8 +1219,8 @@ if __name__ == "__main__":
                                  "scene_mlp"],
                         help="Which input modalities to use")
     parser.add_argument("--action_rep", type=str, default="native",
-                        choices=["native", "fast", "quest", "oat", "bin", "vq_vae", "vqvla", "gampt"],
-                        help="Action representation: native, FAST, QueST, OAT, BIN, VQ-VAE, VQ-VLA, or GAMPT")
+                        choices=["native", "fast", "quest", "oat", "bin", "vq_vae", "vqvla", "gampt", "gampt_continuous"],
+                        help="Action representation: native, FAST, QueST, OAT, BIN, VQ-VAE, VQ-VLA, GAMPT, or GAMPT continuous (Ablation C)")
     parser.add_argument("--quest_ckpt", type=str, default=QUEST_TOKENIZER_CKPT)
     parser.add_argument("--oat_ckpt", type=str, default=OAT_TOKENIZER_CKPT)
     parser.add_argument("--fast_tokenizer_path", type=str, default=FAST_TOKENIZER_PATH,
