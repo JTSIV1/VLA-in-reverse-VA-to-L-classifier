@@ -1024,6 +1024,7 @@ def main(args):
         val_class_correct = defaultdict(int)
         val_class_total = defaultdict(int)
         val_class_loss_sum = defaultdict(float)
+        val_pred_count = defaultdict(int)
 
         with torch.no_grad():
             for frames, actions, scene_vecs, labels, seq_lengths in tqdm(val_dataloader, desc="  Validating"):
@@ -1048,6 +1049,7 @@ def main(args):
                     val_class_total[lbl] += 1
                     val_class_correct[lbl] += int(pred == lbl)
                     val_class_loss_sum[lbl] += sl
+                    val_pred_count[pred] += 1
 
         val_avg = val_loss / len(val_dataloader)
         val_acc = 100 * val_correct / val_total if val_total > 0 else 0
@@ -1090,6 +1092,21 @@ def main(args):
                 "acc": 100 * val_class_correct.get(cid, 0) / vt if vt > 0 else 0,
                 "count": vt,
             }
+
+        # Macro F1 and active classes from per-class val stats
+        per_class_f1 = {}
+        for cid in val_class_total:
+            verb = id_to_verb.get(cid, str(cid))
+            tp = val_class_correct.get(cid, 0)
+            vt = val_class_total.get(cid, 0)
+            pc = val_pred_count.get(cid, 0)
+            recall = tp / vt if vt > 0 else 0.0
+            precision = tp / pc if pc > 0 else 0.0
+            f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+            per_class_f1[verb] = f1
+        val_macro_f1 = 100 * sum(per_class_f1.values()) / len(per_class_f1) if per_class_f1 else 0.0
+        val_active_classes = sum(1 for cid in val_class_total if val_class_correct.get(cid, 0) > 0)
+        print(f"    Val Macro F1: {val_macro_f1:.2f}% | Active Classes: {val_active_classes}/{num_verbs}")
 
         # Save best-val checkpoint
         if val_acc > best_val_acc and args.save_path:
@@ -1137,6 +1154,8 @@ def main(args):
             "train_acc": train_acc,
             "val_loss": val_avg,
             "val_acc": val_acc,
+            "val_macro_f1": val_macro_f1,
+            "val_active_classes": val_active_classes,
             "attn_fracs": attn_fracs,
             "per_class_train": per_class_train,
             "per_class_val": per_class_val,
