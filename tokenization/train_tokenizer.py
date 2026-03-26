@@ -506,6 +506,12 @@ def parse_args():
     parser.add_argument("--save_dir", type=str, default="./checkpoints")
     parser.add_argument("--resume", type=str, default=None,
                         help="Path to full.pth checkpoint to resume from")
+    
+    # Semantic Loss
+    parser.add_argument("--loss_function", type=str, default="ce", choices=["ce", "semantic"],
+                        help="Loss function to use for the verb head")
+    parser.add_argument("--semantic_temp", type=float, default=0.1,
+                        help="Temperature for the semantic similarity softmax")
 
     args = parser.parse_args()
 
@@ -645,6 +651,9 @@ def main():
         num_verbs=data['num_verbs'],
         verb_class_weights=data['verb_class_weights'],
         clip_config=clip_config,
+        loss_function=getattr(args, 'loss_function', 'ce'),
+        semantic_temp=getattr(args, 'semantic_temp', 0.1),
+        id_to_verb=getattr(train_ds, 'id_to_verb', None),
     )
     verb_head = heads['verb_head']
     verb_criterion = heads['verb_criterion']
