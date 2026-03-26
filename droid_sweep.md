@@ -198,63 +198,145 @@ Findings:
 
 ---
 
-## 6. Main Takeaways
+## 6. Hyperparameter Sweep (18 configs)
 
-1. DROID is substantially harder than CALVIN for both verb and CLIP auxiliary objectives.
-2. OAT is the strongest reconstruction model on DROID in this sweep, with near-complete codebook usage.
-3. Very small auxiliary weights (`λ=0.01` for verb, `λ=0.1` for CLIP) are the only safe regime; larger lambdas often hurt reconstruction sharply.
-4. OAT and QueST train stably for the full 100 epochs, while VQ-BeT tends to early-stop much earlier.
-5. Unlike CALVIN, DROID shows **no evidence of OAT codebook collapse** under the current setup.
+The DROID HP sweep is now complete. As in CALVIN, it varies codebook size, tokens per chunk,
+and horizon/downsampling to find the strongest reconstruction configuration per tokenizer.
+All runs were vanilla (`λ=0`, no aux heads).
+
+### Scripts & Checkpoints
+
+| Resource | Path |
+|----------|------|
+| Sweep submission | `scripts/submit_droid_hp_sweep.sh` |
+| Checkpoints | `checkpoints/droid_hp_sweep/` |
+
+### VQ-BeT Results
+
+Fixed: latent_dim=512, hidden_dim=128, num_mlp_layers=1
+
+| Config | chunk | n_embed | groups | tokens | combos | val_recon | CB util | stop |
+|--------|-------|---------|--------|--------|--------|-----------|---------|------|
+| c5/e16/g2 | 5 | 16 | 2 | 2 | 256 | 0.0314 | 84.4% (216/256) | ep 17 |
+| **c5/e16/g4** | **5** | **16** | **4** | **4** | **65K** | **0.0125** | **4.9% (3192/65K)** | **ep 35** |
+| c5/e64/g2 | 5 | 64 | 2 | 2 | 4096 | 0.0189 | 31.1% (1275/4096) | ep 33 |
+| c10/e16/g2 | 10 | 16 | 2 | 2 | 256 | 0.0400 | 82.8% (212/256) | ep 22 |
+| c10/e16/g4 | 10 | 16 | 4 | 4 | 65K | 0.0185 | 4.3% (2810/65K) | ep 22 |
+| c10/e64/g2 | 10 | 64 | 2 | 2 | 4096 | 0.0248 | 29.2% (1196/4096) | ep 21 |
+
+Findings:
+- VQ-BeT improves dramatically with more groups. The `g=4` configs are clearly better than `g=2` despite using only 4-5% of the 65K possible tuples.
+- `chunk=5` still beats `chunk=10`, matching CALVIN.
+- Increasing `n_embed` from 16 to 64 helps relative to `c5/e16/g2`, but not as much as doubling the number of groups.
+- Best: **c5/e16/g4** (0.0125), cutting recon by about 61% relative to the base-sweep vanilla VQ-BeT (0.0320).
+
+### OAT Results
+
+Fixed: emb_dim=256, enc_depth=2, dec_depth=4, head_dim=64
+
+| Config | horizon | FSQ levels | codebook | regs | tokens | val_recon | CB util | stop |
+|--------|---------|-----------|----------|------|--------|-----------|---------|------|
+| h32/f1000/r8 | 32 | [8,5,5,5] | 1000 | 8 | 8 | 0.0063 | 99.0% (990/1000) | ep 100 |
+| h32/f256/r8 | 32 | [4,4,4,4] | 256 | 8 | 8 | 0.0082 | 100.0% (256/256) | ep 100 |
+| h32/f256/r4 | 32 | [4,4,4,4] | 256 | 4 | 4 | 0.0144 | 100.0% (256/256) | ep 100 |
+| h32/f64/r4 | 32 | [4,4,4] | 64 | 4 | 4 | 0.0259 | 100.0% (64/64) | ep 100 |
+| h16/f256/r4 | 16 | [4,4,4,4] | 256 | 4 | 4 | 0.0102 | 100.0% (256/256) | ep 100 |
+| **h16/f256/r8** | **16** | **[4,4,4,4]** | **256** | **8** | **8** | **0.0047** | **100.0% (256/256)** | **ep 100** |
+
+Findings:
+- OAT is the strongest DROID tokenizer in the HP sweep by a large margin.
+- Unlike CALVIN, shorter horizon helps: `h16/f256/r8` beats every horizon-32 variant.
+- More registers still help: `r8` beats `r4` at both horizons.
+- OAT saturates its codebook on DROID almost regardless of configuration. There is no collapse here.
+- Best: **h16/f256/r8** (0.0047), a further improvement over the base-sweep vanilla OAT (0.0070).
+
+### QueST Results
+
+Fixed: encoder_dim=256, decoder_dim=256, enc_layers=2, dec_layers=4
+
+| Config | horizon | FSQ levels | codebook | ds | tokens | val_recon | CB util | stop |
+|--------|---------|-----------|----------|----|--------|-----------|---------|------|
+| **h32/f1000/d4** | **32** | **[8,5,5,5]** | **1000** | **4** | **8** | **0.0157** | **97.2% (972/1000)** | **ep 100** |
+| h32/f256/d4 | 32 | [4,4,4,4] | 256 | 4 | 8 | 0.0224 | 100.0% (256/256) | ep 100 |
+| h32/f256/d8 | 32 | [4,4,4,4] | 256 | 8 | 4 | 0.0380 | 94.1% (241/256) | ep 100 |
+| h32/f64/d4 | 32 | [4,4,4] | 64 | 4 | 8 | 0.4078 | 3.1% (2/64) | ep 60 |
+| h16/f256/d4 | 16 | [4,4,4,4] | 256 | 4 | 4 | 0.0224 | 89.8% (230/256) | ep 100 |
+| h16/f256/d2 | 16 | [4,4,4,4] | 256 | 2 | 8 | 0.0165 | 100.0% (256/256) | ep 100 |
+
+Findings:
+- QueST remains strong on DROID, but the winner changes relative to CALVIN.
+- On DROID, the larger 1000-codebook `h32/f1000/d4` edges out `h16/f256/d2`.
+- `ds=8` is clearly too aggressive here.
+- The small-codebook `h32/f64/d4` is the only genuine failure mode in the sweep: severe collapse to 2/64 codes and catastrophic recon.
+- Best: **h32/f1000/d4** (0.0157).
+
+### Cross-Tokenizer Comparison
+
+Best config per tokenizer:
+
+| Tokenizer | Best Config | Val Recon | Tokens | Codebook |
+|-----------|------------|-----------|--------|----------|
+| VQ-BeT | c5/e16/g4 | 0.0125 | 4 | 16 (x4 groups) |
+| **OAT** | **h16/f256/r8** | **0.0047** | **8** | **256** |
+| QueST | h32/f1000/d4 | 0.0157 | 8 | 1000 |
+
+Relative to the base sweep, the ranking does not change: **OAT is still best on DROID**.
+What changes is the gap. The HP sweep strengthens OAT further, improves VQ-BeT substantially,
+and gives QueST a modest but real gain.
+
+The strongest follow-up configs for aux retraining and downstream policy work are therefore:
+- VQ-BeT: `c5/e16/g4`
+- OAT: `h16/f256/r8`
+- QueST: `h32/f1000/d4`
 
 ---
 
-## 7. What Has Not Been Run Yet
+## 7. Main Takeaways
 
-### Hyperparameter Sweep
+1. The DROID HP sweep confirms that OAT is the best reconstruction tokenizer in this repo on DROID, reaching 0.0047 val recon.
+2. DROID favors different inductive biases than CALVIN: OAT prefers shorter horizon (`h16`), while QueST prefers the larger 1000-codebook `h32/f1000/d4` configuration.
+3. VQ-BeT benefits most from increasing quantizer groups, not from increasing chunk length or codebook size alone.
+4. OAT is extremely healthy on DROID from a codebook-usage perspective, saturating its codebook across nearly all tested settings.
+5. QueST is generally robust on DROID, but the `64`-codebook setting is too small and collapses badly.
 
-No DROID analogue of the CALVIN HP sweep has been run yet.
+---
 
-The launch code now exists:
-- `scripts/submit_droid_hp_sweep.sh`
-- `scripts/submit_droid_hp_aux.sh`
-
-That means the report does **not** contain per-tokenizer tables over varying architectural
-configs such as:
-- VQ-BeT chunk size / codebook size / quantizer groups
-- OAT FSQ levels / number of registers / horizon
-- QueST FSQ levels / downsample factor / horizon
-
-All DROID results here use the same default base configs that were used in the first sweep.
+## 8. What Has Not Been Run Yet
 
 ### Retraining HP Winners with Aux Heads
 
 The CALVIN report includes a second stage where the chosen HP winners are retrained with
 `verb=0.1` and `clip=0.1`-style auxiliary losses and summarized again per tokenizer.
 
-That has **not** been done for DROID, because there is currently no completed DROID HP sweep
-from which to select winners.
+That has **not** been completed for DROID yet, but the HP sweep is now done and the natural
+winner set is clear:
+- VQ-BeT `c5/e16/g4`
+- OAT `h16/f256/r8`
+- QueST `h32/f1000/d4`
 
-The retraining launcher now exists at `scripts/submit_droid_hp_aux.sh`.
+The retraining launcher exists at `scripts/submit_droid_hp_aux.sh`, but its default winner
+variables should be updated so they match the completed sweep before submitting the follow-up jobs.
 
 ### MiniVLA / OpenVLA Policy Training
 
-No downstream DROID MiniVLA or OpenVLA policy training has been run yet.
+No downstream DROID MiniVLA or OpenVLA policy training has been completed yet.
 
-The build / launch code now exists at:
+The build / launch code exists at:
 - `policy/scripts/build_droid_tfds.sh`
 - `scripts/submit_droid_policy.sh`
 - `scripts/submit_droid_hp_policy.sh`
 - `scripts/submit_droid_scratch.sh`
 
 Evidence:
-- No DROID policy run directories were found under `runs/`
-- No DROID-specific policy checkpoints or report sections exist analogous to the CALVIN policy stage
+- No completed DROID policy run directories were found under `runs/`
+- No DROID policy metrics or checkpoints have been added to this report yet
 
-So this report currently stops at tokenizer-level reconstruction / verb / CLIP metrics.
+So this report now covers both the base tokenizer sweep and the HP sweep, but it still stops
+before aux-winner retraining and downstream policy evaluation.
 
 ---
 
-## 8. Caveats
+## 9. Caveats
 
 - `vq_bet_vanilla/metrics.csv` was empty; its metrics were recovered from the corresponding stdout log.
 - The DROID metadata used by this sweep is the cached filtered file `data/droid_tokenizer_metadata.csv`, not the full raw 75K-episode annotation set.
