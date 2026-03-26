@@ -42,7 +42,8 @@ from config import (
     TOKENIZER_DOWNSAMPLE_FACTOR,
     OAT_NUM_REGISTERS,
     ACTION_DIM,
-    BINNING_VOCAB_SIZE
+    BINNING_VOCAB_SIZE,
+    CHECKPOINT_DIR,
 )
 
 # All oat tokenizer imports are lazy to avoid hard dependencies at module load time
