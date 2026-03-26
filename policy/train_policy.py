@@ -142,7 +142,7 @@ OPENVLA_DEFAULTS = dict(
 
 def build_openvla_command(args):
     """Build torchrun command for OpenVLA-7B LoRA fine-tuning."""
-    run_dir = os.path.join(PROJECT_DIR, "runs", "openvla")
+    run_dir = os.path.join(PROJECT_DIR, "checkpoints", "calvin_sweep", "policy", "openvla")
     adapter_dir = os.path.join(PROJECT_DIR, "runs", "openvla_adapter_tmp")
     run_note = f"calvin_{args.tokenizer}"
     if args.dataset != "calvin_dataset":
@@ -195,7 +195,7 @@ def build_minivla_command(args):
               f"using bin base config with tokenizer override.")
         vla_type = MINIVLA_CONFIGS["bin"]
 
-    run_dir = os.path.join(PROJECT_DIR, "runs", "minivla")
+    run_dir = os.path.join(PROJECT_DIR, "checkpoints", "calvin_sweep", "policy", "minivla")
     run_note = f"calvin_d_{args.tokenizer}"
     if args.dataset != "calvin_dataset":
         run_note = f"abcd_{args.tokenizer}"

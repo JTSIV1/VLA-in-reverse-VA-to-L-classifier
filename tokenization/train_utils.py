@@ -51,10 +51,10 @@ def resume_checkpoint(args, model, optimizer, verb_head, clip_head, text_proj, d
 def setup_output_dir(args):
     """Create output directory and return (save_dir, run_name)."""
     run_name = args.tokenizer
-    if args.aux_head != 'none':
-        run_name += f"_{args.aux_head}{args.aux_lambda}"
     if args.tag:
         run_name += f"_{args.tag}"
+    if args.aux_head != 'none':
+        run_name += f"_{args.aux_head}{args.aux_lambda}"
     save_dir = os.path.join(args.save_dir, run_name)
     os.makedirs(save_dir, exist_ok=True)
     return save_dir, run_name
@@ -67,6 +67,7 @@ CSV_HEADER = [
     "val_recon", "val_vq",
     "val_verb", "val_verb_acc", "val_verb_macro_f1",
     "val_clip", "val_r1", "val_r5", "val_r10",
+    "val_codebook_util",
     "lr", "time",
 ]
 
@@ -108,6 +109,7 @@ def log_epoch(epoch, n_epochs, dt, train_m, val_m, aux_head, retrieval=None):
 
 def write_csv_row(csv_writer, csv_file, epoch, train_m, val_m, retrieval, lr, dt):
     """Append one row to the metrics CSV."""
+    cb_util = val_m.get('codebook_util')
     csv_writer.writerow([
         epoch + 1,
         f"{train_m['recon']:.6f}", f"{train_m['vq']:.6f}",
@@ -121,6 +123,7 @@ def write_csv_row(csv_writer, csv_file, epoch, train_m, val_m, retrieval, lr, dt
         f"{retrieval.get('r@1', 0.0):.2f}",
         f"{retrieval.get('r@5', 0.0):.2f}",
         f"{retrieval.get('r@10', 0.0):.2f}",
+        cb_util if cb_util is not None else "",
         f"{lr:.8f}", f"{dt:.1f}",
     ])
     csv_file.flush()

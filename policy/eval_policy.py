@@ -1,410 +1,264 @@
 #!/usr/bin/env python3
-"""Unified VLA policy evaluation launcher.
+"""Evaluate a trained MiniVLA policy from the CALVIN sweep.
 
-Submits SLURM jobs for evaluating fine-tuned OpenVLA / MiniVLA models on CALVIN.
+This is the evaluation entry point — it loads a model and runs evaluation
+directly (not a SLURM launcher). run_sweep.sh wraps this in sbatch.
 
-Supports two model families:
-    openvla   — OpenVLA 7B + LoRA (old, runs/openvla/)
-    scratch   — MiniVLA from scratch (Qwen2.5-0.5B, runs/calvind_scratch/)
-
-Evaluation modes:
-    nll       — Teacher-forcing NLL + action accuracy (GPU)
-    real_l1   — Decoded pred tokens vs raw GT continuous actions (GPU)
-    verb      — Verb decodability probe via tokenizer round-trip (GPU)
-    rollout   — CALVIN rollout evaluation, 1000 sequences (GPU, ~18h)
-    attention — Attention analysis: action→verb token attention (GPU, ~6h)
+Modes:
+    dummy   — Load model, generate one action from a random image. Quick sanity check.
+    rollout — Full CALVIN rollout evaluation (1000 sequences, SR1–SR5).
 
 Usage:
-    # Scratch MiniVLA: NLL for bin baseline
-    python policy/eval_policy.py --family scratch --mode nll --condition bin_baseline
+    # Quick load test
+    python policy/eval_policy.py --condition vq_bet_5_16_4 --mode dummy
 
-    # Scratch MiniVLA: real_l1 for a VQ-BeT condition
-    python policy/eval_policy.py --family scratch --mode real_l1 --condition vb_c5e16g4
+    # Full rollout
+    python policy/eval_policy.py --condition bin --mode rollout
 
-    # Scratch MiniVLA: all conditions
-    python policy/eval_policy.py --family scratch --mode nll --condition all
-
-    # Old OpenVLA: rollout for bin
-    python policy/eval_policy.py --family openvla --mode rollout --condition bin
-
-    # Dry run
-    python policy/eval_policy.py --family scratch --mode nll --condition bin_baseline --dry_run
+    # Explicit policy dir
+    python policy/eval_policy.py --policy_dir checkpoints/calvin_sweep/policy/minivla_vq_bet_5_16_4 --mode dummy
 """
 
 import argparse
+import json
 import os
-import subprocess
 import sys
-import tempfile
+from pathlib import Path
 
-# ── Paths ────────────────────────────────────────────────────────────────────
+import numpy as np
+import torch
+from PIL import Image
 
-PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-OPENVLA_DIR = "/data/user_data/wenjiel2/Code/openvla-mini"
-CALVIN_DIR = "/data/user_data/wenjiel2/Code/calvin"
-DATA_DIR = "/data/user_data/wenjiel2/datasets/calvin_rlds"
+# ── Path setup ──────────────────────────────────────────────────────────────
+PROJECT_DIR = Path(__file__).resolve().parents[1]
+OPENVLA_DIR = Path("/data/user_data/wenjiel2/Code/openvla-mini")
+CALVIN_DIR = Path("/data/user_data/wenjiel2/Code/calvin")
+SWEEP_DIR = PROJECT_DIR / "checkpoints" / "calvin_sweep"
+TOK_DIR = SWEEP_DIR / "tokenizers"
+POLICY_DIR = SWEEP_DIR / "policy"
 DATASET_PATH = "/data/user_data/yashagar/task_D_D"
-CKPT_SWEEP_BASE = os.path.join(PROJECT_DIR, "checkpoints", "calvind_hp_sweep")
 
-VERB_CLF_CKPT = os.path.join(PROJECT_DIR, "checkpoints",
-                              "ao_native_sparse_weighted_j6457852_best.pth")
-
-# ── Old OpenVLA (7B + LoRA) conditions ──────────────────────────────────────
-
-VQVLA_TOKENIZER_CKPTS = {
-    "vqvla_vanilla": os.path.join(PROJECT_DIR, "checkpoints", "vqvla_ft_vanilla"),
-    "vqvla_verb":    os.path.join(PROJECT_DIR, "checkpoints", "vqvla_ft_verb_l0.5"),
-    "vqvla_verb01":  os.path.join(PROJECT_DIR, "checkpoints", "vqvla_ft_verb_l0.1"),
-}
-
-OPENVLA_CONDITIONS = ["bin", "vqvla_vanilla", "vqvla_verb", "vqvla_verb01"]
-OPENVLA_RUN_TAGS = {
-    "bin":            "calvin_bin",
-    "vqvla_vanilla":  "calvin_vq_vanilla",
-    "vqvla_verb":     "calvin_vq_verb",
-    "vqvla_verb01":   "calvin_vq_verb01",
-}
-OPENVLA_CKPT_TEMPLATE = (
-    "openvla-7b+{dataset}+b16+lr-0.0005+lora-r32+dropout-0.0"
-    "--{run_tag}--image_aug"
-)
-
-# ── New MiniVLA from-scratch conditions ─────────────────────────────────────
-
-# Maps condition tag → (sweep_tokenizer_type, sweep_checkpoint_path)
-# None values mean bin tokenizer (no sweep checkpoint needed)
-SCRATCH_CONDITIONS = {
-    "bin_baseline":         (None, None),
-    "vb_c5e16g4":           ("vq_bet", os.path.join(CKPT_SWEEP_BASE, "vq_bet_c5_e16_g4", "full.pth")),
-    "vb_c5e64g2":           ("vq_bet", os.path.join(CKPT_SWEEP_BASE, "vq_bet_c5_e64_g2", "full.pth")),
-    "vb_c10e16g4":          ("vq_bet", os.path.join(CKPT_SWEEP_BASE, "vq_bet_c10_e16_g4", "full.pth")),
-    "vb_c5e16g4_verb01":    ("vq_bet", os.path.join(CKPT_SWEEP_BASE, "vq_bet_verb0.1_c5e16g4_verb01", "full.pth")),
-    "vb_c5e16g4_clip01":    ("vq_bet", os.path.join(CKPT_SWEEP_BASE, "vq_bet_clip0.1_c5e16g4_clip01", "full.pth")),
-    "quest_h16f256d2":      ("quest",  os.path.join(CKPT_SWEEP_BASE, "quest_h16_f256_d2", "full.pth")),
-    "quest_h32f1000d4":     ("quest",  os.path.join(CKPT_SWEEP_BASE, "quest_h32_f1000_d4", "full.pth")),
-    "quest_h16f256d4":      ("quest",  os.path.join(CKPT_SWEEP_BASE, "quest_h16_f256_d4", "full.pth")),
-    "quest_h16d2_verb01":   ("quest",  os.path.join(CKPT_SWEEP_BASE, "quest_verb0.1_h16d2_verb01", "full.pth")),
-    "quest_h16d2_clip01":   ("quest",  os.path.join(CKPT_SWEEP_BASE, "quest_clip0.1_h16d2_clip01", "full.pth")),
-}
-
-# MiniVLA checkpoint dir pattern: runs/calvind_scratch/<config_prefix>--<tag>--image_aug
-SCRATCH_CKPT_PREFIX = "prism-qwen25-dinosiglip-224px+0_5b+mx-calvin-d-bin+n0+b16+x7"
+for p in [str(PROJECT_DIR), str(OPENVLA_DIR)]:
+    if p not in sys.path:
+        sys.path.insert(0, p)
 
 
-def get_scratch_ckpt_dir(condition):
-    """Find the MiniVLA checkpoint dir for a scratch condition."""
-    run_dir = os.path.join(PROJECT_DIR, "runs", "calvind_scratch")
-    expected = f"{SCRATCH_CKPT_PREFIX}--{condition}--image_aug"
-    candidate = os.path.join(run_dir, expected)
-    if os.path.isdir(candidate):
-        return candidate
-    # Try batch_size variants (b8, b32)
-    import glob
-    pattern = os.path.join(run_dir, f"*--{condition}--image_aug")
-    matches = glob.glob(pattern)
-    if matches:
-        return sorted(matches)[-1]  # most recent
-    return candidate  # return expected path even if missing (for dry_run)
+# ── Helpers ─────────────────────────────────────────────────────────────────
 
-
-def find_best_checkpoint(run_dir):
-    """Find the FSDP .pt checkpoint with lowest loss in a run directory."""
-    import glob
-    import re
-    pattern = os.path.join(run_dir, "checkpoints", "*.pt")
-    files = glob.glob(pattern)
-    if not files:
+def find_last_checkpoint(run_dir):
+    """Return the last .pt checkpoint (by filename sort) in run_dir/checkpoints/."""
+    ckpt_dir = Path(run_dir) / "checkpoints"
+    if not ckpt_dir.exists():
         return None
-    best_file, best_loss = None, float("inf")
-    for f in files:
-        m = re.search(r'loss=(\d+\.\d+)', f)
-        if m:
-            loss = float(m.group(1))
-            if loss < best_loss:
-                best_loss = loss
-                best_file = f
-    return best_file
+    candidates = sorted(ckpt_dir.glob("*.pt"))
+    return str(candidates[-1]) if candidates else None
 
 
-def get_openvla_ckpt_dir(condition, dataset):
-    """Derive the OpenVLA checkpoint directory."""
-    tag = OPENVLA_RUN_TAGS[condition]
-    if dataset == "calvin_abcd_dataset":
-        tag = tag.replace("calvin_", "calvin_abcd_")
-    suffix = OPENVLA_CKPT_TEMPLATE.format(dataset=dataset, run_tag=tag)
-    return os.path.join(PROJECT_DIR, "runs", "openvla", suffix)
+def resolve_policy_dir(condition):
+    """Resolve a condition tag to the policy directory path."""
+    policy_dir = POLICY_DIR / f"minivla_{condition}"
+    if not policy_dir.exists():
+        raise FileNotFoundError(f"Policy directory not found: {policy_dir}")
+    return str(policy_dir)
 
 
-# ── SLURM configs per mode ───────────────────────────────────────────────────
+# ── Model loading ───────────────────────────────────────────────────────────
 
-SLURM_CONFIGS = {
-    "nll":       {"gres": "gpu:1", "mem": "48G", "time": "4:00:00",  "cpus": 4},
-    "real_l1":   {"gres": "gpu:1", "mem": "48G", "time": "4:00:00",  "cpus": 4},
-    "verb":      {"gres": "gpu:1", "mem": "32G", "time": "2:00:00",  "cpus": 4},
-    "rollout":   {"gres": "gpu:1", "mem": "64G", "time": "24:00:00", "cpus": 8},
-    "attention": {"gres": "gpu:1", "mem": "64G", "time": "8:00:00",  "cpus": 4},
-}
+def load_model(run_dir, device="cuda"):
+    """Load a MiniVLA from an FSDP checkpoint.
+
+    Returns (vla, action_tokenizer, is_chunk_tokenizer, n_action_tokens, chunk_size).
+    """
+    run_dir = Path(run_dir)
+    fsdp_ckpt = find_last_checkpoint(run_dir)
+    if not fsdp_ckpt:
+        raise FileNotFoundError(f"No .pt checkpoint in {run_dir}/checkpoints/")
+
+    print(f"Loading VLA from {fsdp_ckpt} ...")
+    from prismatic.models import load_vla
+
+    vla = load_vla(fsdp_ckpt, load_for_training=False)
+    vla = vla.to(device).eval()
+
+    action_tokenizer = vla.action_tokenizer
+
+    # Detect if this is a chunk tokenizer (sweep) or per-step (bin)
+    is_chunk = hasattr(action_tokenizer, "chunk_size")
+    n_action_tokens = getattr(action_tokenizer, "n_codes_per_chunk", 7)
+    chunk_size = getattr(action_tokenizer, "chunk_size", 1)
+
+    print(f"  Action tokenizer: {type(action_tokenizer).__name__}")
+    print(f"  Chunk tokenizer: {is_chunk}, tokens_per_step={n_action_tokens}, chunk_size={chunk_size}")
+    print("Model ready.")
+
+    return vla, action_tokenizer, is_chunk, n_action_tokens, chunk_size
 
 
-# ── Command builders ─────────────────────────────────────────────────────────
+# ── Dummy eval ──────────────────────────────────────────────────────────────
 
-def build_scratch_eval_command(mode, condition, args):
-    """Build eval command for MiniVLA from-scratch conditions."""
-    ckpt_dir = get_scratch_ckpt_dir(condition)
-    sweep_type, sweep_ckpt = SCRATCH_CONDITIONS[condition]
-    out_dir = f"results/scratch/{condition}"
+def dummy_eval(vla, action_tokenizer, is_chunk, n_action_tokens, device="cuda"):
+    """Generate one action from a random image to verify the model loads correctly."""
+    print("\n=== Dummy Eval ===")
 
-    sweep_args = ""
-    if sweep_type and sweep_ckpt:
-        sweep_args = f"--sweep_tokenizer_type {sweep_type} --sweep_checkpoint_path {sweep_ckpt}"
+    dummy_rgb = np.random.randint(0, 255, (200, 200, 3), dtype=np.uint8)
+    image = Image.fromarray(dummy_rgb).convert("RGB")
+    instruction = "pick up the red block"
 
-    cond_label = "bin" if condition == "bin_baseline" else condition
+    print(f"  Instruction: {instruction}")
+    print(f"  Image: 200x200 random RGB")
 
-    if mode == "nll":
-        return (
-            f"python -m policy.scripts.evaluate_openvla "
-            f"--condition {cond_label} --eval_nll "
-            f"--checkpoint_dir {ckpt_dir} "
-            f"--data_root_dir {DATA_DIR} "
-            f"--max_nll_batches {args.max_nll_batches} "
-            f"--output_dir {out_dir} "
-            f"{sweep_args}"
+    if not is_chunk:
+        # Bin tokenizer: use predict_action directly
+        with torch.no_grad():
+            action = vla.predict_action(
+                image, instruction,
+                unnorm_key="calvin_dataset",
+                do_sample=False,
+            )
+        print(f"  Action shape: {action.shape}")
+        print(f"  Action: {action}")
+    else:
+        # Chunk tokenizer: generate n_action_tokens, decode to chunk
+        from transformers import GenerationMixin
+
+        tokenizer = vla.llm_backbone.tokenizer
+        image_transform = vla.vision_backbone.get_image_transform()
+
+        prompt_builder = vla.get_prompt_builder()
+        prompt_builder.add_turn(
+            role="human",
+            message="What action should the robot take to {}?".format(instruction),
         )
-    elif mode == "real_l1":
-        best_ckpt = find_best_checkpoint(ckpt_dir)
-        fsdp_arg = f"--fsdp_checkpoint {best_ckpt}" if best_ckpt else ""
-        return (
-            f"python -m policy.scripts.evaluate_openvla "
-            f"--condition {cond_label} --eval_real_l1 "
-            f"--checkpoint_dir {ckpt_dir} "
-            f"--data_root_dir {DATA_DIR} "
-            f"--max_nll_batches {args.max_nll_batches} "
-            f"--output_dir {out_dir} "
-            f"{sweep_args} {fsdp_arg}"
-        )
-    elif mode == "rollout":
-        best_ckpt = find_best_checkpoint(ckpt_dir)
-        fsdp_arg = f"--fsdp_checkpoint {best_ckpt}" if best_ckpt else ""
-        return (
-            f"python -u -m policy.scripts.evaluate_openvla_rollout "
-            f"--condition {cond_label} "
-            f"--checkpoint_dir {ckpt_dir} "
-            f"--dataset_path {DATASET_PATH} "
-            f"--output_dir results/rollout_scratch "
-            f"--num_sequences {args.num_sequences} "
-            f"{sweep_args} {fsdp_arg}"
-        )
-    elif mode == "verb":
-        return (
-            f"python -m policy.scripts.evaluate_openvla "
-            f"--condition {cond_label} --eval_verb_probe "
-            f"--verb_classifier_ckpt {VERB_CLF_CKPT} "
-            f"--min_class_count 30 "
-            f"--output_dir {out_dir} "
-            f"{sweep_args}"
-        )
-    elif mode == "attention":
-        return (
-            f"python -u -m policy.scripts.analyze_attention "
-            f"--condition {cond_label} "
-            f"--checkpoint_dir {ckpt_dir} "
-            f"--output_dir results/attention_scratch "
-            f"--max_examples {args.max_examples} "
-            f"{sweep_args}"
-        )
+        prompt_text = prompt_builder.get_prompt()
+
+        input_ids = tokenizer(
+            prompt_text, truncation=True, return_tensors="pt"
+        ).input_ids.to(device)
+
+        pixel_values = image_transform(image)
+        if isinstance(pixel_values, torch.Tensor):
+            pixel_values = pixel_values[None, ...].to(device)
+        elif isinstance(pixel_values, dict):
+            pixel_values = {k: v[None, ...].to(device) for k, v in pixel_values.items()}
+
+        autocast_dtype = vla.llm_backbone.half_precision_dtype
+        with torch.no_grad(), torch.autocast(
+            "cuda", dtype=autocast_dtype, enabled=vla.enable_mixed_precision_training
+        ):
+            generated = GenerationMixin.generate(
+                vla,
+                input_ids=input_ids,
+                pixel_values=pixel_values,
+                max_new_tokens=n_action_tokens,
+                do_sample=False,
+            )
+
+        code_token_ids = generated[0, -n_action_tokens:].cpu().numpy()
+        print(f"  Generated token IDs: {code_token_ids}")
+
+        actions = action_tokenizer.decode_full_chunk(code_token_ids)
+        if isinstance(actions, torch.Tensor):
+            actions = actions.cpu().numpy()
+        actions = np.atleast_2d(actions).astype(np.float32)
+
+        print(f"  Decoded chunk shape: {actions.shape}")
+        print(f"  First action: {actions[0]}")
+
+    print("\n  SUCCESS — model loaded and produced actions.")
 
 
-def build_openvla_eval_command(mode, condition, dataset, args):
-    """Build eval command for old OpenVLA 7B + LoRA conditions."""
-    ckpt_dir = get_openvla_ckpt_dir(condition, dataset)
-    cond = condition.replace("vqvla_", "vq_")
+# ── Rollout eval ────────────────────────────────────────────────────────────
 
-    extra = ""
-    if condition in VQVLA_TOKENIZER_CKPTS:
-        extra = f"--vqvla_checkpoint_dir {VQVLA_TOKENIZER_CKPTS[condition]}"
+def rollout_eval(run_dir, condition, num_sequences, output_dir, device="cuda"):
+    """Run full CALVIN rollout evaluation."""
+    fsdp_ckpt = find_last_checkpoint(run_dir)
+    if not fsdp_ckpt:
+        raise FileNotFoundError(f"No .pt checkpoint in {run_dir}/checkpoints/")
 
-    if mode == "nll":
-        return (
-            f"python -m policy.scripts.evaluate_openvla "
-            f"--condition {cond} --eval_nll "
-            f"--checkpoint_dir {ckpt_dir} "
-            f"--data_root_dir {DATA_DIR} "
-            f"--max_nll_batches {args.max_nll_batches} "
-            f"--output_dir results/stage3/{cond} "
-            f"{extra}"
-        )
-    elif mode == "real_l1":
-        return (
-            f"python -m policy.scripts.evaluate_openvla "
-            f"--condition {cond} --eval_real_l1 "
-            f"--checkpoint_dir {ckpt_dir} "
-            f"--data_root_dir {DATA_DIR} "
-            f"--max_nll_batches {args.max_nll_batches} "
-            f"--output_dir results/stage3/{cond} "
-            f"{extra}"
-        )
-    elif mode == "verb":
-        return (
-            f"python -m policy.scripts.evaluate_openvla "
-            f"--condition {cond} --eval_verb_probe "
-            f"--verb_classifier_ckpt {VERB_CLF_CKPT} "
-            f"--min_class_count 30 "
-            f"--output_dir results/stage3/{cond} "
-            f"{extra}"
-        )
-    elif mode == "rollout":
-        out_dir = "results/rollout"
-        if dataset == "calvin_abcd_dataset":
-            out_dir = "results/rollout_abcd"
-        return (
-            f"python -u -m policy.scripts.evaluate_openvla_rollout "
-            f"--condition {cond} "
-            f"--checkpoint_dir {ckpt_dir} "
-            f"--dataset_path {DATASET_PATH} "
-            f"--output_dir {out_dir} "
-            f"--num_sequences {args.num_sequences} "
-            f"{extra}"
-        )
-    elif mode == "attention":
-        return (
-            f"python -u -m policy.scripts.analyze_attention "
-            f"--condition {cond} "
-            f"--checkpoint_dir {ckpt_dir} "
-            f"--output_dir results/attention_analysis "
-            f"--max_examples {args.max_examples} "
-            f"{extra}"
-        )
+    # Read tokenizer info from config.json
+    config_json = Path(run_dir) / "config.json"
+    with open(config_json) as f:
+        config = json.load(f)
+    action_tok = config.get("vla", {}).get("action_tokenizer", "")
+
+    sweep_type, sweep_path = "", ""
+    if action_tok.startswith("sweep:"):
+        _, sweep_type, sweep_path = action_tok.split(":", 2)
+
+    # Delegate to the existing rollout eval
+    from policy.scripts.evaluate_openvla_rollout import run_rollout_eval
+
+    return run_rollout_eval(
+        condition=condition,
+        checkpoint_dir=str(run_dir),
+        vqvla_checkpoint_dir="",
+        dataset_path=DATASET_PATH,
+        output_dir=output_dir,
+        num_sequences=num_sequences,
+        ep_len=360,
+        device=device,
+        sweep_tokenizer_type=sweep_type,
+        sweep_checkpoint_path=sweep_path,
+        fsdp_checkpoint=fsdp_ckpt,
+    )
 
 
-# ── SLURM submission ──────────────────────────────────────────────────────────
-
-def build_sbatch_script(mode, condition, eval_cmd, args):
-    """Generate sbatch script."""
-    slurm = SLURM_CONFIGS[mode]
-    job_name = f"{mode}_{condition}"
-
-    log_dir = os.path.join(PROJECT_DIR, "logs")
-
-    pythonpath = f"{PROJECT_DIR}:{OPENVLA_DIR}"
-    conda_env = "mmml"
-    if mode == "rollout":
-        pythonpath += f":{CALVIN_DIR}/calvin_models:{CALVIN_DIR}/calvin_env"
-
-    lines = [
-        "#!/bin/bash",
-        f"#SBATCH --job-name={job_name}",
-        f"#SBATCH --partition={args.partition or 'general'}",
-        f"#SBATCH --gres={args.gres or slurm['gres']}",
-        f"#SBATCH --cpus-per-task={slurm['cpus']}",
-        f"#SBATCH --mem={slurm['mem']}",
-        f"#SBATCH --time={args.time or slurm['time']}",
-        f"#SBATCH -o {log_dir}/{job_name}_%j.out",
-        f"#SBATCH -e {log_dir}/{job_name}_%j.err",
-        "",
-        'source $(conda info --base)/etc/profile.d/conda.sh',
-        f"conda activate {conda_env}",
-        "",
-        f'export PYTHONPATH="{pythonpath}:${{PYTHONPATH}}"',
-        f'export PRISMATIC_DATA_ROOT="{DATA_DIR}"',
-        "export DISPLAY=''",
-        "",
-        f'pip install -e "{OPENVLA_DIR}" --quiet 2>/dev/null || true',
-        "",
-        f'cd "{PROJECT_DIR}"',
-        "",
-        eval_cmd,
-    ]
-    return "\n".join(lines) + "\n"
-
-
-def submit_script(script_content, dry_run=False):
-    """Submit or print a sbatch script."""
-    if dry_run:
-        print(script_content)
-        print("---")
-        return
-
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".sh", delete=False) as f:
-        f.write(script_content)
-        tmp = f.name
-    try:
-        result = subprocess.run(["sbatch", tmp], capture_output=True, text=True)
-        print(f"  {result.stdout.strip()}")
-        if result.returncode != 0:
-            print(f"  Error: {result.stderr.strip()}", file=sys.stderr)
-    finally:
-        os.unlink(tmp)
-
-
-# ── Main ──────────────────────────────────────────────────────────────────────
+# ── CLI ─────────────────────────────────────────────────────────────────────
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Unified VLA policy evaluation launcher",
+        description="Evaluate a MiniVLA policy from the CALVIN sweep",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
-    parser.add_argument("--family", required=True,
-                        choices=["openvla", "scratch"],
-                        help="Model family: openvla (7B+LoRA) or scratch (MiniVLA)")
-    parser.add_argument("--mode", required=True,
-                        choices=["nll", "real_l1", "verb", "rollout", "attention"],
-                        help="Evaluation mode")
-    parser.add_argument("--condition", required=True,
-                        help="Condition tag (or 'all' for all conditions in family)")
-    parser.add_argument("--dataset", default="calvin_dataset",
-                        choices=["calvin_dataset", "calvin_abcd_dataset"])
-
-    # Mode-specific args
-    parser.add_argument("--max_nll_batches", type=int, default=500)
+    parser.add_argument(
+        "--condition",
+        help="Condition tag (e.g. vq_bet_5_16_4, bin, quest_16_4444_2). "
+             "Resolves to checkpoints/calvin_sweep/policy/minivla_<condition>/",
+    )
+    parser.add_argument(
+        "--policy_dir",
+        help="Explicit policy directory (overrides --condition)",
+    )
+    parser.add_argument(
+        "--mode", required=True,
+        choices=["dummy", "rollout"],
+        help="dummy = quick load test; rollout = full CALVIN evaluation",
+    )
     parser.add_argument("--num_sequences", type=int, default=1000)
-    parser.add_argument("--max_examples", type=int, default=300)
-
-    # SLURM overrides
-    parser.add_argument("--partition", default=None)
-    parser.add_argument("--gres", default=None)
-    parser.add_argument("--time", default=None)
-
-    parser.add_argument("--dry_run", action="store_true")
+    parser.add_argument(
+        "--output_dir", default=str(PROJECT_DIR / "results"),
+    )
+    parser.add_argument(
+        "--device", default="cuda" if torch.cuda.is_available() else "cpu",
+    )
     args = parser.parse_args()
 
-    # Resolve condition list
-    if args.family == "scratch":
-        all_conditions = list(SCRATCH_CONDITIONS.keys())
+    if not args.condition and not args.policy_dir:
+        parser.error("Provide --condition or --policy_dir")
+
+    # Resolve policy directory
+    if args.policy_dir:
+        policy_dir = args.policy_dir
+        condition = Path(policy_dir).name.replace("minivla_", "")
     else:
-        all_conditions = OPENVLA_CONDITIONS
+        policy_dir = resolve_policy_dir(args.condition)
+        condition = args.condition
 
-    if args.condition == "all":
-        conditions = all_conditions
-    elif args.condition in all_conditions:
-        conditions = [args.condition]
-    else:
-        print(f"Unknown condition: {args.condition}")
-        print(f"Options for --family {args.family}: {all_conditions + ['all']}")
-        sys.exit(1)
+    print(f"Condition: {condition}")
+    print(f"Policy dir: {policy_dir}")
 
-    if args.dry_run:
-        print("=== DRY RUN ===\n")
+    if args.mode == "dummy":
+        vla, action_tokenizer, is_chunk, n_tokens, _chunk_size = load_model(
+            policy_dir, device=args.device
+        )
+        dummy_eval(vla, action_tokenizer, is_chunk, n_tokens, device=args.device)
 
-    for cond in conditions:
-        if args.family == "scratch":
-            eval_cmd = build_scratch_eval_command(args.mode, cond, args)
-            ckpt_dir = get_scratch_ckpt_dir(cond)
-        else:
-            eval_cmd = build_openvla_eval_command(args.mode, cond, args.dataset, args)
-            ckpt_dir = get_openvla_ckpt_dir(cond, args.dataset)
-
-        # For modes needing a VLA checkpoint, check it exists
-        if args.mode in ("nll", "real_l1", "rollout", "attention"):
-            if not os.path.isdir(ckpt_dir) and not args.dry_run:
-                print(f"  [SKIP] {cond}: checkpoint not found at {ckpt_dir}")
-                continue
-
-        script = build_sbatch_script(args.mode, cond, eval_cmd, args)
-        submit_script(script, dry_run=args.dry_run)
-
-    if not args.dry_run:
-        print(f"\nMonitor: squeue -u {os.environ.get('USER', 'wenjiel2')}")
+    elif args.mode == "rollout":
+        out_dir = os.path.join(args.output_dir, condition)
+        rollout_eval(
+            policy_dir, condition, args.num_sequences, out_dir, device=args.device,
+        )
 
 
 if __name__ == "__main__":

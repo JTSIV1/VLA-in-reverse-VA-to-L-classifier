@@ -98,18 +98,33 @@ Where `<openvla-mini>` = `/data/user_data/wenjiel2/Code/openvla-mini`
 
 ### Checkpoints
 
+All V2 tokenizer checkpoints are saved under:
 ```
-checkpoints/
-├── quest_16_4444_2/              # h16/f256/d2, vanilla
-├── quest_32_8555_4/              # h32/f1000/d4, vanilla
+/data/user_data/wenjiel2/Code/VLA-in-reverse-VA-to-L-classifier/checkpoints/calvin_sweep/tokenizers/
+```
+
+Each directory contains:
+- `config.json` — training config (horizon, fsq_levels, downsample, aux type, etc.)
+- `tokenizer_weights.pth` — tokenizer-only weights (for policy adapter loading)
+- `full.pth` — full checkpoint (tokenizer + aux heads + optimizer state)
+- `metrics.csv` — training/validation metrics per epoch
+- `probe_native_best.pth` / `probe_native_best_best.pth` — verb probe on raw actions (where available)
+- `probe_latent_best.pth` / `probe_latent_best_best.pth` — verb probe on encoder latents (where available)
+
+```
+checkpoints/calvin_sweep/tokenizers/
+├── quest_16_4444_2/              # h16/f256/d2, vanilla        (+ native & latent probes)
+├── quest_32_8555_4/              # h32/f1000/d4, vanilla       (+ native & latent probes)
 ├── quest_16_4444_4/              # h16/f256/d4, vanilla
-├── quest_verb0.1_16_4444_2/      # h16/f256/d2 + verb
-├── quest_verb0.1_32_8555_4/      # h32/f1000/d4 + verb
-├── quest_verb0.1_16_4444_4/      # h16/f256/d4 + verb
-├── quest_clip0.1_16_4444_2/      # h16/f256/d2 + clip
+├── quest_verb0.1_16_4444_2/      # h16/f256/d2 + verb         (+ native & latent probes)
+├── quest_verb0.1_32_8555_4/      # h32/f1000/d4 + verb        (+ native & latent probes)
+├── quest_verb0.1_16_4444_4/      # h16/f256/d4 + verb         (+ native & latent probes)
+├── quest_clip0.1_16_4444_2/      # h16/f256/d2 + clip         (+ native probe only)
 ├── quest_clip0.1_32_8555_4/      # h32/f1000/d4 + clip
 └── quest_clip0.1_16_4444_4/      # h16/f256/d4 + clip
 ```
+
+(V1 checkpoints remain in `checkpoints/calvin_sweep/tokenizers/quest/` for reference.)
 
 ---
 
@@ -220,19 +235,26 @@ Each tokenizer is evaluated with 3 probe types:
 - **tokid**: discrete token IDs through learned embedding
 - **latent**: continuous encoder latents
 
-*Status: pending (waiting for GPU quota)*
+*Status: completed (native + latent probes done; tokid probes all FAILED)*
 
 | Condition | native | tokid | latent |
 |-----------|--------|-------|--------|
-| quest_16_4444_2 | — | — | — |
-| quest_32_8555_4 | — | — | — |
-| quest_16_4444_4 | — | — | — |
-| quest_verb0.1_16_4444_2 | — | — | — |
-| quest_verb0.1_32_8555_4 | — | — | — |
-| quest_verb0.1_16_4444_4 | — | — | — |
-| quest_clip0.1_16_4444_2 | — | — | — |
-| quest_clip0.1_32_8555_4 | — | — | — |
-| quest_clip0.1_16_4444_4 | — | — | — |
+| quest_16_4444_2 | 21.5% | FAIL | 26.6% |
+| quest_32_8555_4 | 21.8% | FAIL | 31.1% |
+| quest_16_4444_4 | 23.6% | FAIL | 24.0% |
+| quest_verb0.1_16_4444_2 | 26.7% | FAIL | 37.7% |
+| quest_verb0.1_32_8555_4 | 20.6% | FAIL | 44.0% |
+| quest_verb0.1_16_4444_4 | 17.1% | FAIL | 41.1% |
+| quest_clip0.1_16_4444_2 | 19.2% | FAIL | 38.3% |
+| quest_clip0.1_32_8555_4 | 20.3% | FAIL | 40.5% |
+| quest_clip0.1_16_4444_4 | 23.6% | FAIL | 38.6% |
+
+Notes:
+- **Native baselines** (raw continuous actions) hover around 20-27% — verb signal in raw actions is weak
+- **Latent probes** are dramatically better with aux heads: vanilla 24-31% → verb/clip 38-44%
+- **Best latent probe**: verb h32/d4 at 44.0% — larger horizon captures more verb-relevant structure
+- **Aux heads inject verb info into latents**: +10-17pp over vanilla latent probes
+- **tokid probes all failed** (likely FSQ index embedding issue — investigate)
 
 ---
 
@@ -241,19 +263,25 @@ Each tokenizer is evaluated with 3 probe types:
 Same setup as V1: MiniVLA (Qwen2.5-0.5B + DINOv2/SigLIP), full FSDP, frozen vision backbone,
 50K steps, batch_size=16.
 
-*Status: running (7 jobs active, 2 pending)*
+*Status: 6/9 completed, 3 timed out (12h SLURM limit)*
 
-| Condition | Tag | Final Loss | Token Acc | Best Loss |
-|-----------|-----|-----------|-----------|-----------|
-| quest vanilla h16/d2 | quest_16_4444_2 | — | — | — |
-| quest vanilla h32/d4 | quest_32_8555_4 | — | — | — |
-| quest vanilla h16/d4 | quest_16_4444_4 | — | — | — |
-| quest verb h16/d2 | quest_verb0.1_16_4444_2 | — | — | — |
-| quest verb h32/d4 | quest_verb0.1_32_8555_4 | — | — | — |
-| quest verb h16/d4 | quest_verb0.1_16_4444_4 | — | — | — |
-| quest clip h16/d2 | quest_clip0.1_16_4444_2 | — | — | — |
-| quest clip h32/d4 | quest_clip0.1_32_8555_4 | — | — | — |
-| quest clip h16/d4 | quest_clip0.1_16_4444_4 | — | — | — |
+| Condition | Tag | Final Step | Final Loss | Token Acc | Best Loss (step) | Notes |
+|-----------|-----|-----------|-----------|-----------|-----------------|-------|
+| quest vanilla h16/d2 | quest_16_4444_2 | 35250 | 0.5661 | 75.0% | 0.5973 (30K) | TIMEOUT at 12h |
+| quest vanilla h32/d4 | quest_32_8555_4 | 45740 | 0.8903 | 71.9% | 0.6680 (40K) | TIMEOUT at 12h |
+| quest vanilla h16/d4 | quest_16_4444_4 | 50000 | 0.5340 | 65.6% | 0.5316 (30K) | completed |
+| quest verb h16/d2 | quest_verb0.1_16_4444_2 | 50000 | 0.5185 | 80.5% | 0.4479 (15K) | completed |
+| quest verb h32/d4 | quest_verb0.1_32_8555_4 | 40505 | 0.6128 | 73.8% | 0.5069 (25K) | TIMEOUT at 12h |
+| quest verb h16/d4 | quest_verb0.1_16_4444_4 | 50000 | 0.4308 | 73.4% | 0.3954 (45K) | completed |
+| quest clip h16/d2 | quest_clip0.1_16_4444_2 | 50000 | 0.4930 | 79.7% | 0.3684 (45K) | completed |
+| quest clip h32/d4 | quest_clip0.1_32_8555_4 | 50000 | 0.5363 | 80.0% | 0.5363 (50K) | completed |
+| quest clip h16/d4 | quest_clip0.1_16_4444_4 | 50000 | 0.3514 | 78.1% | 0.3514 (50K) | completed |
+
+Notes:
+- All 3 timeouts are h32/d4 or h16/d2 vanilla configs (longer sequences = slower steps)
+- Best token accuracy: verb h16/d2 (80.5%), clip h32/d4 (80.0%), clip h16/d2 (79.7%)
+- Best final loss: clip h16/d4 (0.3514), verb h16/d4 (0.4308), clip h16/d2 (0.4930)
+- h32/d4 configs consistently have higher loss — larger codebook (1000) is harder to predict
 
 ---
 

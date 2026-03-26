@@ -56,7 +56,7 @@ VQVAE_TOKENIZER_PATH = "./checkpoints/vqvae_tokenizer"
 VQVAE_VOCAB_SIZE = 512
 
 # QueST / OAT tokenizer checkpoints and shared hyperparameters
-CHECKPOINT_DIR = "./checkpoints"
+CHECKPOINT_DIR = "./checkpoints/calvin_sweep/tokenizers"
 QUEST_TOKENIZER_CKPT = "./checkpoints/quest_tokenizer"
 OAT_TOKENIZER_CKPT = "./checkpoints/oat_tokenizer"
 TOKENIZER_HORIZON = 32  # action chunk length (matches oat/config train_questtok.yaml)

@@ -70,45 +70,43 @@ Where `<openvla-mini>` = `/data/user_data/wenjiel2/Code/openvla-mini`
 
 ### Tokenizer Checkpoints
 
-All under `checkpoints/calvind_sweep/`:
+Tokenizer checkpoints under `checkpoints/calvin_sweep/tokenizers/`:
 
 ```
-checkpoints/calvind_sweep/
-├── {vq_bet,oat,quest}_vanilla/           # lambda=0 baselines
-│   ├── full.pth                          # full checkpoint (model + optimizer + args)
-│   ├── tokenizer_weights.pth             # model weights only
-│   ├── metrics.csv                       # per-epoch training/val metrics
-│   └── config.json                       # run config summary
-├── {vq_bet,oat,quest}_verb{0.01,0.1,0.5,1.0}/   # verb lambda sweep
-│   └── ... (same structure)
-├── {vq_bet,oat,quest}_clip{0.1,0.5,1.0,2.0}/     # clip lambda sweep
-│   └── ... (same structure)
-└── *_*_*/ (e.g. oat_verb0.1_verb0.1)     # OLD naming, pre-rerun (ignore)
+checkpoints/calvin_sweep/tokenizers/
+├── vq_bet_5_16_2/                        # c5/e16/g2 (paper default)
+├── vq_bet_5_16_4/                        # c5/e16/g4 (best recon)
+├── vq_bet_5_64_2/                        # c5/e64/g2
+├── vq_bet_10_16_2/                       # c10/e16/g2
+├── vq_bet_10_16_4/                       # c10/e16/g4
+├── vq_bet_10_64_2/                       # c10/e64/g2
+├── vq_bet_verb0.1_5_16_4/               # c5/e16/g4 + verb λ=0.1
+├── vq_bet_clip0.1_5_16_4/               # c5/e16/g4 + clip λ=0.1
+├── quest_16_4444_2/                      # h16/f256/d2 (best recon)
+├── quest_16_4444_4/                      # h16/f256/d4
+├── quest_32_8555_4/                      # h32/f1000/d4
+├── quest_verb0.1_{16_4444_2,...}/        # + verb λ=0.1 variants
+└── quest_clip0.1_{16_4444_2,...}/        # + clip λ=0.1 variants
 ```
 
-**Note**: Directories with double-tag names (e.g., `oat_verb0.1_verb0.1`) are from the first
-run before VQ-BeT normalization was added. The single-tag directories (e.g., `oat_verb0.1`)
-are the current/correct checkpoints.
+Each directory contains: `full.pth`, `tokenizer_weights.pth`, `metrics.csv`, `config.json`.
 
 ### Policy Checkpoints
 
-All under `runs/calvind_policy/`:
+All under `checkpoints/calvin_sweep/policy/`:
 
 ```
-runs/calvind_policy/
-├── openvla-7b+...--bin_baseline--image_aug/       # bin-based ActionTokenizer baseline
-├── openvla-7b+...+sweep-vq_bet--vqbet_vanilla/   # VQ-BeT vanilla
-├── openvla-7b+...+sweep-vq_bet--vqbet_verb01/    # VQ-BeT verb λ=0.1
-├── openvla-7b+...+sweep-vq_bet--vqbet_clip01/    # VQ-BeT clip λ=0.1
-├── openvla-7b+...+sweep-oat--oat_vanilla/         # OAT vanilla
-├── openvla-7b+...+sweep-oat--oat_verb01/          # OAT verb λ=0.1
-├── openvla-7b+...+sweep-oat--oat_clip01/          # OAT clip λ=0.1
-├── openvla-7b+...+sweep-quest--quest_vanilla/     # QueST vanilla
-├── openvla-7b+...+sweep-quest--quest_verb001/     # QueST verb λ=0.01
-└── openvla-7b+...+sweep-quest--quest_clip01/      # QueST clip λ=0.1
+checkpoints/calvin_sweep/policy/
+├── minivla_bin/                           # bin baseline (256-bin ActionTokenizer)
+├── minivla_vq_bet_5_16_4/                # VQ-BeT c5/e16/g4 vanilla
+├── minivla_vq_bet_10_16_4/               # VQ-BeT c10/e16/g4
+├── minivla_vq_bet_5_64_2/                # VQ-BeT c5/e64/g2
+├── minivla_vq_bet_verb0.1_5_16_4/        # VQ-BeT c5/e16/g4 + verb
+├── minivla_vq_bet_clip0.1_5_16_4/        # VQ-BeT c5/e16/g4 + clip
+├── minivla_quest_16_4444_2/              # QueST h16/f256/d2
+├── minivla_quest_{verb,clip}0.1_.../     # QueST aux variants
+└── ...
 ```
-
-Each policy dir contains LoRA adapter weights + `--best` variant (best val loss checkpoint).
 
 ### Figures
 
@@ -191,7 +189,7 @@ optimal configuration for CALVIN. All vanilla (λ=0, no aux heads).
 | Resource | Path |
 |----------|------|
 | Sweep submission | `scripts/submit_calvind_hp_sweep.sh` |
-| Checkpoints | `checkpoints/calvind_hp_sweep/` |
+| Checkpoints | `checkpoints/calvin_sweep/tokenizers/` (vq_bet_*, quest_*, oat_* dirs) |
 
 ### VQ-BeT Results
 
@@ -274,7 +272,7 @@ Retrain the best VQ-BeT and QueST configs with verb classification and CLIP cont
 heads (λ=0.1 for both). Three QueST variants tested to address the FSQ bottleneck:
 post-FSQ (4-d aux input), pre-FSQ (256-d), and VQ (learned 512-d codebook replacing FSQ).
 
-Checkpoints: `checkpoints/calvind_hp_sweep/`
+Checkpoints: `checkpoints/calvin_sweep/tokenizers/`
 
 #### VQ-BeT c5/e16/g4 (aux heads on 512-d post-RVQ z_q)
 
@@ -361,7 +359,7 @@ Classifiers: LogisticRegression + RandomForest (sklearn, no GPU needed).
 |----------|------|
 | Probe script | `tokenization/verb_probe_tokenizer.py` |
 | SLURM submission | `scripts/submit_verb_probe.sh` |
-| Results | `checkpoints/calvind_hp_sweep/<config>/verb_probe/verb_probe_results.json` |
+| Results | `checkpoints/calvin_sweep/tokenizers/<config>/verb_probe/verb_probe_results.json` |
 
 ### Usage
 
@@ -369,7 +367,7 @@ Classifiers: LogisticRegression + RandomForest (sklearn, no GPU needed).
 # Single config
 python tokenization/verb_probe_tokenizer.py \
     --tokenizer_type vq_bet \
-    --checkpoint checkpoints/calvind_hp_sweep/vq_bet_c5_e16_g4/full.pth
+    --checkpoint checkpoints/calvin_sweep/tokenizers/vq_bet_5_16_4/full.pth
 
 # All configs via SLURM (CPU partition)
 bash scripts/submit_verb_probe.sh
@@ -399,10 +397,10 @@ on CALVIN-D only (no OXE pretraining).
 | Submission script | `scripts/submit_calvind_scratch.sh` |
 | VLA train script | `<openvla-mini>/vla-scripts/train.py` |
 | materialize.py (sweep: prefix) | `<openvla-mini>/prismatic/vla/materialize.py` |
-| Checkpoints | `runs/calvind_scratch/` |
+| Checkpoints | `checkpoints/calvin_sweep/policy/minivla_<tag>/` |
 
 ### Conditions (14 total, 11 active)
-Uses HP sweep checkpoints (`checkpoints/calvind_hp_sweep/`):
+Uses HP sweep checkpoints (`checkpoints/calvin_sweep/tokenizers/`):
 
 **Vanilla tokenizer configs (top-3 per tokenizer):**
 
@@ -439,20 +437,17 @@ LLM (494M) are trained.
 
 | Condition | Final Loss | Token Acc | Best Loss | Best Checkpoint |
 |-----------|-----------|-----------|-----------|-----------------|
-| bin_baseline | 1.991 | 34.8% | 1.991 | `runs/calvind_scratch/…--bin_baseline--image_aug/checkpoints/step-050000-epoch-02-loss=1.9909.pt` |
-| vb_c5e16g4 | 0.865 | 57.8% | 0.684 | `…--vb_c5e16g4--…/checkpoints/step-015000-epoch-00-loss=0.6836.pt` |
-| vb_c5e64g2 | 0.734 | 53.1% | 0.696 | `…--vb_c5e64g2--…/checkpoints/step-047500-epoch-02-loss=0.6957.pt` |
-| vb_c10e16g4 | 0.953 | 54.7% | 0.631 | `…--vb_c10e16g4--…/checkpoints/step-045000-epoch-01-loss=0.6310.pt` |
-| vb_c5e16g4_verb01 | 0.640 | 67.2% | 0.568 | `…--vb_c5e16g4_verb01--…/checkpoints/step-045000-epoch-01-loss=0.5677.pt` |
-| vb_c5e16g4_clip01 | 0.661 | 57.8% | 0.561 | `…--vb_c5e16g4_clip01--…/checkpoints/step-040000-epoch-01-loss=0.5609.pt` |
-| quest_h16f256d2 | 0.564 | 70.3% | 0.467 | `…--quest_h16f256d2--…/checkpoints/step-047500-epoch-02-loss=0.4672.pt` |
-| quest_h32f1000d4 | 0.646 | 72.5% | 0.504 | `…--quest_h32f1000d4--…/checkpoints/step-047500-epoch-02-loss=0.5039.pt` |
-| quest_h16f256d4 | 0.398 | 81.2% | 0.362 | `…--quest_h16f256d4--…/checkpoints/step-032500-epoch-01-loss=0.3615.pt` |
-| quest_h16d2_verb01 | 0.514 | 72.7% | 0.397 | `…--quest_h16d2_verb01--…/checkpoints/step-035000-epoch-01-loss=0.3969.pt` |
-| quest_h16d2_clip01 | 0.476 | 74.2% | 0.415 | `…--quest_h16d2_clip01--…/checkpoints/step-042500-epoch-01-loss=0.4153.pt` |
-
-All checkpoint paths are relative to the project root. The full prefix for `…` is:
-`prism-qwen25-dinosiglip-224px+0_5b+mx-calvin-d-bin+n0+b16+x7`.
+| bin_baseline | 1.991 | 34.8% | 1.991 | `checkpoints/calvin_sweep/policy/minivla_bin_baseline/checkpoints/step-050000-epoch-02-loss=1.9909.pt` |
+| vb_c5e16g4 | 0.865 | 57.8% | 0.684 | `checkpoints/calvin_sweep/policy/minivla_vb_c5e16g4/checkpoints/step-015000-epoch-00-loss=0.6836.pt` |
+| vb_c5e64g2 | 0.734 | 53.1% | 0.696 | `checkpoints/calvin_sweep/policy/minivla_vb_c5e64g2/checkpoints/step-047500-epoch-02-loss=0.6957.pt` |
+| vb_c10e16g4 | 0.953 | 54.7% | 0.631 | `checkpoints/calvin_sweep/policy/minivla_vb_c10e16g4/checkpoints/step-045000-epoch-01-loss=0.6310.pt` |
+| vb_c5e16g4_verb01 | 0.640 | 67.2% | 0.568 | `checkpoints/calvin_sweep/policy/minivla_vb_c5e16g4_verb01/checkpoints/step-045000-epoch-01-loss=0.5677.pt` |
+| vb_c5e16g4_clip01 | 0.661 | 57.8% | 0.561 | `checkpoints/calvin_sweep/policy/minivla_vb_c5e16g4_clip01/checkpoints/step-040000-epoch-01-loss=0.5609.pt` |
+| quest_h16f256d2 | 0.564 | 70.3% | 0.467 | `checkpoints/archive/calvind_scratch_archived/…--quest_h16f256d2--image_aug/checkpoints/step-047500-epoch-02-loss=0.4672.pt` |
+| quest_h32f1000d4 | 0.646 | 72.5% | 0.504 | `checkpoints/archive/calvind_scratch_archived/…--quest_h32f1000d4--image_aug/checkpoints/step-047500-epoch-02-loss=0.5039.pt` |
+| quest_h16f256d4 | 0.398 | 81.2% | 0.362 | `checkpoints/archive/calvind_scratch_archived/…--quest_h16f256d4--image_aug/checkpoints/step-032500-epoch-01-loss=0.3615.pt` |
+| quest_h16d2_verb01 | 0.514 | 72.7% | 0.397 | `checkpoints/archive/calvind_scratch_archived/…--quest_h16d2_verb01--image_aug/checkpoints/step-035000-epoch-01-loss=0.3969.pt` |
+| quest_h16d2_clip01 | 0.476 | 74.2% | 0.415 | `checkpoints/archive/calvind_scratch_archived/…--quest_h16d2_clip01--image_aug/checkpoints/step-042500-epoch-01-loss=0.4153.pt` |
 
 **Important caveat on token accuracy**: Token accuracy is not directly comparable across
 tokenizers. A tokenizer with fewer tokens per step or smaller codebook will have higher
