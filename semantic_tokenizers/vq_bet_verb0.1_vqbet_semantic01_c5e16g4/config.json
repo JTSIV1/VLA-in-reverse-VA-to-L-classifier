@@ -1,0 +1,9 @@
+{
+  "tokenizer": "vq_bet",
+  "run_name": "vq_bet_verb0.1_vqbet_semantic01_c5e16g4",
+  "aux_head": "verb",
+  "aux_lambda": 0.1,
+  "epochs_run": 100,
+  "best_metric": 0.118942181703945,
+  "best_verb_acc": 28.37837837837838
+}
