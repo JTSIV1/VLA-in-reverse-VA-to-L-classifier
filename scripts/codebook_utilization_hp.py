@@ -6,7 +6,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from tokenization.train_tokenizer import fit_normalizer, build_oat, build_quest
 from tokenization.vq_bet_official.vqvae.tokenizer import VQBeTTokenizer
 
-DATA_DIR = '/data/user_data/yashagar/task_D_D/training/'
+import config as C
+DATA_DIR = C.TRAIN_DIR
 CKPT_BASE = 'checkpoints/calvind_hp_sweep'
 
 
