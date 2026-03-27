@@ -333,6 +333,7 @@ SUPPORTED_METHODS = [
     "native",
     "gampt_k21", "gampt_k32", "gampt_k64", "gampt_k128", "gampt_k256",
     "gampt_continuous",
+    "fast_pretrained",
     "fast",
     "quest",
     "oat",
@@ -378,6 +379,24 @@ def main(args):
                     method, trajectories, verb_labels,
                     tokenizer=tok, mode="discrete",
                     vocab_size=k, num_verbs=num_verbs)
+
+            elif method == "fast_pretrained":
+                import zarr
+                import torch as _torch
+                from tokenization.action_tokenizers import TokenizerAdapter
+                from oat.tokenizer.fast.tokenizer_wrapper import FASTTok
+                from oat.model.common.normalizer import LinearNormalizer as _LN
+                tok_raw = FASTTok("physical-intelligence/fast")
+                # Fit normalizer from training data (same data the model was trained on)
+                root = zarr.open(os.path.join(os.path.dirname(CHECKPOINT_DIR), "data/calvin_N500.zarr"), "r")
+                actions = _torch.from_numpy(root["data/action"][:].astype("float32"))
+                _norm = _LN()
+                _norm.fit({"action": actions}, last_n_dims=1, mode="limits")
+                tok_raw.set_normalizer(_norm)
+                tok = TokenizerAdapter(tok_raw, "fast", horizon=TOKENIZER_HORIZON, max_tokens=MAX_SEQ_LEN)
+                result = run_metrics(
+                    "fast_pretrained", trajectories, verb_labels,
+                    tokenizer=tok, mode="discrete", num_verbs=num_verbs)
 
             elif method == "fast":
                 import dill
