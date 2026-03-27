@@ -394,7 +394,7 @@ def main(args):
                     "gampt_continuous", trajectories, verb_labels,
                     tokenizer=tok, mode="continuous", num_verbs=num_verbs)
 
-            elif method.startswith("gampt_k"):
+            elif method.startswith("gampt_k") and method in SUPPORTED_METHODS:
                 k = int(method.split("gampt_k")[1])
                 from tokenization.gampt import GAMPTTokenizer
                 ckpt = os.path.join(CHECKPOINT_DIR, f"gampt_k{k}.pkl")
