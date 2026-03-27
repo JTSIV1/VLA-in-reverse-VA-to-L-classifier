@@ -43,7 +43,7 @@ def convert(data_dir, output_path, max_demos=None):
         actions = np.stack(traj)  # (T, 7)
         all_actions.append(actions)
         total_steps += len(actions)
-        episode_ends.append(total_steps - 1)
+        episode_ends.append(total_steps)
 
         if (i + 1) % 500 == 0:
             print(f"  Loaded {i+1}/{n_episodes} episodes ...")
