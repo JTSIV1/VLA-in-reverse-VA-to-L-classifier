@@ -23,6 +23,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import (
     VAL_DIR,
+    TRAIN_DIR,
     ACTION_KEY,
     EPISODE_TEMPLATE,
     ACTION_DIM,
@@ -381,8 +382,16 @@ def main(args):
             elif method == "fast":
                 from tokenization.action_tokenizers import TokenizerAdapter
                 from oat.tokenizer.fast.tokenizer_wrapper import FASTTok
-                fast_ckpt = os.path.join(CHECKPOINT_DIR, "fast_trained.ckpt")
-                tok_raw = FASTTok.from_checkpoint(fast_ckpt)
+                from transformers import AutoProcessor
+                # Load custom FAST code from HF hub, then replace tokenizer with trained one
+                tok_raw = FASTTok("physical-intelligence/fast")
+                trained_path = os.path.join(CHECKPOINT_DIR, "my_fast")
+                tok_raw.fast_tok = AutoProcessor.from_pretrained(
+                    "physical-intelligence/fast", trust_remote_code=True, use_fast=False)
+                # Load trained tokenizer vocab into the processor
+                from transformers import PreTrainedTokenizerFast
+                trained_inner = PreTrainedTokenizerFast(tokenizer_file=os.path.join(trained_path, "tokenizer.json"))
+                tok_raw.fast_tok.tokenizer = trained_inner
                 tok = TokenizerAdapter(tok_raw, "fast", horizon=TOKENIZER_HORIZON, max_tokens=MAX_SEQ_LEN)
                 result = run_metrics(
                     "fast", trajectories, verb_labels,
@@ -390,14 +399,14 @@ def main(args):
 
             elif method == "quest":
                 from tokenization.action_tokenizers import load_action_tokenizer
-                tok = load_action_tokenizer("quest")
+                tok = load_action_tokenizer("quest", TRAIN_DIR)
                 result = run_metrics(
                     "quest", trajectories, verb_labels,
                     tokenizer=tok, mode="discrete", num_verbs=num_verbs)
 
             elif method == "oat":
                 from tokenization.action_tokenizers import load_action_tokenizer
-                tok = load_action_tokenizer("oat")
+                tok = load_action_tokenizer("oat", TRAIN_DIR)
                 result = run_metrics(
                     "oat", trajectories, verb_labels,
                     tokenizer=tok, mode="discrete", num_verbs=num_verbs)
