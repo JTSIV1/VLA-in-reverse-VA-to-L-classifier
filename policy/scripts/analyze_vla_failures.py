@@ -19,6 +19,12 @@ import json
 import os
 import sys
 from pathlib import Path
+from typing import Any, Dict
+
+# Silence HF tokenizer warnings and bypass permission issues in shared cache dirs
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+os.environ["HF_HOME"] = os.path.expanduser("~/.cache/huggingface")
+os.environ["HF_HUB_DISABLE_FILE_LOCKS"] = "1"
 
 import numpy as np
 import torch
@@ -143,17 +149,31 @@ def save_failure_sample(out_dir, idx, sample_data):
     Saves a directory for a single failure instance.
     sample_data keys: image_np, instruction, gt_action, pred_action, gt_tokens, pred_tokens, l1_error
     """
-    sample_dir = os.path.join(out_dir, f"failure_{idx:03d}_err{sample_data['l1_error']:.4f}")
+    # Handle episodic vs single-frame error
+    err_raw = sample_data["l1_error"]
+    is_episodic = isinstance(err_raw, (list, np.ndarray)) and np.array(err_raw).ndim > 0
+    mean_err = np.mean(err_raw) if is_episodic else float(err_raw)
+    
+    sample_dir = os.path.join(out_dir, f"failure_{idx:03d}_err{mean_err:.4f}")
     os.makedirs(sample_dir, exist_ok=True)
 
-    # 1. Save Image
-    img = Image.fromarray(sample_data["image_np"])
+    # 1. Save Image (First frame for episodic)
+    if is_episodic:
+        img = Image.fromarray(sample_data["image_np"][0])
+    else:
+        img = Image.fromarray(sample_data["image_np"])
     img.save(os.path.join(sample_dir, "frame.png"))
 
-    # 2. Save Trajectory Plot (1st step of predicted vs GT)
+    # 2. Save Trajectory Plot (First step comparison for episodic, or the single step)
     dims = ["x", "y", "z", "rx", "ry", "rz", "gripper"]
-    gt = sample_data["gt_action"]
-    pred = sample_data["pred_action"]
+    if is_episodic:
+        gt = sample_data["gt_action"][0]
+        pred = sample_data["pred_action"][0]
+        title_suffix = " (First Step)"
+    else:
+        gt = sample_data["gt_action"]
+        pred = sample_data["pred_action"]
+        title_suffix = ""
     
     plt.figure(figsize=(10, 6))
     x = np.arange(len(dims))
@@ -161,33 +181,61 @@ def save_failure_sample(out_dir, idx, sample_data):
     plt.bar(x + 0.2, pred, 0.4, label="Predicted", color="tab:orange")
     plt.xticks(x, dims)
     plt.ylabel("Action Value")
-    plt.title(f"Action Comparison (L1={sample_data['l1_error']:.4f})\n{sample_data['instruction']}")
+    plt.title(f"Action Comparison{title_suffix} (Mean L1={mean_err:.4f})\n{sample_data['instruction']}")
     plt.legend()
     plt.grid(alpha=0.3)
     plt.savefig(os.path.join(sample_dir, "trajectory.png"))
     plt.close()
 
-    # 3. Save Raw Data (NPZ for offline access)
-    np.savez(
-        os.path.join(sample_dir, "data.npz"),
-        image=sample_data["image_np"],
-        instruction=sample_data["instruction"],
-        gt_action=gt,
-        pred_action=pred,
-        gt_tokens=sample_data["gt_tokens"],
-        pred_tokens=sample_data["pred_tokens"],
-        l1_error=sample_data["l1_error"]
-    )
+    # 3. Save Raw Data and Plots
+    if is_episodic:
+        # Save full data
+        np.savez(
+            os.path.join(sample_dir, "data.npz"),
+            images=sample_data["image_np"], # (T, H, W, 3)
+            instruction=sample_data["instruction"],
+            gt_actions=sample_data["gt_action"], # (T, 7)
+            pred_actions=sample_data["pred_action"], # (T, 7)
+            gt_tokens=sample_data["gt_tokens"], # (T, n_codes)
+            pred_tokens=sample_data["pred_tokens"], # (T, n_codes)
+            l1_errors=sample_data["l1_error"], # (T,)
+            mean_l1_error=mean_err
+        )
+        
+        # Save an error-over-time plot
+        plt.figure(figsize=(10, 4))
+        plt.plot(sample_data["l1_error"])
+        plt.xlabel("Step")
+        plt.ylabel("L1 Error")
+        plt.title(f"Episode Error over Time (Mean={mean_err:.4f})\n{sample_data['instruction']}")
+        plt.grid(alpha=0.3)
+        plt.savefig(os.path.join(sample_dir, "error_over_time.png"))
+        plt.close()
+    else:
+        np.savez(
+            os.path.join(sample_dir, "data.npz"),
+            image=sample_data["image_np"],
+            instruction=sample_data["instruction"],
+            gt_action=gt,
+            pred_action=pred,
+            gt_tokens=sample_data["gt_tokens"],
+            pred_tokens=sample_data["pred_tokens"],
+            l1_error=sample_data["l1_error"]
+        )
 
     # 4. Save Meta JSON (Readable)
     meta = {
         "instruction": sample_data["instruction"],
-        "l1_error": float(sample_data["l1_error"]),
-        "gt_action": gt.tolist(),
+        "l1_error": float(mean_err), # Convert numpy.float32 to Python float
+        "gt_action": gt.tolist(), # First step for episodic, or the single step
         "pred_action": pred.tolist(),
         "gt_tokens": sample_data["gt_tokens"].tolist(),
         "pred_tokens": sample_data["pred_tokens"].tolist()
     }
+    if is_episodic:
+        # Add full errors (as list of floats) to meta for episodic mode
+        meta["all_l1_errors"] = [float(e) for e in sample_data["l1_error"]]
+        
     with open(os.path.join(sample_dir, "meta.json"), "w") as f:
         json.dump(meta, f, indent=2)
 
@@ -203,6 +251,7 @@ def main():
     parser.add_argument("--out_dir", required=True)
     parser.add_argument("--top_k", type=int, default=10)
     parser.add_argument("--max_batches", type=int, default=50)
+    parser.add_argument("--episodic", action="store_true", help="Analyze by episode instead of by frame.")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--debug", action="store_true")
     args = parser.parse_args()
@@ -237,6 +286,26 @@ def main():
         else:
              action_tok_str = "sweep:{}:{}".format(args.sweep_tokenizer_type, args.sweep_checkpoint_path)
              
+        # Monkey-patch dlimp to prevent validation dataset truncation when shuffle_buffer_size=1
+        try:
+            import dlimp as dl
+            if not hasattr(dl.DLataset, "_original_take"):
+                dl.DLataset._original_take = dl.DLataset.take
+                dl.DLataset._original_shuffle = dl.DLataset.shuffle
+                
+                def _hooked_take(self, count, *args, **kwargs):
+                    if count <= 1: return self
+                    return self._original_take(count, *args, **kwargs)
+                    
+                def _hooked_shuffle(self, buffer_size, *args, **kwargs):
+                    if buffer_size <= 1: return self
+                    return self._original_shuffle(buffer_size, *args, **kwargs)
+                    
+                dl.DLataset.take = _hooked_take
+                dl.DLataset.shuffle = _hooked_shuffle
+        except Exception as e:
+            print(f"Warning: Failed to monkey-patch dlimp: {e}")
+
         # Reload dataset/collator/tokenizer via native materials
         from prismatic.vla.materialize import get_vla_dataset_and_collator
         from prismatic.models.backbones.llm.prompting import PurePromptBuilder
@@ -279,46 +348,68 @@ def main():
                     print(f"Loaded unnorm stats from {stats_path}")
                     break
 
+    # --- Monkey-patch RLDSBatchTransform to include raw data for visualization ---
+    from prismatic.vla.datasets import RLDSBatchTransform
+    original_transform_call = RLDSBatchTransform.__call__
+    
+    def wrapped_transform(self, rlds_batch: Dict[str, Any]) -> Dict[str, Any]:
+        result = original_transform_call(self, rlds_batch)
+        # Store original data for qualitative analysis (no-sync-required)
+        # Handle both single-frame and windowed/chunked actions
+        if rlds_batch["observation"]["image_primary"].ndim == 4: # [T, H, W, 3]
+             result["raw_image"] = rlds_batch["observation"]["image_primary"][0]
+        else: # [H, W, 3]
+             result["raw_image"] = rlds_batch["observation"]["image_primary"]
+             
+        # The 'current' action is the first one in the chunk if we're chunking
+        if rlds_batch["action"].ndim == 2: # [T, 7]
+             result["raw_action"] = rlds_batch["action"][0]
+        else: # [7]
+             result["raw_action"] = rlds_batch["action"]
+             
+        result["raw_instruction"] = rlds_batch["task"]["language_instruction"].decode()
+        return result
+        
+    RLDSBatchTransform.__call__ = wrapped_transform
+
     batch_transform = RLDSBatchTransform(
         action_tokenizer,
         tokenizer,
         image_transform=image_processor.apply_transform if hasattr(image_processor, "apply_transform") else image_processor,
         prompt_builder_fn=PurePromptBuilder,
     )
-    # Use RLDS with raw actions iter for comparison
+    # Use future horizon if chunking
     future_horizon = action_tokenizer.required_future_horizon if hasattr(action_tokenizer, "required_future_horizon") else 0
     
-    val_dataset = RLDSDataset(
-        data_root_dir=Path(args.data_root_dir),
-        data_mix="calvin_dataset",
-        batch_transform=batch_transform,
-        resize_resolution=(224, 224),
-        shuffle_buffer_size=1,        # Crucial for alignment: disable shuffling
-        train=False,
-        image_aug=False,
-        future_action_window_size=future_horizon,
-    )
+    # Use EpisodicRLDSDataset if requested
+    if args.episodic:
+        from prismatic.vla.datasets import EpisodicRLDSDataset
+        val_dataset = EpisodicRLDSDataset(
+            data_root_dir=Path(args.data_root_dir),
+            data_mix="calvin_dataset",
+            batch_transform=batch_transform,
+            resize_resolution=(224, 224),
+            shuffle_buffer_size=1,
+            train=False,
+            image_aug=False,
+            future_action_window_size=future_horizon,
+        )
+    else:
+        val_dataset = RLDSDataset(
+            data_root_dir=Path(args.data_root_dir),
+            data_mix="calvin_dataset",
+            batch_transform=batch_transform,
+            resize_resolution=(224, 224),
+            shuffle_buffer_size=1,        # Crucial for alignment: disable shuffling
+            train=False,
+            image_aug=False,
+            future_action_window_size=future_horizon,
+        )
     collator = PaddedCollatorForActionPrediction(tokenizer.model_max_length, tokenizer.pad_token_id, padding_side="right")
-    dataloader = DataLoader(val_dataset, batch_size=1, shuffle=False, collate_fn=collator)
+    # Batch size must be 1 for episodic dataset
+    dataloader = DataLoader(val_dataset, batch_size=1, shuffle=False, collate_fn=collator if not args.episodic else lambda x: x)
 
-    # Raw iterator for GT comparison and original images
-    # We must ensure this iterates in the EXACT SAME order as RLDSDataset(train=False)
-    rlds_path = os.path.join(args.data_root_dir, "calvin_dataset", "1.0.0")
-    raw_ds = tfds.builder_from_directory(rlds_path).as_dataset(split="val")
-    
-    def raw_iterator():
-        for ep in raw_ds:
-            steps = ep["steps"]
-            for step in steps:
-                obs = step["observation"]
-                img = obs["rgb_static"] if "rgb_static" in obs else obs["image"]
-                yield {
-                    "image": img.numpy(),
-                    "action": step["action"].numpy(),
-                    "instruction": step["language_instruction"].numpy().decode("utf-8")
-                }
-    
-    raw_iter = raw_iterator()
+    # No separate raw_iter needed as it's now integrated!
 
     failures = [] # List of (l1_error, sample_data)
 
@@ -330,76 +421,170 @@ def main():
             if i >= args.max_batches:
                 break
             
-            try:
-                raw_data = next(raw_iter)
-            except StopIteration:
-                break
+            # Handle Episodic vs Single-Frame
+            if args.episodic:
+                episode = batch[0] # List of steps (each contains raw_image, etc.)
+                
+                ep_l1_errors = []
+                ep_images = []
+                ep_gt_actions = []
+                ep_pred_actions = []
+                ep_gt_tokens_list = []
+                ep_pred_tokens_list = []
+                
+                print(f"  Processing Episode {i} ({len(episode)} steps)...")
+                
+                for step_idx, step in enumerate(episode):
+                    # Use collator to get attention_mask and handle tensor formatting
+                    step_batch = collator([step])
+                    
+                    pv = step_batch["pixel_values"]
+                    if isinstance(pv, dict):
+                        pixel_values = {k: v.to(torch.bfloat16).to(device) for k, v in pv.items()}
+                    else:
+                        pixel_values = pv.to(torch.bfloat16).to(device)
+                    
+                    input_ids = step_batch["input_ids"].to(device)
+                    attention_mask = step_batch["attention_mask"].to(device)
+                    
+                    with torch.autocast("cuda", dtype=torch.bfloat16):
+                        output = vla(input_ids=input_ids, attention_mask=attention_mask, pixel_values=pixel_values)
+                    
+                    try:
+                        if hasattr(vla.vision_backbone, "num_patches"):
+                            num_patches = vla.vision_backbone.num_patches
+                        else:
+                            num_patches = vla.vision_backbone.featurizer.patch_embed.num_patches
+                    except Exception:
+                        num_patches = 256
+                    
+                    action_logits = output.logits[:, num_patches:-1]
+                    action_preds = action_logits.argmax(dim=2)
+                    
+                    # Use input_ids instead of labels to avoid the -100 masking bug from datasets.py
+                    action_gt = input_ids[:, 1:].to(device)
+                    mask = (action_tokenizer.action_token_end_idx > action_gt) & (action_gt > action_tokenizer.action_token_begin_idx)
+                    
+                    gt_tokens = action_gt[mask].cpu().numpy()
+                    pred_tokens = action_preds[mask].cpu().numpy()
 
-            pv = batch["pixel_values"]
-            if isinstance(pv, dict):
-                pixel_values = {k: v.to(torch.bfloat16).to(device) for k, v in pv.items()}
-            else:
-                pixel_values = pv.to(torch.bfloat16).to(device)
-            input_ids = batch["input_ids"].to(device)
-            attention_mask = batch["attention_mask"].to(device)
-            labels = batch["labels"].to(device)
+                    if len(gt_tokens) < n_codes or len(pred_tokens) < n_codes:
+                        continue
+                    
+                    pred_cont = action_tokenizer.decode_token_ids_to_actions(pred_tokens[:n_codes])
+                    if isinstance(pred_cont, torch.Tensor):
+                        pred_cont = pred_cont.cpu().numpy()
+                    
+                    if pred_cont.ndim > 1:
+                        pred_cont = pred_cont[0]
+                    
+                    # Unnormalize if needed (for bin)
+                    if is_bin and unnorm_q01 is not None:
+                        pred_cont = np.where(
+                            unnorm_mask,
+                            0.5 * (pred_cont + 1) * (unnorm_q99 - unnorm_q01) + unnorm_q01,
+                            pred_cont,
+                        ).astype(np.float32)
+                    
+                    current_raw_action = step["raw_action"].copy()
+                    if current_raw_action.shape[-1] == 7:
+                        # Map RLDS gripper [0, 1] to training range [-1, 1]
+                        current_raw_action[6] = current_raw_action[6] * 2.0 - 1.0
+                    l1_err = np.abs(pred_cont - current_raw_action).mean()
+                    
+                    ep_l1_errors.append(l1_err)
+                    ep_images.append(step["raw_image"])
+                    ep_gt_actions.append(current_raw_action)
+                    ep_pred_actions.append(pred_cont)
+                    ep_gt_tokens_list.append(gt_tokens[:n_codes])
+                    ep_pred_tokens_list.append(pred_tokens[:n_codes])
 
-            with torch.autocast("cuda", dtype=torch.bfloat16):
-                output = vla(input_ids=input_ids, attention_mask=attention_mask, pixel_values=pixel_values)
-            
-            try:
-                if hasattr(vla.vision_backbone, "num_patches"):
-                    num_patches = vla.vision_backbone.num_patches
+                if len(ep_l1_errors) > 0:
+                    mean_ep_error = np.mean(ep_l1_errors)
+                    sample_data = {
+                        "image_np": np.array(ep_images), # (T, H, W, 3)
+                        "instruction": episode[0]["raw_instruction"],
+                        "gt_action": np.array(ep_gt_actions),
+                        "pred_action": np.array(ep_pred_actions),
+                        "gt_tokens": np.array(ep_gt_tokens_list),
+                        "pred_tokens": np.array(ep_pred_tokens_list),
+                        "l1_error": ep_l1_errors # list of errors
+                    }
+                    failures.append((mean_ep_error, sample_data))
+
+            else: # Single-Frame Mode
+                step = batch
+                step_batch = collator([step])
+                
+                pv = step_batch["pixel_values"]
+                if isinstance(pv, dict):
+                    pixel_values = {k: v.to(torch.bfloat16).to(device) for k, v in pv.items()}
                 else:
-                    num_patches = vla.vision_backbone.featurizer.patch_embed.num_patches
-            except Exception:
-                num_patches = 256
+                    pixel_values = pv.to(torch.bfloat16).to(device)
+                
+                input_ids = step_batch["input_ids"].to(device)
+                attention_mask = step_batch["attention_mask"].to(device)
 
-            action_logits = output.logits[:, num_patches:-1]
-            action_preds = action_logits.argmax(dim=2)
-            
-            action_gt = labels[:, 1:].to(device)
-            mask = (action_tokenizer.action_token_end_idx > action_gt) & (action_gt > action_tokenizer.action_token_begin_idx)
-            
-            gt_tokens = action_gt[mask].cpu().numpy()
-            pred_tokens = action_preds[mask].cpu().numpy()
+                with torch.autocast("cuda", dtype=torch.bfloat16):
+                    output = vla(input_ids=input_ids, attention_mask=attention_mask, pixel_values=pixel_values)
+                
+                try:
+                    if hasattr(vla.vision_backbone, "num_patches"):
+                        num_patches = vla.vision_backbone.num_patches
+                    else:
+                        num_patches = vla.vision_backbone.featurizer.patch_embed.num_patches
+                except Exception:
+                    num_patches = 256
+                
+                action_logits = output.logits[:, num_patches:-1]
+                action_preds = action_logits.argmax(dim=2)
+                
+                # Use input_ids instead of labels to avoid the -100 masking bug from datasets.py
+                action_gt = input_ids[:, 1:].to(device)
+                mask = (action_tokenizer.action_token_end_idx > action_gt) & (action_gt > action_tokenizer.action_token_begin_idx)
+                
+                gt_tokens = action_gt[mask].cpu().numpy()
+                pred_tokens = action_preds[mask].cpu().numpy()
 
-            if len(gt_tokens) < n_codes or len(pred_tokens) < n_codes:
-                continue
-            
-            pred_cont = action_tokenizer.decode_token_ids_to_actions(pred_tokens[:n_codes])
-            if isinstance(pred_cont, torch.Tensor):
-                pred_cont = pred_cont.cpu().numpy()
-            
-            if pred_cont.ndim > 1:
-                pred_cont = pred_cont[0]
-            
-            # Unnormalize if needed (for bin)
-            if is_bin and unnorm_q01 is not None:
-                pred_cont = np.where(
-                    unnorm_mask,
-                    0.5 * (pred_cont + 1) * (unnorm_q99 - unnorm_q01) + unnorm_q01,
-                    pred_cont,
-                )
-            
-            gt_action = raw_data["action"]
-            l1_error = np.abs(pred_cont - gt_action).mean()
+                if len(gt_tokens) < n_codes or len(pred_tokens) < n_codes:
+                    continue
+                
+                pred_cont = action_tokenizer.decode_token_ids_to_actions(pred_tokens[:n_codes])
+                if isinstance(pred_cont, torch.Tensor):
+                    pred_cont = pred_cont.cpu().numpy()
+                
+                if pred_cont.ndim > 1:
+                    pred_cont = pred_cont[0]
+                
+                # Unnormalize if needed (for bin)
+                if is_bin and unnorm_q01 is not None:
+                    pred_cont = np.where(
+                        unnorm_mask,
+                        0.5 * (pred_cont + 1) * (unnorm_q99 - unnorm_q01) + unnorm_q01,
+                        pred_cont,
+                    ).astype(np.float32)
+                
+                # Use the raw data from our monkey-patched transform
+                gt_action = step["raw_action"].copy()
+                if gt_action.shape[-1] == 7:
+                    # Map RLDS gripper [0, 1] to training range [-1, 1]
+                    gt_action[6] = gt_action[6] * 2.0 - 1.0
+                l1_error = np.abs(pred_cont - gt_action).mean()
 
-            
-            sample_data = {
-                "image_np": raw_data["image"],
-                "instruction": raw_data["instruction"],
-                "gt_action": gt_action,
-                "pred_action": pred_cont,
-                "gt_tokens": gt_tokens[:n_codes],
-                "pred_tokens": pred_tokens[:n_codes],
-                "l1_error": l1_error
-            }
-            
-            failures.append((l1_error, sample_data))
-            
-            if i % 10 == 0:
-                print(f"  Processed {i} steps...")
+                sample_data = {
+                    "image_np": step["raw_image"],
+                    "instruction": step["raw_instruction"],
+                    "gt_action": gt_action,
+                    "pred_action": pred_cont,
+                    "gt_tokens": gt_tokens[:n_codes],
+                    "pred_tokens": pred_tokens[:n_codes],
+                    "l1_error": l1_error
+                }
+                
+                failures.append((l1_error, sample_data))
+                
+                if i % 10 == 0:
+                    print(f"  Processed {i} samples...")
 
     # Sort failures by L1 error descending
     failures.sort(key=lambda x: x[0], reverse=True)

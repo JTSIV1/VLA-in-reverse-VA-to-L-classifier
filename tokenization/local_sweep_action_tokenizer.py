@@ -36,6 +36,50 @@ from prismatic.vla.action_tokenizer import ActionTokenizer
 
 # Use current runtime sys.path for imports.
 
+def _get_normalizer(checkpoint_path, data_dir):
+    """Load cached normalizer if available, else fit and cache."""
+    # To avoid long re-fitting (13 mins), we cache normalizer stats.
+    # 1. Primary cache: normalizer.pth in the same dir as the checkpoint
+    # 2. Fallback cache: ~/.cache/vla_normalizers/norm_<hash>.pth (for read-only ckpt dirs)
+    import hashlib
+    from tokenization.train_tokenizer import fit_normalizer
+    from tokenization.oat.model.common.normalizer import LinearNormalizer
+    
+    ckpt_hash = hashlib.md5(str(checkpoint_path).encode()).hexdigest()[:8]
+    data_hash = hashlib.md5(str(data_dir).encode()).hexdigest()[:8]
+    cache_name = f"norm_{ckpt_hash}_{data_hash}.pth"
+    
+    primary_cache = Path(checkpoint_path).parent / "normalizer.pth"
+    fallback_cache = Path.home() / ".cache" / "vla_normalizers" / cache_name
+    
+    # Try loading
+    for p in [primary_cache, fallback_cache]:
+        if p.exists():
+            try:
+                normalizer = LinearNormalizer()
+                normalizer.load_state_dict(torch.load(p, map_location="cpu"))
+                print(f"[*] Loaded normalizer from cache: {p}")
+                return normalizer
+            except Exception:
+                continue
+
+    # Fitting
+    print(f"[*] Fitting normalizer from {data_dir} (this may take ~13 minutes)...")
+    normalizer = fit_normalizer(data_dir)
+    
+    # Try saving
+    for p in [primary_cache, fallback_cache]:
+        try:
+            p.parent.mkdir(parents=True, exist_ok=True)
+            torch.save(normalizer.state_dict(), p)
+            print(f"[*] Cached normalizer to {p}")
+            break
+        except Exception as e:
+            continue
+            
+    return normalizer
+
+
 def _load_tokenizer_model(tokenizer_type, checkpoint_path, device="cpu"):
     """Load a trained tokenizer from a sweep checkpoint.
 
@@ -46,7 +90,6 @@ def _load_tokenizer_model(tokenizer_type, checkpoint_path, device="cpu"):
 
     if tokenizer_type == "vq_bet":
         from tokenization.vqbet_tokenizer import VQBeTTokenizer
-        from tokenization.train_tokenizer import fit_normalizer
 
         chunk_size = args.get("chunk_size", 5)
         latent_dim = args.get("latent_dim", 512)
@@ -57,22 +100,18 @@ def _load_tokenizer_model(tokenizer_type, checkpoint_path, device="cpu"):
             action_dim=7, chunk_size=chunk_size,
             latent_dim=latent_dim, n_embed=n_embed, groups=groups,
         )
-        # Fit normalizer (same as training)
+        # Fit or Load normalizer
         data_dir = args.get("data_dir", "/data/user_data/yashagar/task_D_D/training/")
-        normalizer = fit_normalizer(data_dir)
+        normalizer = _get_normalizer(checkpoint_path, data_dir)
         model.set_normalizer(normalizer)
 
         model.load_state_dict(ckpt["model_state_dict"])
         model.to(device).eval()
 
         # VQ-BeT: `groups` codes per chunk, each in [0, n_embed)
-        # Total vocab = n_embed (codes from different groups share the same range
-        # but have different semantic meaning, so we interleave them)
         return model, chunk_size, groups, n_embed, None  # no FSQ levels for VQ-BeT
 
     elif tokenizer_type in ("oat", "quest"):
-        from tokenization.train_tokenizer import fit_normalizer
-
         if tokenizer_type == "oat":
             from tokenization.train_tokenizer import build_oat
             import argparse
@@ -85,7 +124,7 @@ def _load_tokenizer_model(tokenizer_type, checkpoint_path, device="cpu"):
             model = build_quest(build_args)
 
         data_dir = args.get("data_dir", "/data/user_data/yashagar/task_D_D/training/")
-        normalizer = fit_normalizer(data_dir)
+        normalizer = _get_normalizer(checkpoint_path, data_dir)
         model.set_normalizer(normalizer)
 
         model.load_state_dict(ckpt["model_state_dict"])
