@@ -337,7 +337,18 @@ SUPPORTED_METHODS = [
     "fast",
     "quest",
     "oat",
+    "scratch",
+    "r3m",
+    "dinov2_s",
+    "vc1",
 ]
+
+VISION_ENCODER_MAP = {
+    "scratch":  ("scratch",   0),   # (encoder_name, delta_patches)
+    "r3m":      ("r3m",       0),
+    "dinov2_s": ("dinov2_s", 16),
+    "vc1":      ("vc1",       16),
+}
 
 
 def main(args):
@@ -433,6 +444,22 @@ def main(args):
                 result = run_metrics(
                     "oat", trajectories, verb_labels,
                     tokenizer=tok, mode="discrete", num_verbs=num_verbs)
+
+            elif method in VISION_ENCODER_MAP:
+                from analysis.cluster_analysis import build_image_features
+                from utils import load_calvin_to_dataframe
+                encoder_name, delta_patches = VISION_ENCODER_MAP[method]
+                df = load_calvin_to_dataframe(data_dir)
+                if args.max_trajs:
+                    df = df.head(args.max_trajs)
+                print(f"  [{method}] Extracting image features (encoder={encoder_name}, delta={delta_patches}) ...")
+                feats, _ = build_image_features(df, encoder_name, delta_patches=delta_patches, data_dir=data_dir)
+                features = [feats[i] for i in range(len(feats))]
+                result = {"method": method, "mode": "vision"}
+                print(f"  [{method}] Computing verb consistency ratio ...")
+                result["verb_consistency_ratio"] = verb_consistency_ratio(features, verb_labels, mode="continuous")
+                vcr = result["verb_consistency_ratio"]
+                print(f"  consistency_ratio={vcr['consistency_ratio']:.4f}  within={vcr['within_verb']:.4f}  cross={vcr['cross_verb']:.4f}")
 
             else:
                 print(f"  Skipping unknown method: {method}")

@@ -216,7 +216,7 @@ def _build_encoder(encoder_name):
     return encoder, embed_dim, num_tokens
 
 
-def build_image_features(df, encoder_name, delta_patches=16, batch_size=64):
+def build_image_features(df, encoder_name, delta_patches=16, batch_size=64, data_dir=None):
     """Extract frozen image-encoder features for first+last frames of each episode.
 
     Returns:
@@ -273,14 +273,15 @@ def build_image_features(df, encoder_name, delta_patches=16, batch_size=64):
         first_frames = []
         last_frames = []
 
+        _img_dir = data_dir if data_dir is not None else TRAIN_DIR
         for i in range(batch_start, batch_end):
             s_idx, e_idx = int(starts[i]), int(ends[i])
             # Load first frame
-            path_first = os.path.join(TRAIN_DIR, EPISODE_TEMPLATE.format(s_idx))
+            path_first = os.path.join(_img_dir, EPISODE_TEMPLATE.format(s_idx))
             img_first = Image.fromarray(np.load(path_first)[IMAGE_KEY]).convert("RGB")
             first_frames.append(transform(img_first))
             # Load last frame
-            path_last = os.path.join(TRAIN_DIR, EPISODE_TEMPLATE.format(e_idx))
+            path_last = os.path.join(_img_dir, EPISODE_TEMPLATE.format(e_idx))
             img_last = Image.fromarray(np.load(path_last)[IMAGE_KEY]).convert("RGB")
             last_frames.append(transform(img_last))
 
