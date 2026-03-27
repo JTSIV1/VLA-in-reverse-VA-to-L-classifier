@@ -380,16 +380,20 @@ def main(args):
                     vocab_size=k, num_verbs=num_verbs)
 
             elif method == "fast":
+                import dill
+                import torch as _torch
                 from tokenization.action_tokenizers import TokenizerAdapter
                 from oat.tokenizer.fast.tokenizer_wrapper import FASTTok
-                from transformers import AutoProcessor
-                # Load custom FAST code from HF hub, then replace tokenizer with trained one
-                tok_raw = FASTTok("physical-intelligence/fast")
-                trained_path = os.path.join(CHECKPOINT_DIR, "my_fast")
-                tok_raw.fast_tok = AutoProcessor.from_pretrained(
-                    "physical-intelligence/fast", trust_remote_code=True, use_fast=False)
-                # Load trained tokenizer vocab into the processor
+                from oat.model.common.normalizer import LinearNormalizer as _LN
                 from transformers import PreTrainedTokenizerFast
+                # Initialize with HF hub (gets custom FAST processor code)
+                tok_raw = FASTTok("physical-intelligence/fast")
+                # Load model state dict from trained checkpoint (includes fitted normalizer)
+                fast_ckpt = os.path.join(CHECKPOINT_DIR, "fast_trained.ckpt")
+                payload = _torch.load(fast_ckpt, pickle_module=dill, map_location="cpu", weights_only=False)
+                tok_raw.load_state_dict(payload["state_dicts"]["model"])
+                # Swap in trained tokenizer vocab
+                trained_path = os.path.join(CHECKPOINT_DIR, "my_fast")
                 trained_inner = PreTrainedTokenizerFast(tokenizer_file=os.path.join(trained_path, "tokenizer.json"))
                 tok_raw.fast_tok.tokenizer = trained_inner
                 tok = TokenizerAdapter(tok_raw, "fast", horizon=TOKENIZER_HORIZON, max_tokens=MAX_SEQ_LEN)

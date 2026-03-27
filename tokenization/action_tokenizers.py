@@ -187,8 +187,10 @@ def load_action_tokenizer(
 
         sd = torch.load(quest_ckpt, map_location="cpu", weights_only=False)
         tok.load_state_dict(sd["model"])
-        tok.set_normalizer(sd["normalizer"])
-            
+        from oat.model.common.normalizer import LinearNormalizer as _LN
+        _norm = _LN(); _norm.load_state_dict(sd["normalizer"])
+        tok.set_normalizer(_norm)
+
         return TokenizerAdapter(tok, "quest", horizon=horizon, max_tokens=max_tokens)
 
     if name == "oat":
@@ -222,7 +224,9 @@ def load_action_tokenizer(
 
         sd = torch.load(oat_ckpt, map_location="cpu", weights_only=False)
         tok.load_state_dict(sd["model"])
-        tok.set_normalizer(sd["normalizer"])
+        from oat.model.common.normalizer import LinearNormalizer as _LN
+        _norm = _LN(); _norm.load_state_dict(sd["normalizer"])
+        tok.set_normalizer(_norm)
         return TokenizerAdapter(tok, "oat", horizon=horizon, max_tokens=max_tokens)
 
     raise ValueError(f"Unknown tokenizer name {name}")
