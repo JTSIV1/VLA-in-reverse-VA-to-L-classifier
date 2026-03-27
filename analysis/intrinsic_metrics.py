@@ -341,6 +341,10 @@ SUPPORTED_METHODS = [
     "r3m",
     "dinov2_s",
     "vc1",
+    "dinov2_s+native",
+    "vc1+native",
+    "gampt_k64+vc1",
+    "gampt_continuous+vc1",
 ]
 
 VISION_ENCODER_MAP = {
@@ -348,6 +352,15 @@ VISION_ENCODER_MAP = {
     "r3m":      ("r3m",       0),
     "dinov2_s": ("dinov2_s", 16),
     "vc1":      ("vc1",       16),
+}
+
+MULTIMODAL_MAP = {
+    # method -> (vision_encoder, delta_patches, action_mode)
+    # action_mode: "native" | "gampt_continuous"
+    "dinov2_s+native":        ("dinov2_s", 16, "native"),
+    "vc1+native":             ("vc1",       16, "native"),
+    "gampt_k64+vc1":          ("vc1",       16, "gampt_continuous"),
+    "gampt_continuous+vc1":   ("vc1",       16, "gampt_continuous"),
 }
 
 
@@ -444,6 +457,42 @@ def main(args):
                 result = run_metrics(
                     "oat", trajectories, verb_labels,
                     tokenizer=tok, mode="discrete", num_verbs=num_verbs)
+
+            elif method in MULTIMODAL_MAP:
+                import numpy as _np
+                from analysis.cluster_analysis import build_image_features
+                from utils import load_calvin_to_dataframe
+                vis_encoder, delta_patches, action_mode = MULTIMODAL_MAP[method]
+                df = load_calvin_to_dataframe(data_dir)
+                if args.max_trajs:
+                    df = df.head(args.max_trajs)
+                # Vision features
+                print(f"  [{method}] Extracting vision features ({vis_encoder}, delta={delta_patches}) ...")
+                vis_feats, _ = build_image_features(df, vis_encoder, delta_patches=delta_patches, data_dir=data_dir)
+                # Action features
+                print(f"  [{method}] Extracting action features ({action_mode}) ...")
+                if action_mode == "native":
+                    act_feats = _np.stack([traj.mean(axis=0) for traj in trajectories])
+                else:  # gampt_continuous
+                    from tokenization.gampt import GAMPTTokenizer
+                    ckpt = os.path.join(CHECKPOINT_DIR, f"gampt_k{args.gampt_k}.pkl")
+                    tok = GAMPTTokenizer.load(ckpt)
+                    act_feats_list = []
+                    for traj in trajectories:
+                        _, feats = tok.get_primitive_features(traj)
+                        act_feats_list.append(feats.mean(axis=0) if feats is not None and len(feats) > 0 else _np.zeros(14, dtype=_np.float32))
+                    act_feats = _np.stack(act_feats_list)
+                # Normalize each modality then concatenate
+                from sklearn.preprocessing import normalize as _norm
+                vis_n = _norm(vis_feats)
+                act_n = _norm(act_feats)
+                combined = _np.concatenate([vis_n, act_n], axis=1)
+                features = [combined[i] for i in range(len(combined))]
+                result = {"method": method, "mode": "continuous"}
+                print(f"  [{method}] Computing verb consistency ratio ...")
+                result["verb_consistency_ratio"] = verb_consistency_ratio(features, verb_labels, mode="continuous")
+                vcr = result["verb_consistency_ratio"]
+                print(f"  consistency_ratio={vcr['consistency_ratio']:.4f}  within={vcr['within_verb']:.4f}  cross={vcr['cross_verb']:.4f}")
 
             elif method in VISION_ENCODER_MAP:
                 from analysis.cluster_analysis import build_image_features
