@@ -5,12 +5,13 @@ Computes for each gampt_k*.pkl checkpoint:
   1. Codebook utilization  — fraction of k clusters used on the val set
   2. Token-ID verb probe   — linear probe Macro-F1 from token-ID histograms
   3. Encoder latent probe  — linear probe Macro-F1 from mean-pooled 14-D features
+     (also computed with VC-1 features concatenated for the +VC-1 multimodal variants)
 
 Reconstruction loss is not applicable (no learned decoder).
 
 Usage:
     python scripts/gampt_intrinsic_probes.py
-    python scripts/gampt_intrinsic_probes.py --k 64 128 --data_dir /path/to/val
+    python scripts/gampt_intrinsic_probes.py --k 64 --vc1 --data_dir /path/to/val
 """
 
 import argparse
@@ -39,10 +40,20 @@ def load_val_trajectories(data_dir, max_trajs=None):
         ])
         trajectories.append(traj)
         verb_labels.append(verb_to_id[row["primary_verb"]])
-    return trajectories, verb_labels, verb_to_id
+    return trajectories, verb_labels, verb_to_id, df
 
 
-def compute_metrics(tok, trajectories, verb_labels):
+def extract_vc1_features(df, data_dir):
+    """Extract VC-1 delta-16 features for each trajectory (one vector per trajectory)."""
+    import sys
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from analysis.cluster_analysis import build_image_features
+    print("Extracting VC-1 delta-16 features ...")
+    feats, _ = build_image_features(df, "vc1", delta_patches=16, data_dir=data_dir)
+    return feats  # (N, 16*768)
+
+
+def compute_metrics(tok, trajectories, verb_labels, vc1_feats=None):
     from sklearn.linear_model import LogisticRegression
     from sklearn.metrics import f1_score
     from sklearn.preprocessing import normalize
@@ -86,22 +97,33 @@ def compute_metrics(tok, trajectories, verb_labels):
             f1s.append(f1_score(y[val_idx], preds, average="macro", zero_division=0))
         return float(np.mean(f1s))
 
-    token_id_f1  = linear_probe_macro_f1(token_id_hists, y)
-    latent_f1    = linear_probe_macro_f1(latent_feats, y)
+    token_id_f1 = linear_probe_macro_f1(token_id_hists, y)
+    latent_f1   = linear_probe_macro_f1(latent_feats, y)
 
-    return {
+    result = {
         "k":                    k,
         "codebook_utilization": round(utilization * 100, 1),
         "token_id_probe_mf1":   round(token_id_f1 * 100, 1),
         "latent_probe_mf1":     round(latent_f1 * 100, 1),
     }
 
+    # +VC-1: concatenate normalized VC-1 features with normalized latent features
+    if vc1_feats is not None:
+        combined = np.concatenate([normalize(latent_feats), normalize(vc1_feats)], axis=1)
+        result["latent_probe_mf1_vc1"] = round(linear_probe_macro_f1(combined, y) * 100, 1)
+
+    return result
+
 
 def main(args):
     data_dir = args.data_dir or VAL_DIR
     print(f"Loading val trajectories from {data_dir} ...")
-    trajectories, verb_labels, verb_to_id = load_val_trajectories(data_dir, args.max_trajs)
+    trajectories, verb_labels, verb_to_id, df = load_val_trajectories(data_dir, args.max_trajs)
     print(f"Loaded {len(trajectories)} trajectories, {len(verb_to_id)} verbs")
+
+    vc1_feats = None
+    if args.vc1:
+        vc1_feats = extract_vc1_features(df, data_dir)
 
     from tokenization.gampt import GAMPTTokenizer
 
@@ -113,18 +135,26 @@ def main(args):
             continue
         print(f"\n=== GAMPT k={k} ===")
         tok = GAMPTTokenizer.load(ckpt)
-        metrics = compute_metrics(tok, trajectories, verb_labels)
+        metrics = compute_metrics(tok, trajectories, verb_labels, vc1_feats=vc1_feats)
         results.append(metrics)
-        print(f"  Codebook utilization : {metrics['codebook_utilization']}%")
-        print(f"  Token-ID probe Macro-F1: {metrics['token_id_probe_mf1']}%")
-        print(f"  Latent probe Macro-F1:   {metrics['latent_probe_mf1']}%")
+        print(f"  Codebook utilization:    {metrics['codebook_utilization']}%")
+        print(f"  Token-ID probe MF1:      {metrics['token_id_probe_mf1']}%")
+        print(f"  Latent probe MF1:        {metrics['latent_probe_mf1']}%")
+        if "latent_probe_mf1_vc1" in metrics:
+            print(f"  Latent probe MF1 +VC-1: {metrics['latent_probe_mf1_vc1']}%")
 
-    print("\n" + "=" * 60)
-    print(f"{'k':<8} {'Utilization':>14} {'Token-ID F1':>13} {'Latent F1':>11}")
-    print("-" * 60)
+    print("\n" + "=" * 70)
+    header = f"{'k':<8} {'Utilization':>14} {'Token-ID F1':>13} {'Latent F1':>11}"
+    if args.vc1:
+        header += f" {'Latent+VC-1 F1':>15}"
+    print(header)
+    print("-" * 70)
     for r in results:
-        print(f"{r['k']:<8} {r['codebook_utilization']:>13}% {r['token_id_probe_mf1']:>12}% {r['latent_probe_mf1']:>10}%")
-    print("=" * 60)
+        row = f"{r['k']:<8} {r['codebook_utilization']:>13}% {r['token_id_probe_mf1']:>12}% {r['latent_probe_mf1']:>10}%"
+        if args.vc1:
+            row += f" {r.get('latent_probe_mf1_vc1', '---'):>14}%"
+        print(row)
+    print("=" * 70)
 
 
 if __name__ == "__main__":
@@ -132,5 +162,6 @@ if __name__ == "__main__":
     parser.add_argument("--k", nargs="+", type=int, default=[21, 32, 64, 128, 256])
     parser.add_argument("--data_dir", type=str, default=None)
     parser.add_argument("--max_trajs", type=int, default=None)
+    parser.add_argument("--vc1", action="store_true", help="Also compute latent probe with VC-1 features concatenated")
     args = parser.parse_args()
     main(args)
