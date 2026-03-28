@@ -45,12 +45,54 @@ def load_val_trajectories(data_dir, max_trajs=None):
 
 def extract_vc1_features(df, data_dir):
     """Extract VC-1 delta-16 features for each trajectory (one vector per trajectory)."""
-    import sys
-    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from analysis.cluster_analysis import build_image_features
-    print("Extracting VC-1 delta-16 features ...")
-    feats, _ = build_image_features(df, "vc1", delta_patches=16, data_dir=data_dir)
-    return feats  # (N, 16*768)
+    import torch
+    from PIL import Image
+    from torchvision import transforms
+    from config import EPISODE_TEMPLATE, IMAGE_KEY, IMAGE_SIZE
+    from image_encoders import build_image_encoder
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Extracting VC-1 delta-16 features on {device} ...")
+
+    encoder = build_image_encoder("vc1", d_model=128)
+    encoder.eval().to(device)
+    for p in encoder.parameters():
+        p.requires_grad = False
+
+    embed_dim = encoder.embed_dim
+    K = 16
+    transform = transforms.Compose([
+        transforms.Resize((IMAGE_SIZE[0], IMAGE_SIZE[1])),
+        transforms.ToTensor(),
+    ])
+
+    starts = df["start_idx"].values
+    ends   = df["end_idx"].values
+    N = len(df)
+    feats = np.zeros((N, K * embed_dim), dtype=np.float32)
+
+    batch_size = 64
+    for batch_start in range(0, N, batch_size):
+        batch_end = min(batch_start + batch_size, N)
+        first_frames, last_frames = [], []
+        for i in range(batch_start, batch_end):
+            p_first = os.path.join(data_dir, EPISODE_TEMPLATE.format(int(starts[i])))
+            p_last  = os.path.join(data_dir, EPISODE_TEMPLATE.format(int(ends[i])))
+            first_frames.append(transform(Image.fromarray(np.load(p_first)[IMAGE_KEY]).convert("RGB")))
+            last_frames.append(transform(Image.fromarray(np.load(p_last)[IMAGE_KEY]).convert("RGB")))
+        fb = torch.stack(first_frames).to(device)
+        lb = torch.stack(last_frames).to(device)
+        with torch.no_grad():
+            emb_first = encoder.get_embeddings(fb)  # (B, num_tokens, embed_dim)
+            emb_last  = encoder.get_embeddings(lb)
+        diff = emb_last - emb_first
+        mag  = diff.norm(dim=-1)
+        topk_idx = mag.topk(min(K, diff.size(1)), dim=-1).indices
+        selected = torch.gather(diff, 1, topk_idx.unsqueeze(-1).expand(-1, -1, embed_dim))
+        feats[batch_start:batch_end] = selected.reshape(selected.size(0), -1).cpu().numpy()
+        print(f"  {batch_end}/{N} episodes")
+
+    return feats
 
 
 def compute_metrics(tok, trajectories, verb_labels, vc1_feats=None):
