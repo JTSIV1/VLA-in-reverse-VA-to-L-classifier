@@ -209,6 +209,17 @@ def load_bridge_verb_labels(csv_path, episode_keys, min_class_count=30):
     return verb_ids, verb_to_id
 
 
+def load_bridge_instructions(csv_path, episode_keys):
+    """Return per-episode instruction strings matched by episode_key."""
+    import pandas as pd
+    df = pd.read_csv(csv_path)
+    key_to_instr = dict(zip(df["episode_key"], df["instruction"]))
+    instructions = [key_to_instr.get(key, "") for key in episode_keys]
+    matched = sum(1 for i in instructions if i)
+    print(f"  Matched {matched}/{len(episode_keys)} episodes to instructions")
+    return instructions
+
+
 def fit_bridge_normalizer(actions_list):
     """Fit LinearNormalizer on BridgeV2 actions."""
     from oat.model.common.normalizer import LinearNormalizer

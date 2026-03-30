@@ -305,8 +305,29 @@ class TextEncoderWrapper(nn.Module):
                 self.lora_layers.append(lora)
                 attn.c_attn = LoRAWrappedLinear(attn.c_attn, lora)
 
-    def forward(self, text_list):
+    def precompute_cache(self, all_instructions):
+        """Precompute and cache embeddings for all unique instruction strings.
+
+        Call once before training when the text encoder is frozen (lora_r == 0).
+        Subsequent forward() calls return cached embeddings instead of running
+        the text model.
+        """
+        unique = list(set(all_instructions))
+        if not unique:
+            return
         device = next(self.text_model.parameters()).device
+        self._embed_cache = {}
+        # Encode in batches to avoid OOM
+        bs = 256
+        for i in range(0, len(unique), bs):
+            batch = unique[i:i + bs]
+            with torch.no_grad():
+                emb = self._encode(batch, device)
+            for text, vec in zip(batch, emb):
+                self._embed_cache[text] = vec.cpu()
+        print(f"Cached text embeddings for {len(self._embed_cache)} unique instructions")
+
+    def _encode(self, text_list, device):
         inputs = self.tokenizer(text_list, padding=True, truncation=True,
                                 return_tensors='pt').to(device)
         if self.model_type == 'clip':
@@ -322,16 +343,36 @@ class TextEncoderWrapper(nn.Module):
             pooled = outputs.last_hidden_state[batch_idx, seq_lens]
             return pooled
 
+    def forward(self, text_list):
+        device = next(self.text_model.parameters()).device
+
+        # Serve from cache if available (frozen encoder)
+        if hasattr(self, '_embed_cache') and self._embed_cache:
+            # Fall back to live encoding for any uncached strings
+            missed = [t for t in text_list if t not in self._embed_cache]
+            if missed:
+                with torch.no_grad():
+                    emb = self._encode(missed, device)
+                for t, vec in zip(missed, emb):
+                    self._embed_cache[t] = vec.cpu()
+            return torch.stack([self._embed_cache[t] for t in text_list]).to(device)
+
+        return self._encode(text_list, device)
+
 
 # ======================================================================
 # Builder
 # ======================================================================
 
-def get_head_latent_dim(tokenizer_type, latent_dim=64):
+def get_head_latent_dim(tokenizer_type, latent_dim=64, aux_target='latent',
+                        fsq_dim=None):
     """Determine the input dimension for aux heads given tokenizer config.
 
-    OAT/QueST always use the pre-FSQ 256-d encoder output.
+    OAT/QueST normally use the pre-FSQ 256-d encoder output.
+    With aux_target='post_fsq', use the FSQ codebook dimension instead.
     """
+    if aux_target == 'post_fsq' and fsq_dim is not None:
+        return fsq_dim
     if tokenizer_type in ('vq_vae', 'vq_bet'):
         return latent_dim
     if tokenizer_type == 'vqvla':
@@ -347,7 +388,9 @@ def build_aux_heads(tokenizer_type, device,
                     clip_config=None,
                     loss_function='ce',
                     semantic_temp=0.1,
-                    id_to_verb=None):
+                    id_to_verb=None,
+                    aux_target='latent',
+                    fsq_dim=None):
     """Build auxiliary heads for tokenizer training.
 
     Args:
@@ -358,12 +401,21 @@ def build_aux_heads(tokenizer_type, device,
         verb_class_weights: (num_verbs,) tensor of inverse-frequency weights, or None
         clip_config: dict with keys {d_model, transformer_layers, proj_dim,
                      text_model, text_type, text_lora_r}, or None to skip CLIP head
+        aux_target: 'latent' (256d pre-FSQ) or 'post_fsq' (4d post-round)
+        fsq_dim: FSQ codebook dimension (e.g. 4 for [8,5,5,5]), required when
+                 aux_target='post_fsq'
 
     Returns:
         dict with keys: verb_head, verb_criterion, clip_head, text_encoder,
         text_proj, head_latent_dim
     """
-    head_latent_dim = get_head_latent_dim(tokenizer_type, latent_dim=latent_dim)
+    head_latent_dim = get_head_latent_dim(
+        tokenizer_type, latent_dim=latent_dim,
+        aux_target=aux_target, fsq_dim=fsq_dim)
+
+    # Use small d_model when input is low-dimensional post-FSQ codes
+    head_d_model = 16 if aux_target == 'post_fsq' else 128
+    head_nhead = 2 if aux_target == 'post_fsq' else 4
 
     result = dict(verb_head=None, verb_criterion=None,
                   clip_head=None, text_encoder=None, text_proj=None,
@@ -371,8 +423,11 @@ def build_aux_heads(tokenizer_type, device,
 
     # ── Verb head (always uses weighted CE when weights are provided) ──
     if num_verbs > 0:
-        result['verb_head'] = VerbHead(head_latent_dim, num_verbs).to(device)
-        print(f"Verb head: {head_latent_dim} -> CLS -> {num_verbs} classes")
+        result['verb_head'] = VerbHead(
+            head_latent_dim, num_verbs,
+            d_model=head_d_model, nhead=head_nhead,
+        ).to(device)
+        print(f"Verb head: {head_latent_dim} -> d{head_d_model} -> CLS -> {num_verbs} classes")
 
         if loss_function == 'semantic':
             if id_to_verb is None:
@@ -396,10 +451,12 @@ def build_aux_heads(tokenizer_type, device,
     # ── CLIP head ──────────────────────────────────────────────────────
     if clip_config is not None:
         cfg = clip_config
+        clip_d = head_d_model if aux_target == 'post_fsq' else cfg.get('d_model', 128)
+        clip_nhead = head_nhead if aux_target == 'post_fsq' else 4
         result['clip_head'] = ContrastiveHead(
             latent_dim=head_latent_dim,
-            d_model=cfg.get('d_model', 128),
-            nhead=4,
+            d_model=clip_d,
+            nhead=clip_nhead,
             transformer_layers=cfg.get('transformer_layers', 2),
             proj_dim=cfg.get('proj_dim', 128),
         ).to(device)

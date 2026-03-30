@@ -241,9 +241,10 @@ class CalvinVerbProbeDataset(CalvinDataset):
 
     Returns: (frames, actions_tensor, scene_vec, verb_label, seq_len)
 
-    This is the standard batch format consumed by ActionToVerbTransformer.
-    The action sequence can optionally be tokenized (FAST, VQ-VAE, etc.)
-    before being returned.
+    This is the standard batch format consumed by MotionVerbClassifier.
+    Actions are native continuous vectors by default; FAST tokenization
+    is supported via the action_tokenizer parameter. For VQ-BeT/OAT/QueST
+    tokenized actions, use CalvinTokenizerDataset with on-the-fly encoding.
     """
 
     # Import here to avoid circular dependency at module level
@@ -333,12 +334,12 @@ class CalvinVerbProbeDataset(CalvinDataset):
         return frames, actions_tensor, scene_vec, label, seq_len
 
     def _load_and_tokenize_actions(self, idx):
-        """Load actions and optionally tokenize. Returns (tensor, real_len)."""
+        """Load actions and optionally FAST-tokenize. Returns (tensor, real_len)."""
         actions = self._get_actions(idx)
         L = actions.shape[0]
 
         if self.action_tokenizer is not None:
-            # TokenizerAdapter: (T, D) → List[List[int]]
+            # FAST tokenizer: (T, D) → List[int]
             token_ids = self.action_tokenizer(actions)[0]
             token_ids = list(token_ids)
             L_tok = len(token_ids)
@@ -462,3 +463,104 @@ class CalvinTokenizerDataset(CalvinDataset):
         n_valid = min(n_chunks, self.max_chunks)
         starts = np.array([i * cs for i in range(n_valid)])
         return starts, n_valid
+
+
+# ======================================================================
+# Dataset builder helpers (shared by train_tokenizer.py & train_verb_probe.py)
+# ======================================================================
+
+def _load_and_filter_dfs(data_dir, val_dir, min_class_count=0):
+    """Load CALVIN DataFrames and optionally filter sparse verb classes.
+
+    Returns (train_df, val_df).
+    """
+    from utils import load_calvin_to_dataframe
+
+    train_df = load_calvin_to_dataframe(data_dir)
+    val_df = load_calvin_to_dataframe(val_dir)
+
+    if min_class_count > 0:
+        verb_col = 'primary_verb' if 'primary_verb' in train_df.columns else 'verb'
+        vc = train_df[verb_col].value_counts()
+        keep_verbs = set(vc[vc >= min_class_count].index)
+        n_before = len(train_df)
+        train_df = train_df[train_df[verb_col].isin(keep_verbs)].reset_index(drop=True)
+        val_df = val_df[val_df[verb_col].isin(keep_verbs)].reset_index(drop=True)
+        print(f"Filtered: {len(vc)}->{len(keep_verbs)} classes, "
+              f"train {n_before}->{len(train_df)}, val->{len(val_df)}")
+
+    return train_df, val_df
+
+
+def _drop_unseen_val_verbs(val_ds, val_df, verb_to_id):
+    """Drop val samples whose verb is not in verb_to_id."""
+    verb_col = val_ds._verb_col
+    valid_mask = val_df[verb_col].isin(verb_to_id.keys())
+    n_drop = (~valid_mask).sum()
+    if n_drop > 0:
+        print(f"Dropping {n_drop} val samples with unseen verbs")
+        val_ds.df = val_df[valid_mask].reset_index(drop=True)
+
+
+def _verb_metadata(train_ds, train_df):
+    """Extract verb_to_id, id_to_verb, verb_counts from a built dataset."""
+    verb_to_id = train_ds.verb_to_id
+    id_to_verb = train_ds.id_to_verb
+    verb_col = train_ds._verb_col
+    verb_counts = train_df[verb_col].value_counts().to_dict()
+    num_verbs = len(verb_to_id)
+    return num_verbs, id_to_verb, verb_to_id, verb_counts
+
+
+def build_calvin_tokenizer_data(data_dir, val_dir, chunk_size, max_chunks,
+                                sampling, min_class_count=0,
+                                cache_actions=False,
+                                include_instruction=False):
+    """Build train/val CalvinTokenizerDataset pair.
+
+    Used by both tokenizer training and verb probe (tokid/latent modes).
+
+    Returns (train_ds, val_ds, num_verbs, id_to_verb, verb_to_id, verb_counts).
+    """
+    train_df, val_df = _load_and_filter_dfs(data_dir, val_dir, min_class_count)
+
+    train_ds = CalvinTokenizerDataset(
+        data_dir, train_df, chunk_size=chunk_size,
+        max_chunks=max_chunks, sampling=sampling,
+        cache_actions=cache_actions,
+        include_instruction=include_instruction)
+    val_ds = CalvinTokenizerDataset(
+        val_dir, val_df, chunk_size=chunk_size,
+        max_chunks=max_chunks, sampling=sampling,
+        verb_to_id=train_ds.verb_to_id,
+        cache_actions=cache_actions,
+        include_instruction=include_instruction)
+
+    _drop_unseen_val_verbs(val_ds, val_df, train_ds.verb_to_id)
+    num_verbs, id_to_verb, verb_to_id, verb_counts = _verb_metadata(train_ds, train_df)
+
+    return train_ds, val_ds, num_verbs, id_to_verb, verb_to_id, verb_counts
+
+
+def build_calvin_verb_probe_data(data_dir, val_dir, min_class_count=0,
+                                 cache_actions=False, **ds_kwargs):
+    """Build train/val CalvinVerbProbeDataset pair.
+
+    Extra kwargs are forwarded to CalvinVerbProbeDataset (modality,
+    action_tokenizer, max_seq_len, num_frames, delta_patches,
+    image_encoder, transform, img_size).
+
+    Returns (train_ds, val_ds, num_verbs, id_to_verb, verb_to_id, verb_counts).
+    """
+    train_df, val_df = _load_and_filter_dfs(data_dir, val_dir, min_class_count)
+
+    train_ds = CalvinVerbProbeDataset(
+        data_dir, train_df, cache_actions=cache_actions, **ds_kwargs)
+    val_ds = CalvinVerbProbeDataset(
+        val_dir, val_df, verb_to_id=train_ds.verb_to_id,
+        cache_actions=cache_actions, **ds_kwargs)
+
+    _drop_unseen_val_verbs(val_ds, val_df, train_ds.verb_to_id)
+    num_verbs, id_to_verb, verb_to_id, verb_counts = _verb_metadata(train_ds, train_df)
+
+    return train_ds, val_ds, num_verbs, id_to_verb, verb_to_id, verb_counts

@@ -113,13 +113,13 @@ Each directory contains:
 
 ```
 checkpoints/calvin_sweep/tokenizers/
-├── quest_16_4444_2/              # h16/f256/d2, vanilla        (+ native & latent probes)
-├── quest_32_8555_4/              # h32/f1000/d4, vanilla       (+ native & latent probes)
+├── quest_16_4444_2/              # h16/f256/d2, vanilla  
+├── quest_32_8555_4/              # h32/f1000/d4, vanilla 
 ├── quest_16_4444_4/              # h16/f256/d4, vanilla
-├── quest_verb0.1_16_4444_2/      # h16/f256/d2 + verb         (+ native & latent probes)
-├── quest_verb0.1_32_8555_4/      # h32/f1000/d4 + verb        (+ native & latent probes)
-├── quest_verb0.1_16_4444_4/      # h16/f256/d4 + verb         (+ native & latent probes)
-├── quest_clip0.1_16_4444_2/      # h16/f256/d2 + clip         (+ native probe only)
+├── quest_verb0.1_16_4444_2/      # h16/f256/d2 + verb    
+├── quest_verb0.1_32_8555_4/      # h32/f1000/d4 + verb   
+├── quest_verb0.1_16_4444_4/      # h16/f256/d4 + verb   
+├── quest_clip0.1_16_4444_2/      # h16/f256/d2 + clip  
 ├── quest_clip0.1_32_8555_4/      # h32/f1000/d4 + clip
 └── quest_clip0.1_16_4444_4/      # h16/f256/d4 + clip
 ```
@@ -235,26 +235,46 @@ Each tokenizer is evaluated with 3 probe types:
 - **tokid**: discrete token IDs through learned embedding
 - **latent**: continuous encoder latents
 
-*Status: completed (native + latent probes done; tokid probes all FAILED)*
+*All probes retrained with 100 epochs (jobs 6822712–6822730). Native baseline: 30.3% Acc / 28.1% MF1.*
 
-| Condition | native | tokid | latent |
-|-----------|--------|-------|--------|
-| quest_16_4444_2 | 21.5% | FAIL | 26.6% |
-| quest_32_8555_4 | 21.8% | FAIL | 31.1% |
-| quest_16_4444_4 | 23.6% | FAIL | 24.0% |
-| quest_verb0.1_16_4444_2 | 26.7% | FAIL | 37.7% |
-| quest_verb0.1_32_8555_4 | 20.6% | FAIL | 44.0% |
-| quest_verb0.1_16_4444_4 | 17.1% | FAIL | 41.1% |
-| quest_clip0.1_16_4444_2 | 19.2% | FAIL | 38.3% |
-| quest_clip0.1_32_8555_4 | 20.3% | FAIL | 40.5% |
-| quest_clip0.1_16_4444_4 | 23.6% | FAIL | 38.6% |
+### QueST Probes
 
-Notes:
-- **Native baselines** (raw continuous actions) hover around 20-27% — verb signal in raw actions is weak
-- **Latent probes** are dramatically better with aux heads: vanilla 24-31% → verb/clip 38-44%
-- **Best latent probe**: verb h32/d4 at 44.0% — larger horizon captures more verb-relevant structure
-- **Aux heads inject verb info into latents**: +10-17pp over vanilla latent probes
-- **tokid probes all failed** (likely FSQ index embedding issue — investigate)
+Native baseline: 30.3% Acc / 28.1% MF1
+
+| Condition | tokid (Acc / MF1) | latent (Acc / MF1) |
+|-----------|-------------------|-------------------|
+| quest_16_4444_2 | 32.0% / 28.7% | 29.9% / 29.5% |
+| quest_32_8555_4 | 30.2% / 27.1% | 31.4% / 28.9% |
+| quest_16_4444_4 | 31.7% / 27.0% | 31.7% / 27.3% |
+| quest_verb0.1_16_4444_2 | 30.5% / 29.3% | **38.6% / 40.9%** |
+| quest_verb0.1_32_8555_4 | 30.0% / 27.1% | **40.7% / 42.6%** |
+| quest_verb0.1_16_4444_4 | 30.6% / 26.1% | **36.5% / 38.5%** |
+| quest_clip0.1_16_4444_2 | 32.9% / 29.8% | **39.0% / 41.1%** |
+| quest_clip0.1_32_8555_4 | 27.5% / 24.7% | **40.1% / 40.4%** |
+| quest_clip0.1_16_4444_4 | 32.3% / 30.7% | **37.2% / 37.0%** |
+
+**Findings:** Aux heads (verb/clip) dramatically improve latent verb decodability (37–43% MF1 vs ~28% vanilla), but tokid probes show no benefit (~27–31% MF1 across the board). The discrete FSQ codes do not retain the semantic structure that the aux loss injects into the continuous latents.
+
+### VQ-BeT Probes
+
+Native baseline: 30.9% Acc / 26.5% MF1
+
+| Condition | tokid (Acc / MF1) | latent (Acc / MF1) |
+|-----------|-------------------|-------------------|
+| vq_bet_5_16_2 | 30.9% / 27.8% | 23.4% / 18.1% |
+| vq_bet_5_16_4 | 30.2% / 28.8% | 18.5% / 12.5% |
+| vq_bet_5_16_4_verb0.1 | 29.9% / 25.5% | 29.0% / 25.7% |
+| vq_bet_5_16_4_clip0.1 | **32.0% / 29.8%** | 30.2% / 26.6% |
+| vq_bet_5_64_2 | 32.9% / 28.4% | 21.9% / 18.4% |
+| vq_bet_10_16_2 | 28.4% / 25.9% | 20.7% / 16.4% |
+| vq_bet_10_16_4 | 31.5% / 27.1% | 15.9% / 11.5% |
+| vq_bet_10_64_2 | 31.7% / 26.2% | 20.6% / 16.9% |
+
+**VQ-BeT findings:**
+- **Latent probes are very weak** (12–18% MF1 for vanilla) — much worse than QueST latents. VQ-BeT's ResidualVQ bottleneck compresses latents more aggressively.
+- **Aux heads help VQ-BeT latents** (verb: 25.7%, clip: 26.6%) but the gain is smaller than for QueST (~+13pp vs ~+14pp).
+- **Tokid probes are the better representation for VQ-BeT** — consistently outperform latents, opposite to QueST.
+- **Best VQ-BeT tokid**: vq_bet_5_64_2 at 32.9% acc / 28.4% MF1.
 
 ---
 
@@ -285,39 +305,46 @@ Notes:
 
 ---
 
-## 8. Real L1 Evaluation
+## 8. Real L1 Evaluation (Teacher-Forced)
 
-*Status: pending (after policy training)*
+*Partial results from 100 batches (TF jobs timed out at 4h due to slow RLDS streaming; metrics stable by batch 100).*
 
-| Condition | Real L1 | V1 Real L1 | Delta |
-|-----------|---------|------------|-------|
-| quest_16_4444_2 | — | 0.304 | — |
-| quest_32_8555_4 | — | 0.315 | — |
-| quest_16_4444_4 | — | 0.318 | — |
-| quest_verb0.1_16_4444_2 | — | 0.303 | — |
-| quest_verb0.1_32_8555_4 | — | — | — |
-| quest_verb0.1_16_4444_4 | — | — | — |
-| quest_clip0.1_16_4444_2 | — | 0.317 | — |
-| quest_clip0.1_32_8555_4 | — | — | — |
-| quest_clip0.1_16_4444_4 | — | — | — |
+| Condition | Real L1 | V1 Real L1 |
+|-----------|---------|------------|
+| quest_16_4444_2 | 0.0520 | 0.304 |
+| quest_16_4444_2_verb0.1 | 0.0279 | 0.303 |
+| quest_16_4444_2_clip0.1 | **0.0213** | 0.317 |
+| quest_16_4444_4 | 0.0831 | 0.318 |
+| quest_16_4444_4_verb0.1 | 0.0322 | — |
+| quest_16_4444_4_clip0.1 | 0.0310 | — |
+| quest_32_8555_4 | 0.1200 | 0.315 |
+| quest_32_8555_4_verb0.1 | 0.0394 | — |
+| quest_32_8555_4_clip0.1 | 0.0666 | — |
+
+Notes:
+- V2 Real L1 is much lower than V1 across the board — the horizon fix drastically improved reconstruction
+- **Aux heads reduce Real L1**: verb/clip conditions have 2–3× lower L1 than vanilla within each config
+- **Best Real L1**: clip h16/d2 (0.0213), followed by verb h16/d2 (0.0279)
+- h32/d4 configs have the highest L1 (larger codebook = harder to predict)
+- V1 Real L1 values are not directly comparable (different eval methodology: V1 used evaluate_openvla.py)
 
 ---
 
 ## 9. Rollout Evaluation
 
-*Status: pending (after policy training)*
+*All 9 QueST V2 conditions evaluated (1000 sequences each).*
 
-| Condition | SR1 | SR2 | SR3 | V1 SR1 | Delta |
-|-----------|-----|-----|-----|--------|-------|
-| quest_16_4444_2 | — | — | — | 0.0% (broken) | — |
-| quest_32_8555_4 | — | — | — | 0.3% (broken) | — |
-| quest_16_4444_4 | — | — | — | 0.0% (broken) | — |
-| quest_verb0.1_16_4444_2 | — | — | — | 0.0% (broken) | — |
-| quest_verb0.1_32_8555_4 | — | — | — | — | — |
-| quest_verb0.1_16_4444_4 | — | — | — | — | — |
-| quest_clip0.1_16_4444_2 | — | — | — | 0.0% (broken) | — |
-| quest_clip0.1_32_8555_4 | — | — | — | — | — |
-| quest_clip0.1_16_4444_4 | — | — | — | — | — |
+| Condition | SR1 | SR2 | SR3 | V1 SR1 |
+|-----------|-----|-----|-----|--------|
+| quest_32_8555_4 | **6.5%** | 0.0% | 0.0% | 0.3% (broken) |
+| quest_32_8555_4_verb0.1 | 4.5% | 0.0% | 0.0% | — |
+| quest_16_4444_4 | 3.8% | 0.1% | 0.0% | 0.0% (broken) |
+| quest_32_8555_4_clip0.1 | 2.1% | 0.1% | 0.0% | — |
+| quest_16_4444_2_verb0.1 | 1.0% | 0.0% | 0.0% | 0.0% (broken) |
+| quest_16_4444_2_clip0.1 | 0.5% | 0.0% | 0.0% | 0.0% (broken) |
+| quest_16_4444_2 | 0.1% | 0.0% | 0.0% | 0.0% (broken) |
+| quest_16_4444_4_verb0.1 | 0.0% | 0.0% | 0.0% | — |
+| quest_16_4444_4_clip0.1 | 0.0% | 0.0% | 0.0% | — |
 
 ### V1 Best (VQ-BeT, for comparison target)
 
@@ -326,5 +353,9 @@ Notes:
 | vb_c5e16g4_verb01 | 35.7% | 5.3% |
 | vb_c10e16g4 | 34.7% | 6.5% |
 
-**Goal**: With the horizon fix, QueST should match or exceed VQ-BeT's 35.7% SR1 given
-its superior Real L1 (0.30 vs 0.32).
+**Findings:**
+- QueST V2 rollout performance is very poor (best 6.5% SR1), far below VQ-BeT V1 (35.7%).
+- The horizon fix improved V1→V2 (0% → 0.1–6.5%), confirming the bug was real, but QueST still underperforms.
+- **Lower Real L1 does not predict higher SR**: clip h16/d2 has the best L1 (0.021) but only 0.5% SR1, while vanilla h32/d4 has the worst L1 (0.120) but the best SR1 (6.5%).
+- **Aux heads hurt rollout for h16/d4**: vanilla gets 3.8% SR1, but verb and clip get 0.0%. The aux loss may overfit the tokenizer to semantic structure at the expense of action fidelity.
+- h32/d4 configs do best in rollout despite having the highest policy loss and Real L1 — longer horizons may be more forgiving of per-step errors.

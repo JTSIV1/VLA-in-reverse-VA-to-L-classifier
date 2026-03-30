@@ -48,10 +48,15 @@ logger = logging.getLogger(__name__)
 
 # ── Path setup ─────────────────────────────────────────────────────────────────
 PROJECT_ROOT = str(Path(__file__).resolve().parents[2])
-OPENVLA_DIR  = str(Path("/data/user_data/wenjiel2/Code/openvla-mini"))
-CALVIN_DIR   = str(Path("/data/user_data/wenjiel2/Code/calvin"))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
 
-for p in [PROJECT_ROOT, OPENVLA_DIR,
+import config as C  # noqa: E402
+
+OPENVLA_DIR  = C.OPENVLA_DIR
+CALVIN_DIR   = C.CALVIN_DIR
+
+for p in [OPENVLA_DIR,
           str(Path(CALVIN_DIR) / "calvin_models"),
           str(Path(CALVIN_DIR) / "calvin_env")]:
     if p not in sys.path:

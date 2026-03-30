@@ -56,10 +56,10 @@ from tokenization.train_utils import (
     resume_checkpoint, setup_output_dir, open_csv_logger,
     log_epoch, write_csv_row, save_best_checkpoint, save_final_config,
 )
-from datasets.calvin_dataset import CalvinTokenizerDataset
 from datasets.bridge_dataset import (
     BridgeTokenizerDataset,
-    load_bridge_actions, load_bridge_verb_labels, fit_bridge_normalizer,
+    load_bridge_actions, load_bridge_verb_labels, load_bridge_instructions,
+    fit_bridge_normalizer,
 )
 from tokenization.aux_heads import contrastive_loss, build_aux_heads
 from tokenization.eval_tokenizer import eval_epoch, eval_clip_retrieval
@@ -166,9 +166,13 @@ def train_epoch(model, loader, optimizer, device, args,
         loss = result['recon_loss']
         loss = loss + args.vq_weight * result.get('vq_loss', torch.tensor(0.0, device=device))
 
+        # Select aux input: post-FSQ 4d codes or pre-FSQ 256d latents
+        aux_input = (result['fsq_codes'] if args.aux_target == 'post_fsq'
+                     else result['latents'])
+
         # Verb classification
         if verb_head is not None and args.verb_cls_lambda > 0:
-            verb_logits = verb_head(result['latents'], result['n_valid'],
+            verb_logits = verb_head(aux_input, result['n_valid'],
                                     positions=result['positions'])
             verb_ids = result['verb_ids']
             valid = verb_ids >= 0
@@ -184,7 +188,7 @@ def train_epoch(model, loader, optimizer, device, args,
 
         # CLIP contrastive
         if clip_head is not None and args.clip_lambda > 0:
-            action_emb = clip_head(result['latents'], result['n_valid'],
+            action_emb = clip_head(aux_input, result['n_valid'],
                                    positions=result['positions'])
             instructions = result['instructions']
             with torch.set_grad_enabled(text_encoder.lora_r > 0):
@@ -286,8 +290,20 @@ def build_dataloaders(args):
     num_verbs = 0
 
     if args.dataset == "bridge":
-        # Bridge: load shards, split by episode
+        import pandas as pd
+
+        # Bridge: load shards, then filter to episodes in the CSV
         all_actions, all_keys = load_bridge_actions(args.shard_dir)
+        csv_df = pd.read_csv(args.bridge_csv)
+        csv_key_set = set(csv_df["episode_key"])
+
+        # Keep only episodes that appear in the CSV
+        n_total = len(all_actions)
+        keep_idx = [i for i, k in enumerate(all_keys) if k in csv_key_set]
+        all_actions = [all_actions[i] for i in keep_idx]
+        all_keys = [all_keys[i] for i in keep_idx]
+        print(f"Filtered to {len(all_actions)}/{n_total} episodes "
+              f"using {args.bridge_csv}")
 
         np.random.seed(42)
         perm = np.random.permutation(len(all_actions))
@@ -303,17 +319,25 @@ def build_dataloaders(args):
             train_verb_ids = [all_verb_ids[i] for i in perm[n_val:]]
             val_verb_ids = [all_verb_ids[i] for i in perm[:n_val]]
 
+        train_instructions, val_instructions = None, None
+        if aux_head == 'clip':
+            all_instructions = load_bridge_instructions(args.bridge_csv, all_keys)
+            train_instructions = [all_instructions[i] for i in perm[n_val:]]
+            val_instructions = [all_instructions[i] for i in perm[:n_val]]
+
         sampling = args.sampling
         max_k = args.max_chunks if aux_head else 1
 
         train_ds = BridgeTokenizerDataset(
             train_actions, chunk_size=args.chunk_size, max_chunks=max_k,
             sampling=sampling,
-            verb_ids=train_verb_ids, verb_to_id=verb_to_id)
+            verb_ids=train_verb_ids, verb_to_id=verb_to_id,
+            instructions=train_instructions)
         val_ds = BridgeTokenizerDataset(
             val_actions, chunk_size=args.chunk_size, max_chunks=max_k,
             sampling=sampling,
-            verb_ids=val_verb_ids, verb_to_id=verb_to_id)
+            verb_ids=val_verb_ids, verb_to_id=verb_to_id,
+            instructions=val_instructions)
         train_ds.verb_to_id = verb_to_id or {}
         train_ds.id_to_verb = {v: k for k, v in train_ds.verb_to_id.items()}
         val_ds.verb_to_id = train_ds.verb_to_id
@@ -327,39 +351,27 @@ def build_dataloaders(args):
                 num_verbs, verb_to_id, train_verb_ids=train_verb_ids)
     else:
         # CALVIN
-        train_df = load_calvin_to_dataframe(args.data_dir)
-        val_df = load_calvin_to_dataframe(args.val_dir)
+        from datasets.calvin_dataset import build_calvin_tokenizer_data
 
-        if aux_head == 'verb' and args.min_class_count > 0:
-            verb_col = 'primary_verb' if 'primary_verb' in train_df.columns else 'verb'
-            verb_counts = train_df[verb_col].value_counts()
-            keep_verbs = set(verb_counts[verb_counts >= args.min_class_count].index)
-            train_df = train_df[train_df[verb_col].isin(keep_verbs)].reset_index(drop=True)
-            val_df = val_df[val_df[verb_col].isin(keep_verbs)].reset_index(drop=True)
-            print(f"Filtered to {len(keep_verbs)} verb classes, "
-                  f"{len(train_df)} train / {len(val_df)} val")
-
-        sampling = args.sampling
         max_k = args.max_chunks if aux_head else 1
         include_instr = (aux_head == 'clip')
-        train_ds = CalvinTokenizerDataset(
-            args.data_dir, train_df, chunk_size=args.chunk_size,
-            max_chunks=max_k, sampling=sampling, cache_actions=True,
-            include_instruction=include_instr)
-        val_ds = CalvinTokenizerDataset(
-            args.val_dir, val_df, chunk_size=args.chunk_size,
-            max_chunks=max_k, sampling=sampling, cache_actions=True,
-            include_instruction=include_instr,
-            verb_to_id=train_ds.verb_to_id)
+        min_cc = args.min_class_count if aux_head == 'verb' else 0
+
+        train_ds, val_ds, num_verbs, _, _, _ = \
+            build_calvin_tokenizer_data(
+                args.data_dir, args.val_dir,
+                chunk_size=args.chunk_size, max_chunks=max_k,
+                sampling=args.sampling, min_class_count=min_cc,
+                cache_actions=True, include_instruction=include_instr)
 
         normalizer = fit_normalizer(args.data_dir)
 
-        if aux_head == 'verb' and hasattr(train_ds, 'verb_to_id') and train_ds.verb_to_id:
+        if aux_head == 'verb' and train_ds.verb_to_id:
             num_verbs = len(train_ds.verb_to_id)
-            verb_col = getattr(train_ds, '_verb_col', 'verb')
             verb_class_weights = _compute_verb_class_weights(
                 num_verbs, train_ds.verb_to_id,
-                train_df=train_df, verb_col=verb_col)
+                train_df=train_ds.df,
+                verb_col=train_ds._verb_col)
 
     train_loader = DataLoader(train_ds, batch_size=args.batch_size,
                               shuffle=True, num_workers=args.num_workers,
@@ -474,6 +486,8 @@ def parse_args():
     parser.add_argument("--weight_decay", type=float, default=1e-4)
     parser.add_argument("--max_grad_norm", type=float, default=1.0)
     parser.add_argument("--patience", type=int, default=15)
+    parser.add_argument("--seed", type=int, default=None,
+                        help="Random seed for model initialization (default: None = no seed)")
     parser.add_argument("--num_workers", type=int, default=4)
 
     # Aux head
@@ -482,6 +496,10 @@ def parse_args():
                         help="Auxiliary head type (default: none)")
     parser.add_argument("--aux_lambda", type=float, default=0.5,
                         help="Loss weight for the auxiliary head (default: 0.5)")
+    parser.add_argument("--aux_target", type=str, default="latent",
+                        choices=["latent", "post_fsq"],
+                        help="Which representation to feed to aux head: "
+                             "'latent' = 256d pre-FSQ, 'post_fsq' = 4d post-round with STE")
     parser.add_argument("--min_class_count", type=int, default=30,
                         help="Min samples per verb class (sparse filtering)")
     parser.add_argument("--max_chunks", type=int, default=8,
@@ -585,11 +603,16 @@ def main():
         return
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if args.seed is not None:
+        torch.manual_seed(args.seed)
+        torch.cuda.manual_seed_all(args.seed)
+        print(f"Torch seed: {args.seed}")
     print(f"Device: {device}")
     print(f"Tokenizer: {args.tokenizer}")
 
     data = build_dataloaders(args)
     train_ds = data['train_ds']
+    val_ds = data['val_ds']
     train_loader = data['train_loader']
     val_loader = data['val_loader']
     normalizer = data['normalizer']
@@ -645,6 +668,8 @@ def main():
             text_lora_r=args.text_lora_r,
         )
 
+    # FSQ dim = number of FSQ levels (e.g. [8,5,5,5] → 4)
+    fsq_dim = len(args.fsq_levels) if hasattr(args, 'fsq_levels') else None
     heads = build_aux_heads(
         args.tokenizer, device,
         latent_dim=args.latent_dim,
@@ -654,12 +679,27 @@ def main():
         loss_function=getattr(args, 'loss_function', 'ce'),
         semantic_temp=getattr(args, 'semantic_temp', 0.1),
         id_to_verb=getattr(train_ds, 'id_to_verb', None),
+        aux_target=args.aux_target,
+        fsq_dim=fsq_dim,
     )
     verb_head = heads['verb_head']
     verb_criterion = heads['verb_criterion']
     clip_head = heads['clip_head']
     text_encoder = heads['text_encoder']
     text_proj = heads['text_proj']
+
+    # ── Precompute text embeddings if encoder is frozen ────────────────
+    if text_encoder is not None and text_encoder.lora_r == 0:
+        all_instructions = set()
+        for ds in (train_ds, val_ds):
+            if hasattr(ds, 'df') and 'instruction' in ds.df.columns:
+                all_instructions.update(ds.df['instruction'].dropna().unique())
+            elif hasattr(ds, 'instructions') and ds.instructions:
+                all_instructions.update(ds.instructions)
+        # Remove empty strings — no embedding needed for missing instructions
+        all_instructions.discard("")
+        if all_instructions:
+            text_encoder.precompute_cache(list(all_instructions))
 
     # ── Optimizer ───────────────────────────────────────────────────────
     params = [p for p in model.parameters() if p.requires_grad]

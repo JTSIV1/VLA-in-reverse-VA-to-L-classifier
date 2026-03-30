@@ -11,19 +11,24 @@ from sklearn.metrics import f1_score
 from tokenization.aux_heads import contrastive_loss
 
 
-def codes_to_unique_count(codes_list):
+def codes_to_unique_count(codes_list, is_residual_vq=False):
     """Count unique discrete codes from a list of code tensors.
 
-    Args:
-        codes_list: list of tensors, each (N_i, D) where D >= 1.
-    Returns:
-        int or None if empty.
+    OAT/QueST (is_residual_vq=False):
+        Codes are (B, T) scalar FSQ indices. Count unique scalars.
+    VQ-BeT (is_residual_vq=True):
+        Codes are (B*K, groups) per-group indices. Count unique tuples
+        (each tuple = one effective token in the combinatorial vocabulary).
+
+    Returns int or None if empty.
     """
     if not codes_list:
         return None
     codes_cat = torch.cat(codes_list, dim=0)
-    unique = set(map(tuple, codes_cat.long().numpy().tolist()))
-    return len(unique)
+    if is_residual_vq:
+        return len(set(map(tuple, codes_cat.long().numpy().tolist())))
+    else:
+        return codes_cat.unique().numel()
 
 
 def _extract_episode_batch_import():
@@ -53,9 +58,13 @@ def eval_epoch(model, loader, device, args,
         result = _extract_episode_batch(
             model, batch, device, args.tokenizer)
 
+        # Select aux input: post-FSQ 4d codes or pre-FSQ 256d latents
+        aux_input = (result['fsq_codes'] if getattr(args, 'aux_target', 'latent') == 'post_fsq'
+                     else result['latents'])
+
         # Verb classification
         if verb_head is not None and args.verb_cls_lambda > 0:
-            verb_logits = verb_head(result['latents'], result['n_valid'],
+            verb_logits = verb_head(aux_input, result['n_valid'],
                                     positions=result['positions'])
             verb_ids = result['verb_ids']
             valid = verb_ids >= 0
@@ -70,7 +79,7 @@ def eval_epoch(model, loader, device, args,
 
         # CLIP contrastive
         if clip_head is not None and args.clip_lambda > 0:
-            action_emb = clip_head(result['latents'], result['n_valid'],
+            action_emb = clip_head(aux_input, result['n_valid'],
                                    positions=result['positions'])
             instructions = result['instructions']
             text_features = text_encoder(list(instructions))
@@ -95,7 +104,8 @@ def eval_epoch(model, loader, device, args,
             torch.cat(all_labels).numpy(), torch.cat(all_preds).numpy(),
             average='macro', zero_division=0)
 
-    codebook_util = codes_to_unique_count(all_codes)
+    codebook_util = codes_to_unique_count(
+        all_codes, is_residual_vq=(args.tokenizer == 'vq_bet'))
 
     return {k: v / max(n_batches, 1) for k, v in totals.items()} | {
         'verb_acc': 100.0 * correct / max(total, 1),
@@ -120,7 +130,9 @@ def eval_clip_retrieval(model, loader, device, args,
     for batch in loader:
         result = _extract_episode_batch(
             model, batch, device, args.tokenizer)
-        action_emb = clip_head(result['latents'], result['n_valid'],
+        aux_input = (result['fsq_codes'] if getattr(args, 'aux_target', 'latent') == 'post_fsq'
+                     else result['latents'])
+        action_emb = clip_head(aux_input, result['n_valid'],
                                positions=result['positions'])
         instructions = result['instructions']
         text_features = text_encoder(list(instructions))

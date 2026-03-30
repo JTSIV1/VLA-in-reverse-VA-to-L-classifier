@@ -68,7 +68,8 @@ class OATTok(BaseTokenizer):
 
         Returns:
             dict with recon_loss, vq_loss, latents (B, T', 256) pre-FSQ,
-            codes (B, T') FSQ indices.
+            codes (B, T') FSQ indices,
+            fsq_codes (B, T', fsq_dim) post-round 4-d with STE.
         """
         samples = batch['action']
 
@@ -91,6 +92,7 @@ class OATTok(BaseTokenizer):
             'vq_loss': torch.tensor(0.0, device=samples.device),
             'latents': pre_fsq,        # 256-d for aux heads
             'codes': tokens.detach(),   # FSQ indices
+            'fsq_codes': quant,         # 4-d post-round with STE
         }
 
     def encode_pre_fsq(self, samples: torch.Tensor) -> torch.Tensor:

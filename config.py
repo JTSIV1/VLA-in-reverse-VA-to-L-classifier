@@ -3,11 +3,24 @@ Central configuration for paths and fixed variables.
 """
 
 # ─── Paths ────────────────────────────────────────────────────────────────────
+import os as _os
+PROJECT_DIR = _os.path.dirname(_os.path.abspath(__file__))
+
 DATA_ROOT = "/data/user_data/yashagar/task_D_D/"
 TRAIN_DIR = DATA_ROOT + "training/"
 VAL_DIR = DATA_ROOT + "validation/"
 # Default data dir used by scripts (training split)
 DATA_DIR = TRAIN_DIR
+
+OPENVLA_DIR = "/data/user_data/wenjiel2/Code/openvla-mini"
+CALVIN_DIR = "/data/user_data/wenjiel2/Code/calvin"
+RLDS_DIR = "/data/user_data/wenjiel2/datasets/calvin_rlds"
+
+# ─── Sweep directories ───────────────────────────────────────────────────────
+SWEEP_NAME = "calvin_sweep"
+SWEEP_DIR = _os.path.join(PROJECT_DIR, "checkpoints", SWEEP_NAME)
+TOK_DIR = _os.path.join(SWEEP_DIR, "tokenizers")
+POLICY_DIR = _os.path.join(SWEEP_DIR, "policy")
 
 # ─── CALVIN dataset keys ─────────────────────────────────────────────────────
 LANG_ANNOTATIONS_SUBDIR = "lang_annotations"
