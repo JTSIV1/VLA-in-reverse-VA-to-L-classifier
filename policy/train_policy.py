@@ -39,8 +39,11 @@ import sys
 # ── Paths ────────────────────────────────────────────────────────────────────
 
 PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-OPENVLA_DIR = "/data/user_data/wenjiel2/Code/openvla-mini"
-DATA_DIR = "/data/user_data/wenjiel2/datasets/calvin_rlds"
+sys.path.insert(0, PROJECT_DIR)
+import config as C  # noqa: E402
+
+OPENVLA_DIR = C.OPENVLA_DIR
+DATA_DIR = C.RLDS_DIR
 
 # Tokenizer checkpoint directories
 # VQ-VLA (from Stage 1 fine-tuning)
@@ -51,7 +54,7 @@ VQVLA_CKPTS = {
 }
 
 # Calvind sweep tokenizers (from tokenization/train_tokenizer.py)
-SWEEP_DIR = os.path.join(PROJECT_DIR, "checkpoints", "calvind_sweep")
+SWEEP_DIR = C.SWEEP_DIR
 
 # FAST tokenizer (from DCT + BPE fitting)
 FAST_DIR = os.path.join(PROJECT_DIR, "checkpoints")

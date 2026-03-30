@@ -54,7 +54,10 @@ def setup_output_dir(args):
     if args.tag:
         run_name += f"_{args.tag}"
     if args.aux_head != 'none':
-        run_name += f"_{args.aux_head}{args.aux_lambda}"
+        aux_suffix = f"_{args.aux_head}{args.aux_lambda}"
+        if getattr(args, 'aux_target', 'latent') == 'post_fsq':
+            aux_suffix += "_pfsq"
+        run_name += aux_suffix
     save_dir = os.path.join(args.save_dir, run_name)
     os.makedirs(save_dir, exist_ok=True)
     return save_dir, run_name
@@ -232,6 +235,7 @@ def extract_episode_batch(model, ep_batch, device, tok_type):
 
     lat = result['latents']
     raw_codes = result.get('codes')
+    raw_fsq = result.get('fsq_codes')  # (N, T', fsq_dim) or None
 
     if lat.ndim == 2:
         # VQ-BeT: (N, latent_dim) -> (B, K, latent_dim)
@@ -245,6 +249,7 @@ def extract_episode_batch(model, ep_batch, device, tok_type):
             codes.view(B * K, -1)[mask_flat] = raw_codes
         else:
             codes = None
+        fsq_codes = None  # VQ-BeT has no FSQ codes
     else:
         # OAT/QueST: (N, T', 256) -> (B, K*T', 256)
         T_prime = lat.size(1)
@@ -263,6 +268,15 @@ def extract_episode_batch(model, ep_batch, device, tok_type):
         else:
             codes = None
 
+        # FSQ codes: (N, T', fsq_dim) -> (B, K*T', fsq_dim)
+        if raw_fsq is not None:
+            fsq_dim = raw_fsq.size(-1)
+            fsq_full = torch.zeros(B * K, T_prime, fsq_dim, device=device)
+            fsq_full[mask_flat] = raw_fsq
+            fsq_codes = fsq_full.view(B, K * T_prime, fsq_dim)
+        else:
+            fsq_codes = None
+
         # Expand positions with within-chunk offsets for PE
         pos_expanded = positions.unsqueeze(2).expand(B, K, T_prime)
         offsets = torch.arange(T_prime, device=device).float() / (T_prime * K)
@@ -275,6 +289,7 @@ def extract_episode_batch(model, ep_batch, device, tok_type):
         'vq_loss': result['vq_loss'],
         'latents': latents,
         'codes': codes,
+        'fsq_codes': fsq_codes,
         'positions': positions,
         'n_valid': n_valid,
         'verb_ids': verb_ids,

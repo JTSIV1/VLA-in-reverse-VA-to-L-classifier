@@ -1,4 +1,4 @@
-"""Verb classification probe for CALVIN dataset.
+"""Verb classification probe for CALVIN / BridgeV2 datasets.
 
 Trains MotionVerbClassifier (action_only) or GoalVerbClassifier (goal_only)
 to classify verbs from action trajectories or vision.
@@ -8,6 +8,7 @@ Action representations:
   - fast:        FAST (DCT+BPE) discrete token IDs
   - vq_bet/oat/quest: discrete codebook IDs from frozen tokenizer
   - latent:      continuous encoder latents from frozen tokenizer
+  - vla_embed:   VLA's learned token embeddings (codes → LLM embedding lookup)
 
 Usage:
     # Action-only with native actions
@@ -22,21 +23,22 @@ Usage:
         --action_rep latent --tokenizer_type oat \
         --tokenizer_ckpt checkpoints/oat/full.pth
 
+    # Bridge dataset with tokenizer probe
+    python verb_probe/train_verb_probe.py --dataset bridge \
+        --shard_dir /path/to/bridge_actions --bridge_csv data/bridge_episodes_filtered.csv \
+        --action_rep latent --tokenizer_type quest \
+        --tokenizer_ckpt checkpoints/bridge_sweep/tokenizers/quest_16_855_4/full.pth
+
     # Goal-only (uses DINOv2-S image patches)
     python verb_probe/train_verb_probe.py --modality goal_only \
         --image_encoder dinov2_s --delta_patches 16
 """
 import os, sys; sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import argparse
-import json
-from collections import defaultdict
 
 import numpy as np
 import torch
-import torch.nn as nn
-import torch.optim as optim
 from torch.utils.data import DataLoader
-from tqdm import tqdm
 try:
     from torchvision import transforms
 except (ImportError, RuntimeError):
@@ -51,483 +53,138 @@ from config import (
     FAST_TOKENIZER_PATH,
 )
 from verb_probe.models import MotionVerbClassifier, GoalVerbClassifier
+from verb_probe.train_utils import (
+    build_criterion, build_optimizer_scheduler, run_training_loop,
+)
+from datasets.calvin_dataset import build_calvin_tokenizer_data
+from verb_probe.load_tokenizer import (
+    load_frozen_tokenizer, get_tokenizer_chunk_params, get_vocab_size, load_fast_tokenizer
+)
+
+_TOKENIZER_REPS = {"vq_bet", "oat", "quest", "latent", "vla_embed"}
 
 
 # ======================================================================
-# Loss, optimizer, scheduler
+# Bridge data helpers
 # ======================================================================
 
-def build_criterion(verb_counts, verb_to_id, num_verbs, device,
-                    weighted=False, label_smoothing=0.0):
-    """Build CE loss, optionally weighted by inverse class frequency."""
-    if weighted:
-        weights = torch.zeros(num_verbs)
-        for verb, cid in verb_to_id.items():
-            count = verb_counts.get(verb, 1)
-            weights[cid] = 1.0 / count
-        weights = weights / weights.sum() * num_verbs
-        criterion = nn.CrossEntropyLoss(weight=weights.to(device),
-                                        label_smoothing=label_smoothing)
-        print(f"Weighted CE (min={weights.min():.3f}, max={weights.max():.3f}), "
-              f"label_smoothing={label_smoothing}")
-    else:
-        criterion = nn.CrossEntropyLoss(label_smoothing=label_smoothing)
-    return criterion
+def _load_and_split_bridge(args):
+    """Load bridge actions, filter to CSV episodes, split train/val.
 
+    Uses the same seed=42 and val_fraction=0.1 as tokenizer training
+    so the verb probe evaluates on the same val set.
 
-def build_optimizer_scheduler(model, lr, weight_decay, total_steps,
-                              warmup_epochs, epochs):
-    """Build AdamW optimizer with OneCycleLR scheduler."""
-    optimizer = optim.AdamW(
-        [p for p in model.parameters() if p.requires_grad],
-        lr=lr, weight_decay=weight_decay)
-    warmup_pct = min(warmup_epochs / epochs, 0.3)
-    scheduler = optim.lr_scheduler.OneCycleLR(
-        optimizer, max_lr=lr, total_steps=total_steps,
-        pct_start=warmup_pct, anneal_strategy="cos")
-    return optimizer, scheduler
-
-
-# ======================================================================
-# Training and validation epochs
-# ======================================================================
-
-def train_one_epoch(model, dataloader, criterion, optimizer, scheduler,
-                    device, grad_clip, epoch, total_epochs,
-                    use_aux=False, aux_weight=0.0, track_per_class_loss=False,
-                    batch_transform_fn=None):
-    """Run one training epoch with the standard batch format.
-
-    Batch format: (frames, actions, scene_vecs, labels, seq_lengths)
+    Returns: (train_actions, val_actions, train_keys, val_keys, perm, n_val)
     """
-    model.train()
-    total_loss = 0
-    correct = 0
-    total = 0
-    class_correct = defaultdict(int)
-    class_total = defaultdict(int)
-    class_loss_sum = defaultdict(float) if track_per_class_loss else None
-
-    pbar = tqdm(enumerate(dataloader), total=len(dataloader),
-                desc=f"Epoch {epoch}/{total_epochs}")
-    for batch_idx, batch in pbar:
-        if batch_transform_fn is not None:
-            frames, actions, scene_vecs, labels, seq_lengths = batch_transform_fn(batch, device)
-        else:
-            frames, actions, scene_vecs, labels, seq_lengths = batch
-            frames = frames.to(device)
-            actions = actions.to(device)
-            labels = labels.to(device)
-            scene_vecs = scene_vecs.to(device)
-            seq_lengths = seq_lengths.to(device)
-
-        optimizer.zero_grad()
-
-        if use_aux and aux_weight > 0.0:
-            main_logits, aux_v_logits, aux_a_logits = model.forward_with_aux(
-                frames, actions, seq_lengths=seq_lengths, scene_vec=scene_vecs)
-            loss = criterion(main_logits, labels)
-            if aux_v_logits is not None:
-                loss = loss + aux_weight * criterion(aux_v_logits, labels)
-            if aux_a_logits is not None:
-                loss = loss + aux_weight * criterion(aux_a_logits, labels)
-            logits = main_logits
-        else:
-            logits = model(frames, actions, seq_lengths=seq_lengths,
-                           scene_vec=scene_vecs)
-            loss = criterion(logits, labels)
-
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
-        optimizer.step()
-        scheduler.step()
-
-        total_loss += loss.item()
-        preds = torch.argmax(logits, dim=1)
-        correct += (preds == labels).sum().item()
-        total += labels.size(0)
-
-        # Per-class stats
-        with torch.no_grad():
-            if track_per_class_loss:
-                per_sample_loss = nn.functional.cross_entropy(
-                    logits, labels, reduction='none')
-                for lbl, pred, sl in zip(labels.cpu().tolist(),
-                                         preds.cpu().tolist(),
-                                         per_sample_loss.cpu().tolist()):
-                    class_total[lbl] += 1
-                    class_correct[lbl] += int(pred == lbl)
-                    class_loss_sum[lbl] += sl
-            else:
-                for lbl, pred in zip(labels.cpu().tolist(),
-                                     preds.cpu().tolist()):
-                    class_total[lbl] += 1
-                    class_correct[lbl] += int(pred == lbl)
-
-        pbar.set_postfix(loss=f"{loss.item():.4f}",
-                         acc=f"{100*correct/total:.1f}%")
-
-    avg_loss = total_loss / len(dataloader)
-    train_acc = 100 * correct / total
-    current_lr = scheduler.get_last_lr()[0]
-
-    result = {
-        "loss": avg_loss,
-        "acc": train_acc,
-        "lr": current_lr,
-        "class_correct": dict(class_correct),
-        "class_total": dict(class_total),
-    }
-    if track_per_class_loss:
-        result["class_loss_sum"] = dict(class_loss_sum)
-    return result
-
-
-def validate(model, dataloader, criterion, device, num_verbs, id_to_verb,
-             pass_seq_lengths=True, batch_transform_fn=None):
-    """Run validation with the standard batch format.
-
-    Returns:
-        dict with keys: loss, acc, macro_recall, per_class_val,
-                        class_correct, class_total
-    """
-    model.eval()
-    val_loss = 0
-    val_correct = 0
-    val_total = 0
-    val_class_correct = defaultdict(int)
-    val_class_total = defaultdict(int)
-    val_class_loss_sum = defaultdict(float)
-
-    with torch.no_grad():
-        for batch in tqdm(dataloader, desc="  Validating"):
-            if batch_transform_fn is not None:
-                frames, actions, scene_vecs, labels, seq_lengths = batch_transform_fn(batch, device)
-            else:
-                frames, actions, scene_vecs, labels, seq_lengths = batch
-                frames = frames.to(device)
-                actions = actions.to(device)
-                labels = labels.to(device)
-                scene_vecs = scene_vecs.to(device)
-                seq_lengths = seq_lengths.to(device)
-
-            sl = seq_lengths if pass_seq_lengths else None
-            logits = model(frames, actions, seq_lengths=sl,
-                           scene_vec=scene_vecs)
-            loss = criterion(logits, labels)
-            per_sample_loss = nn.functional.cross_entropy(
-                logits, labels, reduction='none')
-
-            val_loss += loss.item()
-            preds = torch.argmax(logits, dim=1)
-            val_correct += (preds == labels).sum().item()
-            val_total += labels.size(0)
-
-            for lbl, pred, sl_val in zip(labels.cpu().tolist(),
-                                         preds.cpu().tolist(),
-                                         per_sample_loss.cpu().tolist()):
-                val_class_total[lbl] += 1
-                val_class_correct[lbl] += int(pred == lbl)
-                val_class_loss_sum[lbl] += sl_val
-
-    val_avg = val_loss / len(dataloader)
-    val_acc = 100 * val_correct / val_total if val_total > 0 else 0
-
-    # Macro recall
-    per_class_recall = []
-    for cid in range(num_verbs):
-        n = val_class_total.get(cid, 0)
-        tp = val_class_correct.get(cid, 0)
-        per_class_recall.append(tp / n if n > 0 else 0)
-    macro_recall = np.mean(per_class_recall) * 100
-
-    # Per-class metrics dict
-    per_class_val = {}
-    for cid in range(num_verbs):
-        verb = id_to_verb.get(cid, str(cid))
-        vt = val_class_total.get(cid, 0)
-        per_class_val[verb] = {
-            "loss": val_class_loss_sum.get(cid, 0) / vt if vt > 0 else 0,
-            "acc": 100 * val_class_correct.get(cid, 0) / vt if vt > 0 else 0,
-            "count": vt,
-        }
-
-    return {
-        "loss": val_avg,
-        "acc": val_acc,
-        "macro_recall": macro_recall,
-        "per_class_val": per_class_val,
-        "class_correct": dict(val_class_correct),
-        "class_total": dict(val_class_total),
-    }
-
-
-# ======================================================================
-# Checkpoint and logging
-# ======================================================================
-
-def save_checkpoint(state_dict, metadata, path):
-    """Save a model checkpoint with metadata."""
-    save_dir = os.path.dirname(path)
-    if save_dir:
-        os.makedirs(save_dir, exist_ok=True)
-    ckpt = {"state_dict": state_dict}
-    ckpt.update(metadata)
-    torch.save(ckpt, path)
-
-
-def save_training_log(config_dict, training_log, log_path):
-    """Write training log JSON (overwrites each epoch for partial results)."""
-    log_dir = os.path.dirname(log_path)
-    if log_dir:
-        os.makedirs(log_dir, exist_ok=True)
-    with open(log_path, "w") as f:
-        json.dump({"config": config_dict, "epochs": training_log}, f, indent=2)
-
-
-def build_per_class_train_metrics(class_correct, class_total, class_loss_sum,
-                                  id_to_verb, all_cids):
-    """Build per-class train metrics dict from accumulators."""
-    per_class_train = {}
-    for cid in sorted(all_cids):
-        verb = id_to_verb.get(cid, str(cid))
-        t = class_total.get(cid, 0)
-        entry = {
-            "acc": 100 * class_correct.get(cid, 0) / t if t > 0 else 0,
-            "count": t,
-        }
-        if class_loss_sum is not None:
-            entry["loss"] = class_loss_sum.get(cid, 0) / t if t > 0 else 0
-        per_class_train[verb] = entry
-    return per_class_train
-
-
-# ======================================================================
-# Full training loop
-# ======================================================================
-
-def run_training_loop(model, train_loader, val_loader, criterion,
-                      optimizer, scheduler, device, args,
-                      num_verbs, id_to_verb,
-                      checkpoint_metadata_fn,
-                      use_aux=False, pass_seq_lengths=True,
-                      track_per_class_loss=False,
-                      attn_frac_fn=None,
-                      batch_transform_fn=None):
-    """Full training loop.
-
-    Best checkpoint selected by lowest val loss. Saves val_loss,
-    val_acc, and macro_recall in the checkpoint metadata.
-    """
-    grad_clip = getattr(args, 'grad_clip', 1.0)
-    aux_weight = getattr(args, 'aux_loss_weight', 0.0)
-    patience = getattr(args, 'patience', 0)
-
-    training_log = []
-    best_val_loss = float('inf')
-    best_val_acc = 0.0
-    best_epoch = -1
-    patience_counter = 0
-
-    for epoch in range(1, args.epochs + 1):
-        # --- Train ---
-        train_result = train_one_epoch(
-            model, train_loader, criterion, optimizer, scheduler,
-            device, grad_clip, epoch, args.epochs,
-            use_aux=use_aux, aux_weight=aux_weight,
-            track_per_class_loss=track_per_class_loss,
-            batch_transform_fn=batch_transform_fn)
-
-        print(f"--- Epoch {epoch}: Loss={train_result['loss']:.4f} "
-              f"Acc={train_result['acc']:.1f}% LR={train_result['lr']:.2e}")
-
-        # --- Validate ---
-        val_result = validate(
-            model, val_loader, criterion, device, num_verbs, id_to_verb,
-            pass_seq_lengths=pass_seq_lengths,
-            batch_transform_fn=batch_transform_fn)
-
-        print(f"    Val: Loss={val_result['loss']:.4f} "
-              f"Acc={val_result['acc']:.1f}% "
-              f"MacroRecall={val_result['macro_recall']:.1f}%")
-
-        # --- Attention fractions (optional) ---
-        attn_fracs = {}
-        if attn_frac_fn is not None:
-            try:
-                attn_fracs = attn_frac_fn(model, val_loader, device)
-            except Exception:
-                pass
-
-        # --- Build per-class train metrics ---
-        all_cids = set(list(train_result["class_total"].keys()) +
-                       list(val_result["class_total"].keys()))
-        per_class_train = build_per_class_train_metrics(
-            train_result["class_correct"], train_result["class_total"],
-            train_result.get("class_loss_sum"), id_to_verb, all_cids)
-
-        # --- Save best checkpoint (by val loss) ---
-        val_acc = val_result["acc"]
-        val_loss = val_result["loss"]
-        val_macro_recall = val_result["macro_recall"]
-        if val_loss < best_val_loss and args.save_path:
-            best_val_loss = val_loss
-            best_val_acc = val_acc
-            best_macro_recall = val_macro_recall
-            best_epoch = epoch
-            metadata = checkpoint_metadata_fn(model, args, best_val_acc, best_epoch)
-            metadata["best_val_loss"] = best_val_loss
-            metadata["best_val_macro_recall"] = best_macro_recall
-            save_checkpoint(model.state_dict(), metadata, args.save_path)
-            print(f"    * Best val loss: {val_loss:.4f} "
-                  f"Acc={val_acc:.1f}% "
-                  f"MacroRecall={val_macro_recall:.1f}% "
-                  f"@ epoch {epoch}")
-            patience_counter = 0
-        else:
-            patience_counter += 1
-            if patience > 0 and patience_counter >= patience:
-                print(f"    Early stopping after {patience} epochs no improvement")
-                break
-
-        # --- Log ---
-        epoch_metrics = {
-            "epoch": epoch,
-            "lr": train_result["lr"],
-            "train_loss": train_result["loss"],
-            "train_acc": train_result["acc"],
-            "val_loss": val_result["loss"],
-            "val_acc": val_acc,
-            "macro_recall": val_result["macro_recall"],
-            "per_class_train": per_class_train,
-            "per_class_val": val_result["per_class_val"],
-        }
-        if attn_fracs:
-            epoch_metrics["attn_fracs"] = attn_fracs
-        training_log.append(epoch_metrics)
-
-        if args.log_path:
-            config_dict = {k: v for k, v in vars(args).items()
-                           if isinstance(v, (str, int, float, bool, type(None)))}
-            save_training_log(config_dict, training_log, args.log_path)
-            print(f"    Log saved to {args.log_path}")
-
-    print(f"\nBest val loss: {best_val_loss:.4f} "
-          f"Acc={best_val_acc:.1f}% @ epoch {best_epoch}")
-
-    # Generate training curves if log exists
-    if args.log_path and os.path.exists(args.log_path):
-        try:
-            from verb_probe.analysis import plot_training_curves
-            curves_path = args.log_path.replace(".json", "_curves.png")
-            plot_training_curves(args.log_path, curves_path)
-            import matplotlib.pyplot as plt
-            plt.close("all")
-        except Exception as e:
-            print(f"Warning: could not generate training curves: {e}")
-
-    return best_val_acc, best_epoch
-
-
-# ======================================================================
-# Frozen tokenizer loading and on-the-fly encoding
-# ======================================================================
-
-def _load_frozen_tokenizer(args):
-    """Load frozen tokenizer using the same builders as train_tokenizer.py."""
-    from tokenization.train_tokenizer import build_vqbet, build_oat, build_quest
-
-    ckpt = torch.load(args.tokenizer_ckpt, map_location="cpu")
-    ckpt_args = ckpt["args"]
-    if not isinstance(ckpt_args, dict):
-        ckpt_args = vars(ckpt_args)
-
-    import argparse
-    build_args = argparse.Namespace(**ckpt_args)
-
-    if args.tokenizer_type == "vq_bet":
-        model = build_vqbet(build_args)
-    elif args.tokenizer_type == "oat":
-        model = build_oat(build_args)
-    elif args.tokenizer_type == "quest":
-        model = build_quest(build_args)
-    else:
-        raise ValueError(f"Unknown tokenizer_type: {args.tokenizer_type}")
-
-    model.load_state_dict(ckpt["model_state_dict"])
-    model.eval()
-    for p in model.parameters():
-        p.requires_grad = False
-
-    if "normalizer" in ckpt:
-        model.set_normalizer(ckpt["normalizer"])
-
-    return model
-
-
-def _make_tokenizer_batch_transform(tok_model, tok_type, mode):
-    """Build a batch transform that encodes chunks on-the-fly.
-
-    Args:
-        tok_model: frozen tokenizer model.
-        tok_type: 'vq_bet', 'oat', or 'quest'.
-        mode: 'latent' — return continuous latent vectors as actions.
-              'token_id' — return discrete code IDs as actions.
-                  VQ-BeT codes get group-offset encoding so each group's
-                  codes occupy a separate range of the embedding table.
-
-    Returns a callable(batch, device) -> (frames, actions, scene_vecs, labels, seq_lengths)
-    """
-    from tokenization.train_utils import extract_episode_batch
-
-    def transform(batch, device):
-        with torch.no_grad():
-            result = extract_episode_batch(tok_model, batch, device, tok_type)
-
-        n_valid = result['n_valid']
-        labels = result['verb_ids']
-
-        if mode == 'latent':
-            actions = result['latents']
-        else:
-            codes = result['codes']
-            if tok_type == 'vq_bet' and codes.ndim == 3:
-                # (B, K, groups) → group-offset encoding → (B, K*groups)
-                B, K, G = codes.shape
-                offsets = torch.arange(G, device=device) * tok_model.n_embed
-                codes = (codes + offsets.view(1, 1, G)).reshape(B, K * G)
-                n_valid = n_valid * G
-            actions = codes.long()
-
-        B = actions.size(0)
-        dummy = torch.zeros(B, 1, device=device)
-        return dummy, actions, dummy, labels, n_valid
-
-    return transform
-
-
-def _load_fast_tokenizer(args):
-    """Load FAST tokenizer for on-the-fly tokenization in CalvinVerbProbeDataset.
-
-    Returns: (tok_wrapper, vocab_size) or (None, None).
-    """
-    if args.action_rep != "fast":
-        return None, None
-    from tokenization.fast.fast_tokenizer import load_fast_tokenizer, tokenize_trajectory
-    _fast_tok = load_fast_tokenizer(args.fast_tokenizer_path)
-    def _fast_wrapper(actions_batch):
-        return [tokenize_trajectory(_fast_tok, actions_batch[0])]
-    _fast_wrapper.vocab_size = _fast_tok.vocab_size
-    print(f"Loaded FAST tokenizer (vocab_size={_fast_tok.vocab_size})")
-    return _fast_wrapper, _fast_tok.vocab_size
+    import pandas as pd
+    from datasets.bridge_dataset import load_bridge_actions
+
+    all_actions, all_keys = load_bridge_actions(args.shard_dir)
+    csv_df = pd.read_csv(args.bridge_csv)
+    csv_key_set = set(csv_df["episode_key"])
+
+    n_total = len(all_actions)
+    keep_idx = [i for i, k in enumerate(all_keys) if k in csv_key_set]
+    all_actions = [all_actions[i] for i in keep_idx]
+    all_keys = [all_keys[i] for i in keep_idx]
+    print(f"Filtered to {len(all_actions)}/{n_total} episodes "
+          f"using {args.bridge_csv}")
+
+    val_fraction = getattr(args, 'val_fraction', 0.1)
+    np.random.seed(42)
+    perm = np.random.permutation(len(all_actions))
+    n_val = max(1, int(len(all_actions) * val_fraction))
+
+    train_actions = [all_actions[i] for i in perm[n_val:]]
+    val_actions = [all_actions[i] for i in perm[:n_val]]
+    train_keys = [all_keys[i] for i in perm[n_val:]]
+    val_keys = [all_keys[i] for i in perm[:n_val]]
+    print(f"Train: {len(train_actions)} episodes, Val: {len(val_actions)} episodes")
+
+    return (all_actions, all_keys, train_actions, val_actions,
+            train_keys, val_keys, perm, n_val)
+
+
+def _build_bridge_tokenizer_data(args, chunk_params):
+    """Build BridgeTokenizerDataset for verb probe (tokenizer reps)."""
+    from datasets.bridge_dataset import (
+        BridgeTokenizerDataset, load_bridge_verb_labels,
+    )
+    (all_actions, all_keys, train_actions, val_actions,
+     _, _, perm, n_val) = _load_and_split_bridge(args)
+
+    all_verb_ids, verb_to_id = load_bridge_verb_labels(
+        args.bridge_csv, all_keys, min_class_count=args.min_class_count)
+    train_verb_ids = [all_verb_ids[i] for i in perm[n_val:]]
+    val_verb_ids = [all_verb_ids[i] for i in perm[:n_val]]
+
+    train_ds = BridgeTokenizerDataset(
+        train_actions, verb_ids=train_verb_ids, verb_to_id=verb_to_id,
+        **chunk_params)
+    val_ds = BridgeTokenizerDataset(
+        val_actions, verb_ids=val_verb_ids, verb_to_id=verb_to_id,
+        **chunk_params)
+
+    id_to_verb = {v: k for k, v in verb_to_id.items()}
+    num_verbs = len(verb_to_id)
+
+    # verb_counts from train split
+    from collections import Counter
+    cnt = Counter(v for v in train_verb_ids if v >= 0)
+    verb_counts = {id_to_verb[vid]: c for vid, c in cnt.items()}
+
+    return train_ds, val_ds, num_verbs, id_to_verb, verb_to_id, verb_counts
+
+
+def _build_bridge_native_data(args):
+    """Build BridgeVerbDataset for native action probe."""
+    import pandas as pd
+    from datasets.bridge_dataset import (
+        BridgeVerbDataset, load_bridge_verb_labels,
+    )
+    (all_actions, all_keys, train_actions, val_actions,
+     train_keys, val_keys, perm, n_val) = _load_and_split_bridge(args)
+
+    all_verb_ids, verb_to_id = load_bridge_verb_labels(
+        args.bridge_csv, all_keys, min_class_count=args.min_class_count)
+    train_verb_ids = [all_verb_ids[i] for i in perm[n_val:]]
+    val_verb_ids = [all_verb_ids[i] for i in perm[:n_val]]
+
+    id_to_verb = {v: k for k, v in verb_to_id.items()}
+
+    # Build DataFrames and action caches for BridgeVerbDataset
+    def _make_df_and_cache(actions, verb_ids):
+        rows = []
+        cache = {}
+        for i, (act, vid) in enumerate(zip(actions, verb_ids)):
+            if vid < 0:
+                continue
+            rows.append({"seg_idx": i, "verb": id_to_verb[vid]})
+            cache[f"actions_{i}"] = act
+        return pd.DataFrame(rows), cache
+
+    train_df, train_cache = _make_df_and_cache(train_actions, train_verb_ids)
+    val_df, val_cache = _make_df_and_cache(val_actions, val_verb_ids)
+    print(f"Native probe: {len(train_df)} train / {len(val_df)} val episodes")
+
+    train_ds = BridgeVerbDataset(train_df, train_cache,
+                                 max_seq_len=args.max_seq_len,
+                                 verb_to_id=verb_to_id)
+    val_ds = BridgeVerbDataset(val_df, val_cache,
+                               max_seq_len=args.max_seq_len,
+                               verb_to_id=verb_to_id)
+
+    num_verbs = len(verb_to_id)
+    from collections import Counter
+    cnt = Counter(train_df["verb"])
+    verb_counts = dict(cnt)
+
+    return train_ds, val_ds, num_verbs, id_to_verb, verb_to_id, verb_counts
 
 
 # ======================================================================
 # Dataset construction
 # ======================================================================
-
-_TOKENIZER_REPS = {"vq_bet", "oat", "quest", "latent"}
-
 
 def build_datasets(args):
     """Build train/val datasets.
@@ -541,57 +198,34 @@ def build_datasets(args):
 
 
 def _build_tokenizer_datasets(args):
-    """Build CalvinTokenizerDataset + frozen tokenizer for on-the-fly encoding."""
-    from utils import load_calvin_to_dataframe
-    from datasets.calvin_dataset import CalvinTokenizerDataset
+    """Build tokenizer dataset + frozen tokenizer for on-the-fly encoding."""
 
-    # Load frozen tokenizer
+    # Load frozen tokenizer and read chunking params from its checkpoint
     print(f"Loading frozen {args.tokenizer_type} from {args.tokenizer_ckpt}")
-    tok_model = _load_frozen_tokenizer(args)
+    tok_model = load_frozen_tokenizer(args.tokenizer_type, args.tokenizer_ckpt)
+    chunk_params = get_tokenizer_chunk_params(args.tokenizer_ckpt)
+    print(f"  chunk_size={chunk_params['chunk_size']}, "
+          f"sampling={chunk_params['sampling']}, "
+          f"max_chunks={chunk_params['max_chunks']}")
 
-    # Get chunk_size and sampling from the tokenizer checkpoint's saved args
-    ckpt = torch.load(args.tokenizer_ckpt, map_location="cpu")
-    ckpt_args = ckpt["args"]
-    if not isinstance(ckpt_args, dict):
-        ckpt_args = vars(ckpt_args)
-    chunk_size = ckpt_args.get("chunk_size", 16)
-    sampling = ckpt_args.get("sampling", "random")
-    max_chunks = ckpt_args.get("max_chunks", 8)
-    print(f"  chunk_size={chunk_size}, sampling={sampling}, max_chunks={max_chunks}")
+    # Build datasets
+    if args.dataset == "bridge":
+        train_ds, val_ds, num_verbs, id_to_verb, verb_to_id, verb_counts = \
+            _build_bridge_tokenizer_data(args, chunk_params)
+    else:
+        train_ds, val_ds, num_verbs, id_to_verb, verb_to_id, verb_counts = \
+            build_calvin_tokenizer_data(
+                args.data_dir, args.val_dir,
+                min_class_count=args.min_class_count, cache_actions=True,
+                **chunk_params)
 
-    # Load DataFrames and filter sparse classes
-    train_df = load_calvin_to_dataframe(args.data_dir)
-    val_df = load_calvin_to_dataframe(args.val_dir)
-
-    if args.min_class_count > 0:
-        verb_col = 'primary_verb' if 'primary_verb' in train_df.columns else 'verb'
-        vc = train_df[verb_col].value_counts()
-        keep_verbs = set(vc[vc >= args.min_class_count].index)
-        train_df = train_df[train_df[verb_col].isin(keep_verbs)].reset_index(drop=True)
-        val_df = val_df[val_df[verb_col].isin(keep_verbs)].reset_index(drop=True)
-        print(f"  Filtered to {len(keep_verbs)} classes")
-
-    # Build CalvinTokenizerDataset (same format as tokenizer training)
-    train_ds = CalvinTokenizerDataset(
-        args.data_dir, train_df, chunk_size=chunk_size,
-        max_chunks=max_chunks, sampling=sampling, cache_actions=True)
-    val_ds = CalvinTokenizerDataset(
-        args.val_dir, val_df, chunk_size=chunk_size,
-        max_chunks=max_chunks, sampling=sampling,
-        verb_to_id=train_ds.verb_to_id, cache_actions=True)
-
-    verb_to_id = train_ds.verb_to_id
-    id_to_verb = train_ds.id_to_verb
-
-    # Drop val samples with unseen verbs
-    verb_col = train_ds._verb_col
-    valid_mask = val_df[verb_col].isin(verb_to_id.keys())
-    if (~valid_mask).sum() > 0:
-        print(f"  Dropping {(~valid_mask).sum()} val samples with unseen verbs")
-        val_ds.df = val_df[valid_mask].reset_index(drop=True)
-
-    # Determine mode: latent (continuous) vs token_id (discrete codes)
-    mode = "latent" if args.action_rep == "latent" else "token_id"
+    # Determine mode: latent (continuous), vla_embed (VLA embeddings), or token_id (discrete)
+    if args.action_rep == "latent":
+        mode = "latent"
+    elif args.action_rep == "vla_embed":
+        mode = "vla_embed"
+    else:
+        mode = "token_id"
 
     # Probe shapes from one sample
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -601,55 +235,33 @@ def _build_tokenizer_datasets(args):
     with torch.no_grad():
         result = extract_episode_batch(tok_model, sample_batch, device, args.tokenizer_type)
 
-    if mode == "latent":
+    if mode == "vla_embed":
+        from verb_probe.load_tokenizer import load_vla_embedding
+        vla_info = load_vla_embedding(args.policy_dir, device=device)
+        args._vla_embed_info = vla_info
+        args._latent_dim = vla_info['embed_dim']
+        print(f"  vla_embed_dim={args._latent_dim}")
+    elif mode == "latent":
         args._latent_dim = result['latents'].shape[-1]
         print(f"  latent_dim={args._latent_dim}")
     else:
-        # vocab_size for nn.Embedding
-        if args.tokenizer_type == "vq_bet":
-            # group-offset encoding: each group occupies [g*n_embed, (g+1)*n_embed)
-            args._action_vocab_size = tok_model.n_embed * tok_model.groups
-        else:
-            args._action_vocab_size = tok_model.vocab_size
+        args._action_vocab_size = get_vocab_size(tok_model, args.tokenizer_type)
         print(f"  vocab_size={args._action_vocab_size}")
 
-    # Store batch transform for on-the-fly encoding in training loop
-    args._batch_transform_fn = _make_tokenizer_batch_transform(
-        tok_model, args.tokenizer_type, mode)
+    # Store frozen tokenizer for on-the-fly encoding in training loop
+    args._tok_model = tok_model
+    args._tok_mode = mode
 
-    # Verb counts for weighted loss
-    verb_counts = train_ds.df[verb_col].value_counts().to_dict()
-
-    num_verbs = len(verb_to_id)
     return train_ds, val_ds, num_verbs, id_to_verb, verb_to_id, verb_counts
 
 
 def _build_standard_datasets(args):
-    """Build CalvinVerbProbeDataset for native/fast/goal_only modes."""
-    from utils import load_calvin_to_dataframe
-    from datasets.calvin_dataset import CalvinVerbProbeDataset
+    """Build standard datasets for native/fast/goal_only modes."""
 
-    print(f"Loading CALVIN data from {args.data_dir} / {args.val_dir}...")
-    train_df = load_calvin_to_dataframe(args.data_dir)
-    val_df = load_calvin_to_dataframe(args.val_dir)
+    if args.dataset == "bridge":
+        return _build_bridge_native_data(args)
 
-    # Filter sparse verb classes
-    if args.min_class_count > 0:
-        verb_col = 'primary_verb' if 'primary_verb' in train_df.columns else 'verb'
-        vc = train_df[verb_col].value_counts()
-        keep_verbs = set(vc[vc >= args.min_class_count].index)
-        n_before = len(train_df)
-        train_df = train_df[train_df[verb_col].isin(keep_verbs)].reset_index(drop=True)
-        val_df = val_df[val_df[verb_col].isin(keep_verbs)].reset_index(drop=True)
-        print(f"Filtered: {len(vc)}->{len(keep_verbs)} classes, "
-              f"train {n_before}->{len(train_df)}, val->{len(val_df)}")
-
-    if args.debug:
-        n = min(args.debug, len(train_df))
-        train_df = train_df.head(n).copy()
-        val_df = val_df.head(n).copy()
-        args.epochs = min(args.epochs, 2)
-        print(f"[DEBUG] {n} train / {len(val_df)} val, {args.epochs} epochs")
+    from datasets.calvin_dataset import build_calvin_verb_probe_data
 
     # Vision transform (goal_only)
     img_size = 224 if args.image_encoder in ("r3m", "dinov2_s", "dinov2_b", "vc1", "dinov2") else IMAGE_SIZE[0]
@@ -665,36 +277,27 @@ def _build_standard_datasets(args):
     # FAST tokenizer (action_only with discrete tokens)
     tok = None
     if args.modality == "action_only":
-        tok, _ = _load_fast_tokenizer(args)
+        tok, _ = load_fast_tokenizer(args)
 
-    # Internal modality string
     internal_modality = "action_only" if args.modality == "action_only" else "vision_only"
 
-    train_ds = CalvinVerbProbeDataset(
-        args.data_dir, train_df, modality=internal_modality,
-        action_tokenizer=tok,
-        max_seq_len=args.max_seq_len, num_frames=args.num_frames,
-        delta_patches=args.delta_patches, image_encoder=args.image_encoder,
-        transform=transform, img_size=img_size, cache_actions=True)
+    train_ds, val_ds, num_verbs, id_to_verb, verb_to_id, verb_counts = \
+        build_calvin_verb_probe_data(
+            args.data_dir, args.val_dir,
+            min_class_count=args.min_class_count,
+            cache_actions=True,
+            modality=internal_modality,
+            action_tokenizer=tok,
+            max_seq_len=args.max_seq_len, num_frames=args.num_frames,
+            delta_patches=args.delta_patches, image_encoder=args.image_encoder,
+            transform=transform, img_size=img_size)
 
-    val_ds = CalvinVerbProbeDataset(
-        args.val_dir, val_df, modality=internal_modality,
-        action_tokenizer=tok, verb_to_id=train_ds.verb_to_id,
-        max_seq_len=args.max_seq_len, num_frames=args.num_frames,
-        delta_patches=args.delta_patches, image_encoder=args.image_encoder,
-        transform=transform, img_size=img_size, cache_actions=True)
-
-    # Drop val samples with unseen verbs
-    verb_col = train_ds._verb_col
-    valid_mask = val_df[verb_col].isin(train_ds.verb_to_id.keys())
-    if (~valid_mask).sum() > 0:
-        print(f"Dropping {(~valid_mask).sum()} val samples with unseen verbs")
-        val_ds.df = val_df[valid_mask].reset_index(drop=True)
-
-    num_verbs = len(train_ds.verb_to_id)
-    id_to_verb = train_ds.id_to_verb
-    verb_to_id = train_ds.verb_to_id
-    verb_counts = train_ds.df[verb_col].value_counts().to_dict()
+    if args.debug:
+        n = min(args.debug, len(train_ds))
+        train_ds.df = train_ds.df.head(n).copy()
+        val_ds.df = val_ds.df.head(n).copy()
+        args.epochs = min(args.epochs, 2)
+        print(f"[DEBUG] {n} train / {len(val_ds)} val, {args.epochs} epochs")
 
     return train_ds, val_ds, num_verbs, id_to_verb, verb_to_id, verb_counts
 
@@ -738,7 +341,7 @@ def main(args):
             train_ds.num_patches = model.num_patches
             val_ds.num_patches = model.num_patches
 
-    elif args.action_rep == "latent":
+    elif args.action_rep in ("latent", "vla_embed"):
         model = MotionVerbClassifier(
             num_verbs=num_verbs,
             action_rep="latent",
@@ -759,12 +362,11 @@ def main(args):
         ).to(device)
 
     else:
-        # Discrete token IDs (fast from standard path, vq_bet/oat/quest from tokenizer path)
+        # Discrete token IDs (fast, vq_bet, oat, quest)
         if hasattr(args, '_action_vocab_size'):
             action_vocab_size = args._action_vocab_size
         else:
-            # FAST: vocab_size stored by _load_fast_tokenizer via CalvinVerbProbeDataset
-            _, action_vocab_size = _load_fast_tokenizer(args)
+            _, action_vocab_size = load_fast_tokenizer(args)
         model = MotionVerbClassifier(
             num_verbs=num_verbs,
             action_rep="token_id",
@@ -805,14 +407,14 @@ def main(args):
             "image_encoder": args.image_encoder,
             "delta_patches": args.delta_patches,
             "min_class_count": args.min_class_count,
-            "dataset": "calvin",
+            "dataset": args.dataset,
             "best_val_acc": best_val_acc,
             "best_epoch": best_epoch,
         }
         if args.action_rep in _TOKENIZER_REPS:
             meta["tokenizer_type"] = args.tokenizer_type
             meta["tokenizer_ckpt"] = args.tokenizer_ckpt
-        if args.action_rep == "latent":
+        if args.action_rep in ("latent", "vla_embed"):
             meta["latent_dim"] = args._latent_dim
         if hasattr(args, '_action_vocab_size'):
             meta["action_vocab_size"] = args._action_vocab_size
@@ -823,24 +425,27 @@ def main(args):
     print(f"\nTraining: {num_verbs} verbs, {args.epochs} epochs, "
           f"d_model={args.d_model}")
 
-    batch_transform_fn = getattr(args, '_batch_transform_fn', None)
-
     run_training_loop(
         model, train_loader, val_loader, criterion, optimizer, scheduler,
         device, args, num_verbs, id_to_verb,
         checkpoint_metadata_fn=ckpt_fn,
         track_per_class_loss=True,
-        pass_seq_lengths=pass_seq,
-        batch_transform_fn=batch_transform_fn)
+        pass_seq_lengths=pass_seq)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="CALVIN verb classification probe")
+        description="Verb classification probe")
 
     # Dataset
+    parser.add_argument("--dataset", type=str, default="calvin",
+                        choices=["calvin", "bridge"])
     parser.add_argument("--data_dir", type=str, default=DATA_DIR)
     parser.add_argument("--val_dir", type=str, default=VAL_DIR)
+    parser.add_argument("--shard_dir", type=str, default=None,
+                        help="Bridge action shards directory")
+    parser.add_argument("--bridge_csv", type=str, default=None,
+                        help="Bridge episode CSV (for filtering + verb labels)")
 
     # Modality
     parser.add_argument("--modality", type=str, default="action_only",
@@ -849,7 +454,7 @@ if __name__ == "__main__":
     # Action representation
     parser.add_argument("--action_rep", type=str, default="native",
                         choices=["native", "fast", "vq_bet", "quest",
-                                 "oat", "latent"])
+                                 "oat", "latent", "vla_embed"])
     parser.add_argument("--fast_tokenizer_path", type=str,
                         default=FAST_TOKENIZER_PATH)
 
@@ -859,6 +464,8 @@ if __name__ == "__main__":
                         help="Tokenizer type (required for vq_bet/oat/quest/latent)")
     parser.add_argument("--tokenizer_ckpt", type=str, default=None,
                         help="Frozen tokenizer checkpoint (required for vq_bet/oat/quest/latent)")
+    parser.add_argument("--policy_dir", type=str, default=None,
+                        help="Policy run directory for vla_embed mode")
 
     # Vision (goal_only)
     parser.add_argument("--image_encoder", type=str, default=IMAGE_ENCODER,
@@ -893,10 +500,17 @@ if __name__ == "__main__":
     # Validate tokenizer args
     if args.action_rep in _TOKENIZER_REPS:
         # For vq_bet/oat/quest, default tokenizer_type from action_rep
-        if args.tokenizer_type is None and args.action_rep != "latent":
+        if args.tokenizer_type is None and args.action_rep not in ("latent", "vla_embed"):
             args.tokenizer_type = args.action_rep
         if not args.tokenizer_type or not args.tokenizer_ckpt:
             parser.error(
                 f"--action_rep {args.action_rep} requires --tokenizer_type and --tokenizer_ckpt")
+        if args.action_rep == "vla_embed" and not args.policy_dir:
+            parser.error("--action_rep vla_embed requires --policy_dir")
+
+    # Validate bridge args
+    if args.dataset == "bridge":
+        if not args.shard_dir or not args.bridge_csv:
+            parser.error("--dataset bridge requires --shard_dir and --bridge_csv")
 
     main(args)

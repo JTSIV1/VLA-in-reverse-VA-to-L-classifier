@@ -5,8 +5,9 @@ This is the evaluation entry point — it loads a model and runs evaluation
 directly (not a SLURM launcher). run_sweep.sh wraps this in sbatch.
 
 Modes:
-    dummy   — Load model, generate one action from a random image. Quick sanity check.
-    rollout — Full CALVIN rollout evaluation (1000 sequences, SR1–SR5).
+    dummy        — Load model, generate one action from a random image. Quick sanity check.
+    rollout      — Full CALVIN rollout evaluation (1000 sequences, SR1–SR5).
+    teacher_force — Teacher-forced L1 & token accuracy on the CALVIN val set.
 
 Usage:
     # Quick load test
@@ -14,6 +15,9 @@ Usage:
 
     # Full rollout
     python policy/eval_policy.py --condition bin --mode rollout
+
+    # Teacher-forced L1 on val set
+    python policy/eval_policy.py --condition quest_16_4444_2 --mode teacher_force
 
     # Explicit policy dir
     python policy/eval_policy.py --policy_dir checkpoints/calvin_sweep/policy/minivla_vq_bet_5_16_4 --mode dummy
@@ -31,27 +35,38 @@ from PIL import Image
 
 # ── Path setup ──────────────────────────────────────────────────────────────
 PROJECT_DIR = Path(__file__).resolve().parents[1]
-OPENVLA_DIR = Path("/data/user_data/wenjiel2/Code/openvla-mini")
-CALVIN_DIR = Path("/data/user_data/wenjiel2/Code/calvin")
-SWEEP_DIR = PROJECT_DIR / "checkpoints" / "calvin_sweep"
-TOK_DIR = SWEEP_DIR / "tokenizers"
-POLICY_DIR = SWEEP_DIR / "policy"
-DATASET_PATH = "/data/user_data/yashagar/task_D_D"
-
-for p in [str(PROJECT_DIR), str(OPENVLA_DIR)]:
+for p in [str(PROJECT_DIR)]:
     if p not in sys.path:
         sys.path.insert(0, p)
+
+import config as C  # noqa: E402
+
+OPENVLA_DIR = Path(C.OPENVLA_DIR)
+CALVIN_DIR = Path(C.CALVIN_DIR)
+SWEEP_DIR = Path(C.SWEEP_DIR)
+TOK_DIR = Path(C.TOK_DIR)
+POLICY_DIR = Path(C.POLICY_DIR)
+DATASET_PATH = C.DATA_ROOT.rstrip("/")
+
+if str(OPENVLA_DIR) not in sys.path:
+    sys.path.insert(0, str(OPENVLA_DIR))
 
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
 
 def find_last_checkpoint(run_dir):
-    """Return the last .pt checkpoint (by filename sort) in run_dir/checkpoints/."""
+    """Return the checkpoint with the largest step number in run_dir/checkpoints/."""
+    import re
     ckpt_dir = Path(run_dir) / "checkpoints"
     if not ckpt_dir.exists():
         return None
-    candidates = sorted(ckpt_dir.glob("*.pt"))
-    return str(candidates[-1]) if candidates else None
+    candidates = list(ckpt_dir.glob("*.pt"))
+    if not candidates:
+        return None
+    def step_num(p):
+        m = re.search(r"step-(\d+)", p.name)
+        return int(m.group(1)) if m else -1
+    return str(max(candidates, key=step_num))
 
 
 def resolve_policy_dir(condition):
@@ -203,6 +218,186 @@ def rollout_eval(run_dir, condition, num_sequences, output_dir, device="cuda"):
     )
 
 
+# ── Teacher-forced eval ────────────────────────────────────────────────────
+
+def teacher_force_eval(run_dir, condition, output_dir, num_batches=None,
+                       batch_size=16, device="cuda"):
+    """Teacher-forced L1 loss and token accuracy on the CALVIN val set.
+
+    Runs forward passes with ground-truth input tokens (teacher forcing),
+    computes argmax predictions at action-token positions, then decodes
+    both predicted and GT token IDs back to continuous actions for L1.
+    """
+    import torch.nn.functional as F
+    from torch.utils.data import DataLoader
+    from prismatic.models import load_vla
+    from prismatic.vla.materialize import get_vla_dataset_and_collator
+
+    run_dir = Path(run_dir)
+    fsdp_ckpt = find_last_checkpoint(run_dir)
+    if not fsdp_ckpt:
+        raise FileNotFoundError(f"No .pt checkpoint in {run_dir}/checkpoints/")
+
+    # Load run config
+    with open(run_dir / "config.json") as f:
+        run_cfg = json.load(f)
+    vla_cfg = run_cfg["vla"]
+
+    # Load model
+    print(f"Loading VLA from {fsdp_ckpt} ...")
+    vla = load_vla(fsdp_ckpt, load_for_training=False)
+    vla = vla.to(device).eval()
+    action_tokenizer = vla.action_tokenizer
+
+    print(f"  Action tokenizer: {type(action_tokenizer).__name__}")
+    print(f"  action_token_begin_idx={action_tokenizer.action_token_begin_idx}, "
+          f"action_token_end_idx={action_tokenizer.action_token_end_idx}")
+
+    # Build val dataset using the same config as training
+    data_root_dir = Path(run_cfg.get("data_root_dir", C.RLDS_DIR))
+    data_mix = vla_cfg.get("data_mix", "calvin_dataset")
+    image_transform = vla.vision_backbone.get_image_transform()
+    base_tokenizer = vla.llm_backbone.tokenizer
+    prompt_builder_fn = vla.llm_backbone.prompt_builder_fn
+    default_image_resolution = vla.vision_backbone.default_image_resolution
+
+    future_action_window_size = vla_cfg.get("future_action_window_size", 0)
+    future_action_window_size = max(
+        action_tokenizer.required_future_horizon, future_action_window_size
+    )
+
+    val_dataset, _, collator = get_vla_dataset_and_collator(
+        data_root_dir=data_root_dir,
+        data_mix=data_mix,
+        image_transform=image_transform,
+        tokenizer=base_tokenizer,
+        prompt_builder_fn=prompt_builder_fn,
+        default_image_resolution=default_image_resolution,
+        predict_stop_token=vla_cfg.get("predict_stop_token", True),
+        shuffle_buffer_size=1000,
+        train=False,  # validation split
+        image_aug=False,
+        action_tokenizer=vla_cfg.get("action_tokenizer", "action_tokenizer"),
+        future_action_window_size=future_action_window_size,
+    )
+
+    val_loader = DataLoader(
+        val_dataset, batch_size=batch_size, collate_fn=collator,
+        num_workers=2, pin_memory=True,
+    )
+
+    num_patches = vla.vision_backbone.num_patches
+
+    # Accumulators
+    total_correct = 0
+    total_action_tokens = 0
+    total_l1 = 0.0
+    total_l1_samples = 0
+    total_ce_loss = 0.0
+    n_batches = 0
+
+    autocast_dtype = vla.llm_backbone.half_precision_dtype
+    print(f"\n=== Teacher-Forced Eval (val split) ===")
+    print(f"  Batch size: {batch_size}")
+    if num_batches:
+        print(f"  Max batches: {num_batches}")
+
+    def to_device(v, device):
+        if isinstance(v, torch.Tensor):
+            return v.to(device)
+        if isinstance(v, dict):
+            return {kk: to_device(vv, device) for kk, vv in v.items()}
+        return v
+
+    for batch in val_loader:
+        batch = {k: to_device(v, device) for k, v in batch.items()}
+
+        with torch.no_grad(), torch.autocast(
+            "cuda", dtype=autocast_dtype,
+            enabled=vla.enable_mixed_precision_training,
+        ):
+            output = vla(
+                input_ids=batch["input_ids"],
+                attention_mask=batch["attention_mask"],
+                pixel_values=batch["pixel_values"],
+                labels=batch["labels"],
+            )
+
+        # CE loss (computed by the model)
+        total_ce_loss += output.loss.item()
+
+        # Extract action predictions and ground truth
+        # logits are shifted: logits[t] predicts token[t+1]
+        action_preds = output.logits[:, num_patches:-1].argmax(dim=2)
+        action_gt = batch["labels"][:, 1:].to(action_preds.device)
+
+        # Mask for valid action tokens
+        mask = ((action_tokenizer.action_token_end_idx > action_gt)
+                & (action_gt > action_tokenizer.action_token_begin_idx))
+
+        if mask.sum() == 0:
+            continue
+
+        # Token accuracy
+        correct = (action_preds == action_gt) & mask
+        total_correct += correct.sum().item()
+        total_action_tokens += mask.sum().item()
+
+        # L1 on decoded continuous actions
+        pred_ids = action_preds[mask].cpu().numpy()
+        gt_ids = action_gt[mask].cpu().numpy()
+
+        pred_actions = torch.tensor(
+            action_tokenizer.decode_token_ids_to_actions(pred_ids),
+            dtype=torch.float32,
+        )
+        gt_actions = torch.tensor(
+            action_tokenizer.decode_token_ids_to_actions(gt_ids),
+            dtype=torch.float32,
+        )
+        total_l1 += F.l1_loss(pred_actions, gt_actions, reduction="sum").item()
+        total_l1_samples += pred_actions.numel()
+
+        n_batches += 1
+        if n_batches % 50 == 0:
+            running_acc = total_correct / max(total_action_tokens, 1) * 100
+            running_l1 = total_l1 / max(total_l1_samples, 1)
+            running_ce = total_ce_loss / n_batches
+            print(f"  [{n_batches:>5d} batches] "
+                  f"CE={running_ce:.4f}  TokAcc={running_acc:.1f}%  L1={running_l1:.4f}")
+
+        if num_batches and n_batches >= num_batches:
+            break
+
+    # Final metrics
+    token_acc = total_correct / max(total_action_tokens, 1) * 100
+    l1 = total_l1 / max(total_l1_samples, 1)
+    ce = total_ce_loss / max(n_batches, 1)
+
+    print(f"\n  Results ({n_batches} batches, {total_action_tokens} action tokens):")
+    print(f"    CE Loss:        {ce:.4f}")
+    print(f"    Token Accuracy: {token_acc:.2f}%")
+    print(f"    Action L1:      {l1:.4f}")
+
+    # Save results
+    os.makedirs(output_dir, exist_ok=True)
+    results = {
+        "condition": condition,
+        "mode": "teacher_force",
+        "n_batches": n_batches,
+        "n_action_tokens": total_action_tokens,
+        "ce_loss": ce,
+        "token_accuracy": token_acc,
+        "action_l1": l1,
+    }
+    out_path = os.path.join(output_dir, "teacher_force_metrics.json")
+    with open(out_path, "w") as f:
+        json.dump(results, f, indent=2)
+    print(f"\n  Saved to {out_path}")
+
+    return results
+
+
 # ── CLI ─────────────────────────────────────────────────────────────────────
 
 def main():
@@ -222,10 +417,14 @@ def main():
     )
     parser.add_argument(
         "--mode", required=True,
-        choices=["dummy", "rollout"],
-        help="dummy = quick load test; rollout = full CALVIN evaluation",
+        choices=["dummy", "rollout", "teacher_force"],
+        help="dummy = quick load test; rollout = full CALVIN evaluation; "
+             "teacher_force = L1 & token accuracy on val set",
     )
     parser.add_argument("--num_sequences", type=int, default=1000)
+    parser.add_argument("--num_batches", type=int, default=None,
+                        help="Max batches for teacher_force mode (default: all)")
+    parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument(
         "--output_dir", default=str(PROJECT_DIR / "results"),
     )
@@ -258,6 +457,15 @@ def main():
         out_dir = os.path.join(args.output_dir, condition)
         rollout_eval(
             policy_dir, condition, args.num_sequences, out_dir, device=args.device,
+        )
+
+    elif args.mode == "teacher_force":
+        out_dir = os.path.join(args.output_dir, condition)
+        teacher_force_eval(
+            policy_dir, condition, out_dir,
+            num_batches=args.num_batches,
+            batch_size=args.batch_size,
+            device=args.device,
         )
 
 

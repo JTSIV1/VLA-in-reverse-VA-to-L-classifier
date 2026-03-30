@@ -39,19 +39,23 @@ from torch.utils.data import DataLoader
 
 # ── Path setup ────────────────────────────────────────────────────────────────
 PROJECT_ROOT = str(Path(__file__).resolve().parents[2])
-OPENVLA_DIR = str(Path("/data/user_data/wenjiel2/Code/openvla-mini"))
-for p in [PROJECT_ROOT, OPENVLA_DIR]:
-    if p not in sys.path:
-        sys.path.insert(0, p)
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
+import config as C  # noqa: E402
+
+OPENVLA_DIR  = C.OPENVLA_DIR
+if OPENVLA_DIR not in sys.path:
+    sys.path.insert(0, OPENVLA_DIR)
 
 # ── Constants ─────────────────────────────────────────────────────────────────
-CALVIN_VAL_DIR = "/data/user_data/yashagar/task_D_D/validation"
-CALVIN_TRAIN_DIR = "/data/user_data/yashagar/task_D_D/training"
+CALVIN_VAL_DIR   = C.VAL_DIR.rstrip("/")
+CALVIN_TRAIN_DIR = C.TRAIN_DIR.rstrip("/")
 DEFAULT_VERB_CLF = os.path.join(
     PROJECT_ROOT, "checkpoints", "ao_native_sparse_weighted_j6457852_best.pth"
 )
-RLDS_DATA_ROOT = "/data/user_data/wenjiel2/datasets/calvin_rlds"
-DEFAULT_OUT = os.path.join(PROJECT_ROOT, "results", "stage3")
+RLDS_DATA_ROOT   = C.RLDS_DIR
+DEFAULT_OUT      = os.path.join(PROJECT_ROOT, "results", "stage3")
 
 # ── Bin tokenizer round-trip ───────────────────────────────────────────────────
 

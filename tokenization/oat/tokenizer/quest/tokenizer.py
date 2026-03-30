@@ -158,7 +158,8 @@ class QueSTTok(BaseTokenizer):
 
         Returns:
             dict with recon_loss, vq_loss, latents (B, T', 256) pre-FSQ,
-            codes (B, T') quantized indices.
+            codes (B, T') quantized indices,
+            fsq_codes (B, T', fsq_dim) post-round 4-d with STE (FSQ only).
         """
         actions = batch['action']
         # Encoder → pre-FSQ 256-d
@@ -166,9 +167,12 @@ class QueSTTok(BaseTokenizer):
         # Quantize
         if self.vq_type == 'vq':
             quants, indices, commit_loss = self.vq(pre_fsq)
+            fsq_codes = None
         else:
             quants, indices = self.vq(pre_fsq)
             commit_loss = torch.tensor(0.0, device=actions.device)
+            # 4-d post-round codes with STE gradient (bijection with indices)
+            fsq_codes = self.vq.quantize(self.vq.project_in(pre_fsq))
         # Decode
         recons = self.decode(quants)
         recon_loss = F.mse_loss(recons, actions)
@@ -177,6 +181,7 @@ class QueSTTok(BaseTokenizer):
             'vq_loss': commit_loss,
             'latents': pre_fsq,         # 256-d for aux heads
             'codes': indices.detach(),
+            'fsq_codes': fsq_codes,     # 4-d post-round (FSQ only, None for VQ)
         }
     
     def encode_fsq_codes(self, actions: torch.Tensor) -> torch.Tensor:
