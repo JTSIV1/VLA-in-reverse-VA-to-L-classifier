@@ -59,18 +59,23 @@ DEFAULT_OUT      = os.path.join(PROJECT_ROOT, "results", "stage3")
 
 # ── Bin tokenizer round-trip ───────────────────────────────────────────────────
 
-def bin_roundtrip(actions: np.ndarray, n_bins: int = 256,
-                  min_action: float = -1.0, max_action: float = 1.0) -> np.ndarray:
+
+def bin_roundtrip(
+    actions: np.ndarray,
+    n_bins: int = 256,
+    min_action: float = -1.0,
+    max_action: float = 1.0,
+) -> np.ndarray:
     """Quantize continuous actions through the bin tokenizer and back.
 
     actions: (T, A) float32 in [-1, 1]
     Returns: (T, A) float32, each value snapped to the nearest bin center.
     """
-    bins        = np.linspace(min_action, max_action, n_bins)
+    bins = np.linspace(min_action, max_action, n_bins)
     bin_centers = (bins[:-1] + bins[1:]) / 2.0
-    clipped     = np.clip(actions, min_action, max_action)
-    indices     = np.digitize(clipped, bins) - 1       # in [0, n_bins]
-    indices     = np.clip(indices, 0, len(bin_centers) - 1)
+    clipped = np.clip(actions, min_action, max_action)
+    indices = np.digitize(clipped, bins) - 1  # in [0, n_bins]
+    indices = np.clip(indices, 0, len(bin_centers) - 1)
     return bin_centers[indices]
 
 
@@ -104,7 +109,7 @@ def load_vq_wrapper(vqvla_checkpoint_dir: str, device: str = "cpu"):
 
     try:
         wrapper = ActionVQVAELossWrapper(
-            model_path=VQVLA_CONFIG_DIR,   # config JSONs live here
+            model_path=VQVLA_CONFIG_DIR,  # config JSONs live here
             use_action_type_pe=True,
             use_time_pe=True,
             freeze=True,
@@ -121,19 +126,21 @@ def load_vq_wrapper(vqvla_checkpoint_dir: str, device: str = "cpu"):
 
     # Expose attributes expected by vq_roundtrip_trajectory
     wrapper.vqvae_n_embed = wrapper.vqvae.vqvae_n_embed
-    wrapper.vqvae_groups  = wrapper.vqvae.vqvae_groups
-    wrapper.input_dim_h   = wrapper.vqvae.temporal_compression_ratio
-    wrapper.input_dim_w   = 7
+    wrapper.vqvae_groups = wrapper.vqvae.vqvae_groups
+    wrapper.input_dim_h = wrapper.vqvae.temporal_compression_ratio
+    wrapper.input_dim_w = 7
     return wrapper
 
 
-def vq_roundtrip_trajectory(actions: np.ndarray, wrapper, device: str = "cpu") -> np.ndarray:
+def vq_roundtrip_trajectory(
+    actions: np.ndarray, wrapper, device: str = "cpu"
+) -> np.ndarray:
     """Round-trip a full trajectory (T, 7) through the VQ tokenizer in 5-step chunks.
 
     Returns: (n_chunks * 5, 7) reconstructed actions.
     If T < 5, returns an empty array.
     """
-    T       = len(actions)
+    T = len(actions)
     n_chunks = T // 5
     if n_chunks == 0:
         return np.zeros((0, 7), dtype=np.float32)
@@ -141,28 +148,37 @@ def vq_roundtrip_trajectory(actions: np.ndarray, wrapper, device: str = "cpu") -
     recon_list = []
     with torch.no_grad():
         for i in range(n_chunks):
-            chunk = actions[i * 5 : (i + 1) * 5]              # (5, 7)
-            x     = torch.from_numpy(chunk).float().to(device).unsqueeze(0)  # (1, 5, 7)
+            chunk = actions[i * 5 : (i + 1) * 5]  # (5, 7)
+            x = torch.from_numpy(chunk).float().to(device).unsqueeze(0)  # (1, 5, 7)
             # get_code returns either codes directly or (None, codes)
             codes_result = wrapper.get_code(x)
-            codes = codes_result[1] if isinstance(codes_result, tuple) else codes_result  # (1, 4)
-            z_embed  = wrapper.draw_code_forward(codes)        # (1, latent_dim)
-            decoded  = wrapper.get_action_from_latent(z_embed) # (1, 5, 7) or tensor-like
+            codes = (
+                codes_result[1] if isinstance(codes_result, tuple) else codes_result
+            )  # (1, 4)
+            z_embed = wrapper.draw_code_forward(codes)  # (1, latent_dim)
+            decoded = wrapper.get_action_from_latent(
+                z_embed
+            )  # (1, 5, 7) or tensor-like
             if hasattr(decoded, "sample"):
                 decoded = decoded.sample
             if isinstance(decoded, torch.Tensor):
-                decoded = decoded.squeeze(0).cpu().numpy()     # (5, 7)
+                decoded = decoded.squeeze(0).cpu().numpy()  # (5, 7)
             else:
-                decoded = np.array(decoded).squeeze(0)         # fallback
+                decoded = np.array(decoded).squeeze(0)  # fallback
             recon_list.append(decoded)
-    return np.concatenate(recon_list, axis=0)                  # (n_chunks*5, 7)
+    return np.concatenate(recon_list, axis=0)  # (n_chunks*5, 7)
 
 
 # ── Verb probe ────────────────────────────────────────────────────────────────
 
-def run_verb_probe(condition: str, vqvla_checkpoint_dir: str,
-                   verb_classifier_ckpt: str, device: str,
-                   min_class_count: int = 30) -> dict:
+
+def run_verb_probe(
+    condition: str,
+    vqvla_checkpoint_dir: str,
+    verb_classifier_ckpt: str,
+    device: str,
+    min_class_count: int = 30,
+) -> dict:
     """
     Evaluate verb decodability by round-tripping trajectories through the
     action tokenizer then running through the pre-trained verb classifier.
@@ -179,20 +195,22 @@ def run_verb_probe(condition: str, vqvla_checkpoint_dir: str,
 
     # ── Load verb classifier ──────────────────────────────────────────────────
     raw = torch.load(verb_classifier_ckpt, map_location=device, weights_only=False)
-    state_dict  = raw["state_dict"]
-    num_verbs   = raw["num_verbs"]
-    verb_to_id  = raw["verb_to_id"]
-    id_to_verb  = raw["id_to_verb"]
-    d_model     = raw.get("d_model", D_MODEL)
-    nhead       = raw.get("nhead", NHEAD)
-    num_layers  = raw.get("num_layers", NUM_LAYERS)
-    action_dim  = raw.get("action_dim", 7)
+    state_dict = raw["state_dict"]
+    num_verbs = raw["num_verbs"]
+    verb_to_id = raw["verb_to_id"]
+    id_to_verb = raw["id_to_verb"]
+    d_model = raw.get("d_model", D_MODEL)
+    nhead = raw.get("nhead", NHEAD)
+    num_layers = raw.get("num_layers", NUM_LAYERS)
+    action_dim = raw.get("action_dim", 7)
     max_action_len = raw.get("max_action_len", MAX_SEQ_LEN)
 
     clf = ActionToVerbTransformer(
         num_verbs=num_verbs,
         action_vocab_size=None,
-        d_model=d_model, nhead=nhead, num_layers=num_layers,
+        d_model=d_model,
+        nhead=nhead,
+        num_layers=num_layers,
         action_dim=action_dim,
         max_action_len=max_action_len,
         modality="action_only",
@@ -205,23 +223,26 @@ def run_verb_probe(condition: str, vqvla_checkpoint_dir: str,
     # ── Load VQ wrapper (for VQ conditions) ───────────────────────────────────
     vq_wrapper = None
     if condition.startswith("vq_"):
-        assert vqvla_checkpoint_dir, f"--vqvla_checkpoint_dir required for condition={condition}"
+        assert vqvla_checkpoint_dir, (
+            f"--vqvla_checkpoint_dir required for condition={condition}"
+        )
         vq_wrapper = load_vq_wrapper(vqvla_checkpoint_dir, device=device)
         print(f"Loaded VQ wrapper from {vqvla_checkpoint_dir}")
 
     # ── Load val DataFrame ────────────────────────────────────────────────────
-    val_df  = load_calvin_to_dataframe(VAL_DIR)
+    val_df = load_calvin_to_dataframe(VAL_DIR)
     # Filter to verbs seen in training (sparse classes)
     if min_class_count > 0:
-        train_df    = load_calvin_to_dataframe(TRAIN_DIR)
+        train_df = load_calvin_to_dataframe(TRAIN_DIR)
         verb_counts = train_df["primary_verb"].value_counts()
-        keep_verbs  = set(verb_counts[verb_counts >= min_class_count].index)
-        val_df      = val_df[val_df["primary_verb"].isin(keep_verbs)].copy()
+        keep_verbs = set(verb_counts[verb_counts >= min_class_count].index)
+        val_df = val_df[val_df["primary_verb"].isin(keep_verbs)].copy()
         print(f"Kept {len(keep_verbs)} sparse verbs; val samples: {len(val_df)}")
 
     # ── Build val dataset (native action rep, action_only) ────────────────────
     val_ds = CalvinVerbDataset(
-        val_df, VAL_DIR,
+        val_df,
+        VAL_DIR,
         max_seq_len=max_action_len,
         modality="action_only",
         action_tokenizer=None,
@@ -231,12 +252,17 @@ def run_verb_probe(condition: str, vqvla_checkpoint_dir: str,
     val_ds.id_to_verb = id_to_verb
     # Filter val samples to known verbs
     valid_mask = val_df["primary_verb"].isin(verb_to_id.keys())
-    val_df     = val_df[valid_mask].reset_index(drop=True)
-    val_ds.df  = val_df
+    val_df = val_df[valid_mask].reset_index(drop=True)
+    val_ds.df = val_df
     print(f"Val samples after vocab filter: {len(val_df)}")
 
-    dataloader = DataLoader(val_ds, batch_size=32, shuffle=False, num_workers=4,
-                            collate_fn=lambda batch: _collate_action_only(batch, max_action_len))
+    dataloader = DataLoader(
+        val_ds,
+        batch_size=32,
+        shuffle=False,
+        num_workers=4,
+        collate_fn=lambda batch: _collate_action_only(batch, max_action_len),
+    )
 
     all_preds, all_labels = [], []
 
@@ -244,15 +270,15 @@ def run_verb_probe(condition: str, vqvla_checkpoint_dir: str,
         # actions: (B, max_seq_len, 7) continuous, float32
         # seq_lengths: (B,) int — actual trajectory length before padding
 
-        actions_np = actions.numpy()           # (B, T, 7)
+        actions_np = actions.numpy()  # (B, T, 7)
         recon_list = []
 
         for b in range(len(actions_np)):
-            L    = int(seq_lengths[b].item()) - 1  # seq_len includes CLS token; subtract
-            traj = actions_np[b, :L]               # (L, 7) actual actions
+            L = int(seq_lengths[b].item()) - 1  # seq_len includes CLS token; subtract
+            traj = actions_np[b, :L]  # (L, 7) actual actions
 
             if condition == "bin":
-                recon = bin_roundtrip(traj)        # (L, 7)
+                recon = bin_roundtrip(traj)  # (L, 7)
             elif condition.startswith("vq_"):
                 recon = vq_roundtrip_trajectory(traj, vq_wrapper, device=device)
                 if len(recon) == 0:
@@ -273,20 +299,27 @@ def run_verb_probe(condition: str, vqvla_checkpoint_dir: str,
 
         # Run verb classifier
         with torch.no_grad():
-            logits = clf(frames=None, trajectories=recon_batch,
-                         seq_lengths=seq_lengths.to(device))
+            logits = clf(
+                frames=None,
+                trajectories=recon_batch,
+                seq_lengths=seq_lengths.to(device),
+            )
         preds = logits.argmax(dim=1).cpu().tolist()
         all_preds.extend(preds)
         all_labels.extend(labels.tolist())
 
     # ── Compute metrics ───────────────────────────────────────────────────────
-    correct   = sum(p == l for p, l in zip(all_preds, all_labels))
-    verb_acc  = correct / len(all_labels) if all_labels else 0.0
+    correct = sum(p == l for p, l in zip(all_preds, all_labels))
+    verb_acc = correct / len(all_labels) if all_labels else 0.0
     verb_names = [id_to_verb[i] for i in range(num_verbs)]
-    report     = classification_report(all_labels, all_preds,
-                                       target_names=verb_names,
-                                       output_dict=True, zero_division=0)
-    macro_f1   = report.get("macro avg", {}).get("f1-score", 0.0)
+    report = classification_report(
+        all_labels,
+        all_preds,
+        target_names=verb_names,
+        output_dict=True,
+        zero_division=0,
+    )
+    macro_f1 = report.get("macro avg", {}).get("f1-score", 0.0)
 
     print(f"Verb probe results ({condition}):")
     print(f"  Accuracy : {verb_acc:.4f}")
@@ -294,13 +327,16 @@ def run_verb_probe(condition: str, vqvla_checkpoint_dir: str,
     print(f"  Samples  : {len(all_labels)}")
 
     return {
-        "verb_acc":   verb_acc,
-        "macro_f1":   macro_f1,
-        "n_samples":  len(all_labels),
+        "verb_acc": verb_acc,
+        "macro_f1": macro_f1,
+        "n_samples": len(all_labels),
         "id_to_verb": {str(k): v for k, v in id_to_verb.items()},
-        "per_class":  {k: v for k, v in report.items()
-                       if k not in ("accuracy", "macro avg", "weighted avg")},
-        "macro_avg":  report.get("macro avg", {}),
+        "per_class": {
+            k: v
+            for k, v in report.items()
+            if k not in ("accuracy", "macro avg", "weighted avg")
+        },
+        "macro_avg": report.get("macro avg", {}),
         "weighted_avg": report.get("weighted avg", {}),
     }
 
@@ -309,17 +345,25 @@ def _collate_action_only(batch, max_seq_len):
     """Collate CalvinVerbDataset samples for action_only modality."""
     frames_list, actions_list, scene_list, labels_list, seqlens_list = zip(*batch)
     # frames: dummy zeros in action_only mode
-    actions = torch.stack([a.float() if a.dtype != torch.float32 else a
-                           for a in actions_list])
-    labels  = torch.stack(labels_list)
+    actions = torch.stack(
+        [a.float() if a.dtype != torch.float32 else a for a in actions_list]
+    )
+    labels = torch.stack(labels_list)
     seqlens = torch.tensor(seqlens_list, dtype=torch.long)
     return None, actions, None, labels, seqlens
 
 
 # ── NLL evaluation ────────────────────────────────────────────────────────────
 
-def run_nll_eval(condition: str, checkpoint_dir: str, vqvla_checkpoint_dir: str,
-                 data_root_dir: str, max_batches: int, device: str) -> dict:
+
+def run_nll_eval(
+    condition: str,
+    checkpoint_dir: str,
+    vqvla_checkpoint_dir: str,
+    data_root_dir: str,
+    max_batches: int,
+    device: str,
+) -> dict:
     """
     Continuous L1 loss evaluation on the RLDS val split (teacher-forcing).
 
@@ -332,10 +376,18 @@ def run_nll_eval(condition: str, checkpoint_dir: str, vqvla_checkpoint_dir: str,
     os.environ.setdefault("PRISMATIC_DATA_ROOT", data_root_dir)
 
     import torch
-    from transformers import AutoConfig, AutoImageProcessor, AutoModelForVision2Seq, AutoProcessor
+    from transformers import (
+        AutoConfig,
+        AutoImageProcessor,
+        AutoModelForVision2Seq,
+        AutoProcessor,
+    )
     from prismatic.extern.hf.configuration_prismatic import OpenVLAConfig
     from prismatic.extern.hf.modeling_prismatic import OpenVLAForActionPrediction
-    from prismatic.extern.hf.processing_prismatic import PrismaticImageProcessor, PrismaticProcessor
+    from prismatic.extern.hf.processing_prismatic import (
+        PrismaticImageProcessor,
+        PrismaticProcessor,
+    )
     from prismatic.util.data_utils import PaddedCollatorForActionPrediction
     from prismatic.vla.action_tokenizer import ActionTokenizer
     from prismatic.vla.datasets import RLDSBatchTransform, RLDSDataset
@@ -361,17 +413,20 @@ def run_nll_eval(condition: str, checkpoint_dir: str, vqvla_checkpoint_dir: str,
     # Create action tokenizer matching the condition
     if condition == "bin":
         action_tokenizer = ActionTokenizer(processor.tokenizer)
-        future_horizon   = 0
+        future_horizon = 0
     elif condition.startswith("vq_"):
         from prismatic.vla.calvin_vq_action_tokenizer import CalvinVQActionTokenizer
+
         action_tokenizer = CalvinVQActionTokenizer(
             processor.tokenizer,
             vqvla_checkpoint_dir=vqvla_checkpoint_dir,
         )
         future_horizon = action_tokenizer.required_future_horizon
-        print(f"VQ tokenizer: groups={action_tokenizer.vq_vae.vqvae_groups}, "
-              f"n_embed={action_tokenizer.vq_vae.vqvae_n_embed}, "
-              f"future_horizon={future_horizon}")
+        print(
+            f"VQ tokenizer: groups={action_tokenizer.vq_vae.vqvae_groups}, "
+            f"n_embed={action_tokenizer.vq_vae.vqvae_n_embed}, "
+            f"future_horizon={future_horizon}"
+        )
     else:
         raise ValueError(f"Unknown condition: {condition}")
 
@@ -387,8 +442,8 @@ def run_nll_eval(condition: str, checkpoint_dir: str, vqvla_checkpoint_dir: str,
         data_mix="calvin_dataset",
         batch_transform=batch_transform,
         resize_resolution=tuple(vla.config.image_sizes),
-        shuffle_buffer_size=1000,        # small buffer for val (order doesn't matter much)
-        train=False,                     # use val split
+        shuffle_buffer_size=1000,  # small buffer for val (order doesn't matter much)
+        train=False,  # use val split
         image_aug=False,
         future_action_window_size=future_horizon,
     )
@@ -398,8 +453,11 @@ def run_nll_eval(condition: str, checkpoint_dir: str, vqvla_checkpoint_dir: str,
         padding_side="right",
     )
     dataloader = DataLoader(
-        val_dataset, batch_size=8, sampler=None,
-        collate_fn=collator, num_workers=0,
+        val_dataset,
+        batch_size=8,
+        sampler=None,
+        collate_fn=collator,
+        num_workers=0,
     )
 
     total_l1, l1_batches = 0.0, 0
@@ -407,7 +465,7 @@ def run_nll_eval(condition: str, checkpoint_dir: str, vqvla_checkpoint_dir: str,
 
     # For VQ: tokens per chunk = n_groups; for bin: tokens per step = action_dim (7)
     if condition.startswith("vq_"):
-        _tokens_per_unit = action_tokenizer.vq_vae.vqvae_groups   # 4
+        _tokens_per_unit = action_tokenizer.vq_vae.vqvae_groups  # 4
     else:
         _tokens_per_unit = 7  # bin: 7 dims per timestep
 
@@ -416,10 +474,10 @@ def run_nll_eval(condition: str, checkpoint_dir: str, vqvla_checkpoint_dir: str,
             if max_batches > 0 and n_batches >= max_batches:
                 break
 
-            pixel_values   = batch["pixel_values"].to(torch.bfloat16).to(device)
-            input_ids      = batch["input_ids"].to(device)
+            pixel_values = batch["pixel_values"].to(torch.bfloat16).to(device)
+            input_ids = batch["input_ids"].to(device)
             attention_mask = batch["attention_mask"].to(device)
-            labels         = batch["labels"].to(device)
+            labels = batch["labels"].to(device)
 
             with torch.autocast("cuda", dtype=torch.bfloat16):
                 output = vla(
@@ -428,25 +486,34 @@ def run_nll_eval(condition: str, checkpoint_dir: str, vqvla_checkpoint_dir: str,
                     pixel_values=pixel_values,
                 )
 
-            num_patches   = vla.vision_backbone.featurizer.patch_embed.num_patches
+            num_patches = vla.vision_backbone.featurizer.patch_embed.num_patches
             action_logits = output.logits[:, num_patches:-1]
-            action_preds  = action_logits.argmax(dim=2)
-            action_gt     = labels[:, 1:].to(device)
-            mask          = action_gt > action_tokenizer.action_token_begin_idx
+            action_preds = action_logits.argmax(dim=2)
+            # Use input_ids instead of labels to avoid the -100 masking bug from datasets.py
+            action_gt = input_ids[:, 1:].to(device)
+            mask = action_gt > action_tokenizer.action_token_begin_idx
 
             # Continuous L1: decode tokens → continuous actions → L1 vs GT
             try:
                 pred_flat = action_preds[mask].cpu().numpy()  # (N,)
-                gt_flat   = action_gt[mask].cpu().numpy()     # (N,)
+                gt_flat = action_gt[mask].cpu().numpy()  # (N,)
                 tpu = _tokens_per_unit
                 n = (len(pred_flat) // tpu) * tpu
                 if n > 0:
                     if condition == "bin":
-                        pred_cont = action_tokenizer.decode_token_ids_to_actions(pred_flat[:n]).reshape(-1, 7)
-                        gt_cont   = action_tokenizer.decode_token_ids_to_actions(gt_flat[:n]).reshape(-1, 7)
+                        pred_cont = action_tokenizer.decode_token_ids_to_actions(
+                            pred_flat[:n]
+                        ).reshape(-1, 7)
+                        gt_cont = action_tokenizer.decode_token_ids_to_actions(
+                            gt_flat[:n]
+                        ).reshape(-1, 7)
                     else:  # vq_*
-                        pred_cont = action_tokenizer.decode_token_ids_to_actions(pred_flat[:n].reshape(-1, tpu))
-                        gt_cont   = action_tokenizer.decode_token_ids_to_actions(gt_flat[:n].reshape(-1, tpu))
+                        pred_cont = action_tokenizer.decode_token_ids_to_actions(
+                            pred_flat[:n].reshape(-1, tpu)
+                        )
+                        gt_cont = action_tokenizer.decode_token_ids_to_actions(
+                            gt_flat[:n].reshape(-1, tpu)
+                        )
                     if isinstance(pred_cont, torch.Tensor):
                         pred_cont = pred_cont.cpu().numpy()
                     if isinstance(gt_cont, torch.Tensor):
@@ -458,7 +525,9 @@ def run_nll_eval(condition: str, checkpoint_dir: str, vqvla_checkpoint_dir: str,
 
             n_batches += 1
             if n_batches % 50 == 0:
-                avg_l1_so_far = total_l1 / l1_batches if l1_batches > 0 else float("nan")
+                avg_l1_so_far = (
+                    total_l1 / l1_batches if l1_batches > 0 else float("nan")
+                )
                 print(f"  [{n_batches} batches] avg_l1={avg_l1_so_far:.4f}")
 
     avg_l1 = total_l1 / l1_batches if l1_batches > 0 else None
@@ -466,17 +535,24 @@ def run_nll_eval(condition: str, checkpoint_dir: str, vqvla_checkpoint_dir: str,
     print(f"  Avg L1  : {avg_l1:.4f}" if avg_l1 is not None else "  Avg L1  : N/A")
 
     return {
-        "avg_l1":    avg_l1,
+        "avg_l1": avg_l1,
         "n_batches": n_batches,
     }
 
 
 # ── Real L1: decode(pred_tokens) vs original continuous actions ──────────────
 
-def run_real_l1_eval(condition: str, checkpoint_dir: str,
-                     sweep_tokenizer_type: str, sweep_checkpoint_path: str,
-                     vqvla_checkpoint_dir: str,
-                     data_root_dir: str, max_batches: int, device: str) -> dict:
+
+def run_real_l1_eval(
+    condition: str,
+    checkpoint_dir: str,
+    sweep_tokenizer_type: str,
+    sweep_checkpoint_path: str,
+    vqvla_checkpoint_dir: str,
+    data_root_dir: str,
+    max_batches: int,
+    device: str,
+) -> dict:
     """
     Compute L1 between decoded predicted actions and the ORIGINAL continuous
     ground-truth actions (not re-encoded/decoded GT tokens).
@@ -492,10 +568,18 @@ def run_real_l1_eval(condition: str, checkpoint_dir: str,
 
     import torch
     import tensorflow_datasets as tfds
-    from transformers import AutoConfig, AutoImageProcessor, AutoModelForVision2Seq, AutoProcessor
+    from transformers import (
+        AutoConfig,
+        AutoImageProcessor,
+        AutoModelForVision2Seq,
+        AutoProcessor,
+    )
     from prismatic.extern.hf.configuration_prismatic import OpenVLAConfig
     from prismatic.extern.hf.modeling_prismatic import OpenVLAForActionPrediction
-    from prismatic.extern.hf.processing_prismatic import PrismaticImageProcessor, PrismaticProcessor
+    from prismatic.extern.hf.processing_prismatic import (
+        PrismaticImageProcessor,
+        PrismaticProcessor,
+    )
     from prismatic.util.data_utils import PaddedCollatorForActionPrediction
     from prismatic.vla.action_tokenizer import ActionTokenizer
     from prismatic.vla.datasets import RLDSBatchTransform, RLDSDataset
@@ -523,16 +607,23 @@ def run_real_l1_eval(condition: str, checkpoint_dir: str,
         action_tokenizer = ActionTokenizer(processor.tokenizer)
         future_horizon = 0
     elif sweep_tokenizer_type:
-        from prismatic.vla.calvin_sweep_action_tokenizer import CalvinSweepActionTokenizer
+        from prismatic.vla.calvin_sweep_action_tokenizer import (
+            CalvinSweepActionTokenizer,
+        )
+
         action_tokenizer = CalvinSweepActionTokenizer(
-            processor.tokenizer, sweep_tokenizer_type, sweep_checkpoint_path,
+            processor.tokenizer,
+            sweep_tokenizer_type,
+            sweep_checkpoint_path,
             use_extra=True,
         )
         future_horizon = action_tokenizer.required_future_horizon
     elif vqvla_checkpoint_dir:
         from prismatic.vla.calvin_vq_action_tokenizer import CalvinVQActionTokenizer
+
         action_tokenizer = CalvinVQActionTokenizer(
-            processor.tokenizer, vqvla_checkpoint_dir=vqvla_checkpoint_dir,
+            processor.tokenizer,
+            vqvla_checkpoint_dir=vqvla_checkpoint_dir,
         )
         future_horizon = action_tokenizer.required_future_horizon
     else:
@@ -550,7 +641,7 @@ def run_real_l1_eval(condition: str, checkpoint_dir: str,
         data_mix="calvin_dataset",
         batch_transform=batch_transform,
         resize_resolution=tuple(vla.config.image_sizes),
-        shuffle_buffer_size=1000,
+        shuffle_buffer_size=1,
         train=False,
         image_aug=False,
         future_action_window_size=future_horizon,
@@ -561,8 +652,11 @@ def run_real_l1_eval(condition: str, checkpoint_dir: str,
         padding_side="right",
     )
     dataloader = DataLoader(
-        val_dataset, batch_size=8, sampler=None,
-        collate_fn=collator, num_workers=0,
+        val_dataset,
+        batch_size=8,
+        sampler=None,
+        collate_fn=collator,
+        num_workers=0,
     )
 
     # Also load raw continuous actions from RLDS val split
@@ -572,7 +666,7 @@ def run_real_l1_eval(condition: str, checkpoint_dir: str,
     # Flatten episodes into (image, action) steps for alignment
     raw_actions_iter = _rlds_raw_action_iterator(raw_ds)
 
-    n_codes = getattr(action_tokenizer, 'n_codes_per_chunk', 7)
+    n_codes = getattr(action_tokenizer, "n_codes_per_chunk", 7)
 
     all_pred_actions = []
     all_gt_actions = []
@@ -598,9 +692,11 @@ def run_real_l1_eval(condition: str, checkpoint_dir: str,
             num_patches = vla.vision_backbone.featurizer.patch_embed.num_patches
             action_logits = output.logits[:, num_patches:-1]
             action_preds = action_logits.argmax(dim=2)
-            action_gt = labels[:, 1:].to(device)
-            mask = (action_tokenizer.action_token_end_idx > action_gt) & \
-                   (action_gt > action_tokenizer.action_token_begin_idx)
+            # Use input_ids instead of labels to avoid the -100 masking bug from datasets.py
+            action_gt = input_ids[:, 1:].to(device)
+            mask = (action_tokenizer.action_token_end_idx > action_gt) & (
+                action_gt > action_tokenizer.action_token_begin_idx
+            )
 
             # Decode predicted tokens → continuous actions
             pred_flat = action_preds[mask].cpu().numpy()
@@ -646,7 +742,9 @@ def run_real_l1_eval(condition: str, checkpoint_dir: str,
         all_preds = np.concatenate(all_pred_actions)
         all_gts = np.concatenate(all_gt_actions)
         real_l1 = float(np.abs(all_preds - all_gts).mean())
-        per_dim_l1 = [float(np.abs(all_preds[:, d] - all_gts[:, d]).mean()) for d in range(7)]
+        per_dim_l1 = [
+            float(np.abs(all_preds[:, d] - all_gts[:, d]).mean()) for d in range(7)
+        ]
         print(f"\nReal L1 eval done ({n_batches} batches, {len(all_preds)} steps):")
         print(f"  Real L1 (overall): {real_l1:.4f}")
         print(f"  Per-dim L1: {['%.4f' % v for v in per_dim_l1]}")
@@ -672,9 +770,15 @@ def _rlds_raw_action_iterator(raw_ds):
 
 # ── FSDP Real L1: native prismatic checkpoint eval ──────────────────────────
 
-def run_fsdp_real_l1_eval(fsdp_checkpoint: str,
-                          sweep_tokenizer_type: str, sweep_checkpoint_path: str,
-                          data_root_dir: str, max_batches: int, device: str) -> dict:
+
+def run_fsdp_real_l1_eval(
+    fsdp_checkpoint: str,
+    sweep_tokenizer_type: str,
+    sweep_checkpoint_path: str,
+    data_root_dir: str,
+    max_batches: int,
+    device: str,
+) -> dict:
     """
     Real L1 eval for FSDP (native prismatic) checkpoints.
 
@@ -707,7 +811,9 @@ def run_fsdp_real_l1_eval(fsdp_checkpoint: str,
     # Build action tokenizer string
     is_bin = not (sweep_tokenizer_type and sweep_checkpoint_path)
     if not is_bin:
-        action_tok_str = "sweep:{}:{}".format(sweep_tokenizer_type, sweep_checkpoint_path)
+        action_tok_str = "sweep:{}:{}".format(
+            sweep_tokenizer_type, sweep_checkpoint_path
+        )
     else:
         action_tok_str = "action_tokenizer"  # bin
 
@@ -723,9 +829,12 @@ def run_fsdp_real_l1_eval(fsdp_checkpoint: str,
             action_stats = stats["calvin_dataset"]["action"]
             unnorm_q01 = np.array(action_stats["q01"], dtype=np.float32)
             unnorm_q99 = np.array(action_stats["q99"], dtype=np.float32)
-            unnorm_mask = np.array(action_stats.get("mask", [True]*7), dtype=bool)
-            print("Loaded unnorm stats: q01={}, q99={}".format(
-                unnorm_q01.round(3).tolist(), unnorm_q99.round(3).tolist()))
+            unnorm_mask = np.array(action_stats.get("mask", [True] * 7), dtype=bool)
+            print(
+                "Loaded unnorm stats: q01={}, q99={}".format(
+                    unnorm_q01.round(3).tolist(), unnorm_q99.round(3).tolist()
+                )
+            )
 
     # Build val dataset using native image transforms
     dataset, action_tokenizer, collator = get_vla_dataset_and_collator(
@@ -740,15 +849,16 @@ def run_fsdp_real_l1_eval(fsdp_checkpoint: str,
         image_aug=False,
         action_tokenizer=action_tok_str,
     )
-    dataloader = DataLoader(dataset, batch_size=8, sampler=None,
-                            collate_fn=collator, num_workers=0)
+    dataloader = DataLoader(
+        dataset, batch_size=8, sampler=None, collate_fn=collator, num_workers=0
+    )
 
     # Raw RLDS GT actions for comparison
     rlds_path = os.path.join(data_root_dir, "calvin_dataset", "1.0.0")
     raw_ds = tfds.builder_from_directory(rlds_path).as_dataset(split="val")
     raw_actions_iter = _rlds_raw_action_iterator(raw_ds)
 
-    n_codes = getattr(action_tokenizer, 'n_codes_per_chunk', 7)
+    n_codes = getattr(action_tokenizer, "n_codes_per_chunk", 7)
     all_pred_actions, all_gt_actions = [], []
     n_batches = 0
 
@@ -760,7 +870,9 @@ def run_fsdp_real_l1_eval(fsdp_checkpoint: str,
             # Handle dict (native DINOSigLIP) or tensor pixel_values
             pv = batch["pixel_values"]
             if isinstance(pv, dict):
-                pixel_values = {k: v.to(torch.bfloat16).to(device) for k, v in pv.items()}
+                pixel_values = {
+                    k: v.to(torch.bfloat16).to(device) for k, v in pv.items()
+                }
             else:
                 pixel_values = pv.to(torch.bfloat16).to(device)
 
@@ -778,8 +890,9 @@ def run_fsdp_real_l1_eval(fsdp_checkpoint: str,
             action_logits = output.logits[:, num_patches:-1]
             action_preds = action_logits.argmax(dim=2)
             action_gt = labels[:, 1:].to(device)
-            mask = (action_tokenizer.action_token_end_idx > action_gt) & \
-                   (action_gt > action_tokenizer.action_token_begin_idx)
+            mask = (action_tokenizer.action_token_end_idx > action_gt) & (
+                action_gt > action_tokenizer.action_token_begin_idx
+            )
 
             pred_flat = action_preds[mask].cpu().numpy()
             n = (len(pred_flat) // n_codes) * n_codes
@@ -828,10 +941,16 @@ def run_fsdp_real_l1_eval(fsdp_checkpoint: str,
         all_preds = np.concatenate(all_pred_actions)
         all_gts = np.concatenate(all_gt_actions)
         real_l1 = float(np.abs(all_preds - all_gts).mean())
-        per_dim_l1 = [float(np.abs(all_preds[:, d] - all_gts[:, d]).mean()) for d in range(7)]
-        print("\nReal L1 eval done ({} batches, {} steps):".format(n_batches, len(all_preds)))
+        per_dim_l1 = [
+            float(np.abs(all_preds[:, d] - all_gts[:, d]).mean()) for d in range(7)
+        ]
+        print(
+            "\nReal L1 eval done ({} batches, {} steps):".format(
+                n_batches, len(all_preds)
+            )
+        )
         print("  Real L1 (overall): {:.4f}".format(real_l1))
-        print("  Per-dim L1: {}".format(['%.4f' % v for v in per_dim_l1]))
+        print("  Per-dim L1: {}".format(["%.4f" % v for v in per_dim_l1]))
     else:
         real_l1, per_dim_l1 = None, None
         print("  No predictions collected.")
@@ -846,43 +965,90 @@ def run_fsdp_real_l1_eval(fsdp_checkpoint: str,
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
+
 def parse_args():
     p = argparse.ArgumentParser(description="Stage 3 OpenVLA evaluation")
-    p.add_argument("--condition", required=True,
-                   help="Which fine-tuned condition to evaluate (e.g. bin, vq_vanilla, vq_verb, vq_verb01)")
+    p.add_argument(
+        "--condition",
+        required=True,
+        help="Which fine-tuned condition to evaluate (e.g. bin, vq_vanilla, vq_verb, vq_verb01)",
+    )
 
     # NLL eval args
-    p.add_argument("--eval_nll", action="store_true",
-                   help="Run teacher-forcing NLL evaluation (requires checkpoint_dir)")
-    p.add_argument("--checkpoint_dir", type=str, default="",
-                   help="Path to merged fine-tuned OpenVLA checkpoint")
+    p.add_argument(
+        "--eval_nll",
+        action="store_true",
+        help="Run teacher-forcing NLL evaluation (requires checkpoint_dir)",
+    )
+    p.add_argument(
+        "--checkpoint_dir",
+        type=str,
+        default="",
+        help="Path to merged fine-tuned OpenVLA checkpoint",
+    )
     p.add_argument("--data_root_dir", type=str, default=RLDS_DATA_ROOT)
-    p.add_argument("--max_nll_batches", type=int, default=500,
-                   help="Max val batches for NLL eval (0 = full val set)")
+    p.add_argument(
+        "--max_nll_batches",
+        type=int,
+        default=500,
+        help="Max val batches for NLL eval (0 = full val set)",
+    )
 
     # Verb probe args
-    p.add_argument("--eval_verb_probe", action="store_true",
-                   help="Run verb decodability probe (tokenizer round-trip)")
-    p.add_argument("--vqvla_checkpoint_dir", type=str, default="",
-                   help="Path to fine-tuned VQ-VLA checkpoint dir (for vq_* conditions)")
-    p.add_argument("--verb_classifier_ckpt", type=str, default=DEFAULT_VERB_CLF,
-                   help="Path to action-only verb classifier checkpoint")
-    p.add_argument("--min_class_count", type=int, default=30,
-                   help="Min train samples for a verb class to be included")
+    p.add_argument(
+        "--eval_verb_probe",
+        action="store_true",
+        help="Run verb decodability probe (tokenizer round-trip)",
+    )
+    p.add_argument(
+        "--vqvla_checkpoint_dir",
+        type=str,
+        default="",
+        help="Path to fine-tuned VQ-VLA checkpoint dir (for vq_* conditions)",
+    )
+    p.add_argument(
+        "--verb_classifier_ckpt",
+        type=str,
+        default=DEFAULT_VERB_CLF,
+        help="Path to action-only verb classifier checkpoint",
+    )
+    p.add_argument(
+        "--min_class_count",
+        type=int,
+        default=30,
+        help="Min train samples for a verb class to be included",
+    )
 
     # Real L1 eval args
-    p.add_argument("--eval_real_l1", action="store_true",
-                   help="Compute L1 between decoded predictions and original continuous GT actions")
-    p.add_argument("--sweep_tokenizer_type", type=str, default="",
-                   help="Sweep tokenizer type (vq_bet, oat, quest)")
-    p.add_argument("--sweep_checkpoint_path", type=str, default="",
-                   help="Path to sweep tokenizer checkpoint (full.pth)")
-    p.add_argument("--fsdp_checkpoint", type=str, default="",
-                   help="Path to FSDP .pt checkpoint file (native prismatic format)")
+    p.add_argument(
+        "--eval_real_l1",
+        action="store_true",
+        help="Compute L1 between decoded predictions and original continuous GT actions",
+    )
+    p.add_argument(
+        "--sweep_tokenizer_type",
+        type=str,
+        default="",
+        help="Sweep tokenizer type (vq_bet, oat, quest)",
+    )
+    p.add_argument(
+        "--sweep_checkpoint_path",
+        type=str,
+        default="",
+        help="Path to sweep tokenizer checkpoint (full.pth)",
+    )
+    p.add_argument(
+        "--fsdp_checkpoint",
+        type=str,
+        default="",
+        help="Path to FSDP .pt checkpoint file (native prismatic format)",
+    )
 
     # Output
     p.add_argument("--output_dir", type=str, default=DEFAULT_OUT)
-    p.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
+    p.add_argument(
+        "--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu"
+    )
 
     return p.parse_args()
 
@@ -918,7 +1084,9 @@ def main():
             )
         else:
             # HuggingFace format checkpoint (OpenVLA 7B + LoRA)
-            assert args.checkpoint_dir, "--checkpoint_dir or --fsdp_checkpoint required for --eval_real_l1"
+            assert args.checkpoint_dir, (
+                "--checkpoint_dir or --fsdp_checkpoint required for --eval_real_l1"
+            )
             real_l1_metrics = run_real_l1_eval(
                 condition=args.condition,
                 checkpoint_dir=args.checkpoint_dir,
@@ -951,8 +1119,13 @@ def main():
     with open(out_path, "w") as f:
         json.dump(results, f, indent=2)
     print(f"\nResults saved to {out_path}")
-    print(json.dumps({k: v for k, v in results.items() if k != "verb_probe" or True},
-                     indent=2, default=str))
+    print(
+        json.dumps(
+            {k: v for k, v in results.items() if k != "verb_probe" or True},
+            indent=2,
+            default=str,
+        )
+    )
 
 
 if __name__ == "__main__":

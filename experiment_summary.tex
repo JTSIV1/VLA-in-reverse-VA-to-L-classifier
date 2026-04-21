@@ -1,0 +1,63 @@
+\documentclass{article}
+\usepackage[utf8]{inputenc}
+\usepackage{booktabs}
+\usepackage{amsmath}
+\usepackage{hyperref}
+\usepackage{geometry}
+\geometry{margin=1in}
+
+\title{Unsupervised Clustering of Multi-Modal Action and Image Representations}
+\author{Clustering Experiment Team}
+\date{February 2026}
+
+\begin{document}
+
+\maketitle
+
+\section{Objective}
+The primary goal of this study is to evaluate the semantic richness and discriminative power of various robotic action and image representations. Specifically, we investigate whether unsupervised clustering of these representations aligns with ground-truth task labels (primary verbs such as \textit{pick}, \textit{place}, \textit{open}) in the CALVIN manipulation dataset. We hypothesize that superior representations will exhibit higher density and better separation between distinct task semantics without explicit supervision.
+
+\section{Methodology}
+The experimental pipeline consists of representation extraction, dimensionality analysis via PCA, and unsupervised clustering.
+
+\subsection{Action Representations}
+We evaluate three broad categories of action trajectories:
+\begin{itemize}
+    \item \textbf{Continuous (Native):} Raw 7D action trajectories (absolute or relative) scaled to zero mean and unit variance.
+    \item \textbf{Baseline Discretization:} Representations using fixed binning (\textbf{Bin}), k-means centroids (\textbf{Quest}), or Optimal Action Tokenization (\textbf{OAT}).
+    \item \textbf{Learned Tokenization (FAST):} A sweep over learned tokenizers with varying vocabulary sizes ($V \in \{256, 512, 1024, 2048\}$) and temporal scales ($S \in \{1, 10, 25, 50\}$).
+\end{itemize}
+
+\subsection{Image Representations}
+Visual features are extracted from the first and last frames of each episode using state-of-the-art pre-trained encoders:
+\begin{itemize}
+    \item \textbf{DINOv2:} Vision Transformer (ViT) backbones (Small, Base, and standard) trained via self-supervised learning.
+    \item \textbf{VC-1:} Vision-based Foundation Model for Robotic Manipulation.
+    \item \textbf{R3M:} Representation Learning for Real-World Manipulation.
+    \item \textbf{ResNet18:} Standard ImageNet-trained convolutional baseline.
+\end{itemize}
+Features are compared in both "full" mode (concatenated image vectors) and "delta" mode (spatial patches focused on visual changes).
+
+\subsection{Dimensionality and Clustering}
+Prior to clustering, features are standardized and analyzed using Principal Component Analysis (PCA). We evaluate clustering performance across three distinct subspaces:
+\begin{enumerate}
+    \item \textbf{Intrinsic Subspace:} Components required to explain 99\% of total variance.
+    \item \textbf{Constrained Subspaces:} Fixed projections to the top 10 and top 50 principal components to compare representations at equal dimensionality and reduce noise.
+\end{enumerate}
+Clustering is performed using \textbf{K-Means} ($K=27$, matching the number of unique verbs) and \textbf{Agglomerative Ward} clustering.
+
+\section{Output Metrics}
+The system produces a comprehensive suite of metrics for each configuration:
+\begin{itemize}
+    \item \textbf{PCA Metrics:} Cumulative explained variance at top 2, 5, 10, 25, and 50 components ($V@N$), and the component counts required for 90\%, 95\%, and 99\% variance.
+    \item \textbf{Clustering Metrics:}
+    \begin{itemize}
+        \item \textbf{Adjusted Rand Index (ARI):} Measures similarity between clustering and ground-truth tasks, adjusted for chance.
+        \item \textbf{Normalized Mutual Information (NMI):} Evaluates information shared between clusters and labels.
+        \item \textbf{Silhouette Score:} Quantifies cluster density and separation.
+        \item \textbf{Purity:} Measures the extent to which clusters contain a single ground-truth verb.
+    \end{itemize}
+    \item \textbf{Visualizations:} 2D PCA scatter plots colored by ground-truth labels to qualitatively assess task-related structure.
+\end{itemize}
+
+\end{document}
