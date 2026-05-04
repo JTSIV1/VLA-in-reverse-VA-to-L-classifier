@@ -402,3 +402,176 @@ Next best diagnostic:
 3. If the baseline also fails, focus on harness differences from OpenVLA's
    `experiments/robot/simpler/run_simpler_eval.py`, especially prompt format,
    image path, and `predict_action`/generation internals.
+
+### FAST-Focused Follow-Up
+
+After pivoting away from OAT, I ran the closest-reference FAST diagnostics on
+`minivla_fast_v1024_s2` and then on the cleaner `minivla_fast_v256` checkpoint.
+
+For `v1024_s2`, the closest-reference action/env transform still failed:
+
+| Output Dir | Checkpoint | Transform | Result | Key Signal |
+|---|---|---|---:|---|
+| `diag_fast_ref` | `v1024_s2` 30k | `simpler_bridge`, axis-angle, `normalize01` | 0/1 | no movement, no grasp |
+| `diag_fast_ref_inv` | `v1024_s2` 30k | same, `normalize01_flip` | 0/1 | no movement, no grasp |
+| `diag_fast_ref_s5` | `v1024_s2` 30k | same, scale 5 | 0/1 | xyz became huge/clipped, still no interaction |
+| `diag_fast_ref_s10` | `v1024_s2` 30k | same, scale 10 | 0/1 | xyz became huge/clipped, still no interaction |
+
+This ruled out "actions are just too small" for FAST v1024_s2. Scaling up made
+the transformed xyz very large but still did not move/grasp the object.
+
+The stronger finding came from inspecting FAST vocab setup and testing
+`minivla_fast_v256`. The Qwen2.5-extra backbone reports only 256 added extra
+tokens. For FAST v1024, the action range spans roughly 1025 bins, so much of the
+reserved FAST action range overlaps normal base-vocab tokens. That makes
+`v1024_s2` suspicious as a tokenizer/vocab configuration, independent of
+action-scale choices.
+
+I then tested the `v256` FAST policy, because it is the variant intended to fit
+within the Qwen2.5-extra action-token budget:
+
+| Output Dir | Policy | Tokenizer | Transform | Result |
+|---|---|---|---|---:|
+| `diag_fast_v256_ref` | `minivla_fast_v256` 50k loss `1.7879` | `bridge_fast_v256` | `simpler_bridge`, axis-angle, `normalize01` | 0/1 |
+| `diag_fast_v256_ref_inv2` | same | same | `simpler_bridge`, axis-angle, `normalize01_flip` | 0/1 |
+
+Both `v256` runs produced the same decode failure:
+
+```text
+Error decoding tokens: cannot reshape array of size 17 into shape (5,7)
+```
+
+The episode JSON confirms the consequence:
+
+```text
+generated_token_count = 16
+raw_decoded_stats.abs_max = [0, 0, 0, 0, 0, 0, 0]
+raw_action_stats.abs_max = [0, 0, 0, 0, 0, 0, 0]
+```
+
+So FAST is failing before SimplerEnv action semantics matter. The model is
+generating 16 in-range FAST/BPE token IDs, but `FASTTokenizer.decode()` expands
+those BPE tokens into a string with 17 scalar DCT symbols, not the required
+`chunk_size * action_dim = 5 * 7 = 35`. The wrapper catches that exception and
+returns an all-zero `(5, 7)` action chunk. SimplerEnv then receives no xyz/rpy
+motion; the only nonzero dimension is the forced gripper convention from the
+postprocessor.
+
+Current FAST diagnosis:
+
+- The FAST 0 success is not caused by wrong SimplerEnv gripper sign, action
+  scale, Euler-vs-axis-angle, or image preprocessing.
+- `v1024_s2` is likely additionally affected by a vocab-budget mismatch with
+  Qwen2.5-extra's 256 added tokens.
+- `v256` avoids the obvious added-token budget issue, but still generates
+  invalid FAST BPE sequences at rollout time.
+- Because invalid BPE sequences decode to zeros, FAST cannot be evaluated
+  meaningfully until we fix or constrain the FAST generation/decode path.
+
+Next FAST step:
+
+1. Add a FAST decode diagnostic that logs, per generated chunk, local FAST codes,
+   stripped PAD length, decoded string length, and whether it equals
+   `chunk_size * 7`.
+2. Check teacher-forced validation on real Bridge action chunks: encode with
+   `bridge_fast_v256`, decode immediately, and verify valid `(5, 7)`
+   reconstruction. This separates tokenizer quality from policy generation.
+3. If teacher-forced encode/decode is valid, constrain rollout generation so
+   FAST BPE outputs decode to exactly 35 DCT symbols before stepping the env,
+   or retrain/evaluate with a tokenization scheme whose generated tokens are
+   structurally valid by construction.
+
+### FAST Decode Diagnostic Implemented
+
+I added a `fast_decode` block to `policy/scripts/evaluate_simplerenv_lattice.py`
+under `first_chunk_meta`. It records local FAST codes, `PAD_LOCAL`, stripped
+code count, decoded scalar count, expected scalar count, and
+`valid_scalar_count`.
+
+Tiny v256 probe:
+
+| Output Dir | Job | Max Steps | Result | FAST Decode |
+|---|---:|---:|---:|---|
+| `diag_fast_v256_meta` | `7714247` | 1 | 0/1 | invalid, 17 decoded scalars vs 35 expected |
+
+Recorded metadata:
+
+```json
+{
+  "decoded_scalar_count": 17,
+  "expected_scalar_count": 35,
+  "local_codes": [143, 39, 147, 34, 36, 36, 53, 34, 155, 33, 154, 33, 173, 36, 153, 154],
+  "pad_local": 256,
+  "stripped_code_count": 16,
+  "valid_scalar_count": false
+}
+```
+
+This confirms the failure reason without relying only on warning logs. FAST
+generation is producing in-range local codes, but the BPE code sequence is not a
+structurally valid action chunk. The decoder catches the reshape failure and
+returns zeros; the policy then has no chance to move the object in SimplerEnv.
+
+Immediate conclusion: do not spend more time on FAST gripper/action-scale
+ablations until the generation/decode constraint is fixed. The next productive
+experiment is teacher-forced FAST encode/decode on real Bridge chunks, followed
+by constrained generation or a structurally valid action-tokenizer variant.
+
+### Sanity Check: Does Any Rollout Path Work?
+
+The immediate goal shifted from debugging FAST/OAT to confirming that *some*
+policy can run in SimplerEnv with this environment.
+
+I added support for the standard 7-token `ActionTokenizer` path in
+`policy/scripts/evaluate_simplerenv_lattice.py`, because the evaluator was
+initially chunk-tokenizer-only. This allowed the plain Bridge bin policy to load
+and generate normal 7-DoF actions:
+
+```text
+Policy: minivla_bin
+Checkpoint: step-045000-epoch-00-loss=2.7183.pt
+Tokenizer class: ActionTokenizer
+n_action_tokens: 7
+decoded_shape: [1, 7]
+```
+
+Custom harness results:
+
+| Output Dir | Checkpoint | Mode | Task/Seed | Result | Key Signal |
+|---|---|---|---|---:|---|
+| `diag_bin_ref` | bin 45k | no stats unnorm | spoon, seed 0 | 0/1 | nonzero decoded actions, no object movement |
+| `diag_bin_stats` | bin 45k | stats unnorm | spoon, seed 0 | 0/1 | smaller unnormalized actions, no object movement |
+
+Then I ran the official `openvla-mini/experiments/robot/simpler/run_simpler_eval.py`
+path through a local submit wrapper, with minimal compatibility patches for this
+environment:
+
+- stubbed the unused LIBERO import needed only for `save_rollout_video`;
+- handled `TimeLimit` wrappers via `env.unwrapped`;
+- added the same Transformers cache capability flags used in the custom harness;
+- ran from a writable cwd so rollout videos can be saved.
+
+Official path result:
+
+| Job | Checkpoint | Tasks | Result |
+|---:|---|---|---:|
+| `7715714` | `minivla_bin` 45k | all 4 `simpler_widowx` tasks, one eval seed each | 0/4 |
+| `7715784` | `minivla_bin` 35k | spoon only, one eval seed | 0/1 |
+| `7715783` | `minivla_bin` 50k | spoon only, one eval seed | 0/1 |
+
+Important distinction: the official rollout path now works end-to-end. It loads
+the model, resets SimplerEnv, runs episodes, saves rollout videos, and reports
+success counters. But no checkpoint tested so far has achieved nonzero
+success.
+
+Current answer to "does anything work?":
+
+- **Environment/runtime works:** yes, confirmed by official bin rollout job
+  `7715714` completing 4 episodes and saving videos.
+- **A successful policy checkpoint found:** not yet. OAT, VQ-BeT, FAST, and bin
+  checkpoints tested so far all report 0 success.
+
+The next best step is no longer another action postprocessing ablation. It is to
+find/import a known-good Bridge SimplerEnv policy checkpoint, ideally an
+official OpenVLA/OpenVLA-mini Bridge checkpoint known to score above zero, and
+run it through the now-working official wrapper.

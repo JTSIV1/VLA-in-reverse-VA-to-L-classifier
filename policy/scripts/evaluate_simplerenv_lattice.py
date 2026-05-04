@@ -150,11 +150,12 @@ class LatticeBridgePolicy:
         self.tokenizer = self.vla.llm_backbone.tokenizer
         self.image_transform = self.vla.vision_backbone.get_image_transform()
         self.action_tokenizer = self.vla.action_tokenizer
-        self.n_action_tokens = int(getattr(self.action_tokenizer, "n_codes_per_chunk", 0))
+        self.is_chunk_action_tokenizer = hasattr(self.action_tokenizer, "n_codes_per_chunk")
+        self.n_action_tokens = int(getattr(self.action_tokenizer, "n_codes_per_chunk", 7))
         self.chunk_size = int(getattr(self.action_tokenizer, "chunk_size", 1))
 
         if self.n_action_tokens <= 0:
-            raise RuntimeError("Loaded action tokenizer does not expose n_codes_per_chunk.")
+            raise RuntimeError("Loaded action tokenizer does not expose a usable action-token count.")
 
         self.embedding = self.vla.llm_backbone.llm.get_input_embeddings()
         self.embedding_class = self.embedding.__class__.__name__
@@ -310,11 +311,45 @@ class LatticeBridgePolicy:
             "prefix_latent_refreshes": prefix_refreshes,
         }
 
+    def _fast_decode_diagnostics(self, token_ids: np.ndarray) -> Optional[Dict[str, Any]]:
+        fast_tok = getattr(self.action_tokenizer, "fast_tok", None)
+        bpe = getattr(fast_tok, "bpe_tokenizer", None)
+        if fast_tok is None or bpe is None:
+            return None
+
+        try:
+            local_codes = self.action_tokenizer._token_ids_to_local_codes(token_ids)
+            local_codes = np.asarray(local_codes, dtype=np.int64).reshape(-1)
+            pad_local = int(getattr(self.action_tokenizer, "PAD_LOCAL"))
+            real_codes = []
+            for c in local_codes.tolist():
+                if int(c) == pad_local:
+                    break
+                real_codes.append(int(c))
+
+            decoded_str = bpe.decode(real_codes) if real_codes else ""
+            decoded_len = len(decoded_str)
+            expected_len = int(getattr(self.action_tokenizer, "chunk_size", 0)) * 7
+            return {
+                "local_codes": local_codes.tolist(),
+                "pad_local": pad_local,
+                "stripped_code_count": int(len(real_codes)),
+                "decoded_scalar_count": int(decoded_len),
+                "expected_scalar_count": int(expected_len),
+                "valid_scalar_count": bool(decoded_len == expected_len),
+            }
+        except Exception as exc:
+            return {"error": repr(exc)}
+
     @torch.inference_mode()
     def generate_chunk(self, image: np.ndarray, instruction: str) -> Tuple[np.ndarray, Dict[str, Any]]:
         input_ids, pixel_values = self._build_inputs(image, instruction)
         token_ids, generation_meta = self._manual_greedy_action_tokens(input_ids, pixel_values)
-        decoded = self.action_tokenizer.decode_full_chunk(token_ids)
+        if self.is_chunk_action_tokenizer:
+            decoded = self.action_tokenizer.decode_full_chunk(token_ids)
+        else:
+            decoded = self.action_tokenizer.decode_token_ids_to_actions(token_ids)
+            decoded = np.asarray(decoded, dtype=np.float32).reshape(1, -1)
         if isinstance(decoded, torch.Tensor):
             decoded = decoded.detach().cpu().numpy()
         decoded = np.atleast_2d(decoded).astype(np.float32)
@@ -327,6 +362,9 @@ class LatticeBridgePolicy:
             "unnorm_mode": self.action_unnorm_mode,
             **generation_meta,
         }
+        fast_diag = self._fast_decode_diagnostics(token_ids)
+        if fast_diag is not None:
+            meta["fast_decode"] = fast_diag
         self.last_generation = meta
         return actions, meta
 
