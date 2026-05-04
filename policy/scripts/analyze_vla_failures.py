@@ -20,11 +20,20 @@ import os
 import sys
 from pathlib import Path
 from typing import Any, Dict
+from contextlib import nullcontext
 
 # Silence HF tokenizer warnings and bypass permission issues in shared cache dirs
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 os.environ["HF_HOME"] = os.path.expanduser("~/.cache/huggingface")
 os.environ["HF_HUB_DISABLE_FILE_LOCKS"] = "1"
+
+_SHARED_HF_HUB = "/data/user_data/wenjiel2/.cache/huggingface/hub:/home/wenjiel2/.cache/huggingface/hub"
+if os.path.isdir(_SHARED_HF_HUB):
+    os.environ["HF_HUB_CACHE"] = _SHARED_HF_HUB
+    os.environ["HUGGINGFACE_HUB_CACHE"] = _SHARED_HF_HUB
+    os.environ["TRANSFORMERS_CACHE"] = _SHARED_HF_HUB
+    os.environ["HF_HUB_OFFLINE"] = "1"
+    os.environ["TRANSFORMERS_OFFLINE"] = "1"
 
 import numpy as np
 import torch
@@ -62,6 +71,7 @@ except Exception as e:
 
 # --- Constants ---
 RLDS_DATA_ROOT = "/data/user_data/wenjiel2/datasets/calvin_rlds"
+DEFAULT_DATASET_NAME = "calvin_dataset"
 
 
 # --- Model Loading Helpers (HF) ---
@@ -126,6 +136,8 @@ def load_fsdp_model(checkpoint_path, device):
     import builtins
     import json
     import io
+    from safetensors import safe_open
+    from transformers import Qwen2Config
 
     original_open = builtins.open
 
@@ -152,13 +164,76 @@ def load_fsdp_model(checkpoint_path, device):
             return io.StringIO(json.dumps(data))
         return original_open(file, *args, **kwargs)
 
+    import timm
+    original_create_model = timm.create_model
+
+    def offline_create_model(*args, **kwargs):
+        # Loading from the FSDP checkpoint will restore the final backbone weights,
+        # so we can safely skip TIMM/HF pretrained downloads during model construction.
+        kwargs["pretrained"] = False
+        return original_create_model(*args, **kwargs)
+
+    qwen_snapshot = (
+        "/data/user_data/wenjiel2/.cache/huggingface/hub:/home/wenjiel2/.cache/huggingface/hub/"
+        "models--Qwen--Qwen2.5-0.5B/snapshots/060db6499f32faf8b98477b0a26969ef7d8b9987"
+    )
+    if os.path.isdir(qwen_snapshot):
+        offline_qwen_dir = "/tmp/qwen25_0_5b_offline"
+        os.makedirs(offline_qwen_dir, exist_ok=True)
+
+        for filename in ("merges.txt", "model.safetensors", "tokenizer.json", "tokenizer_config.json", "vocab.json"):
+            src = os.path.join(qwen_snapshot, filename)
+            dst = os.path.join(offline_qwen_dir, filename)
+            if os.path.exists(src) and not os.path.exists(dst):
+                os.symlink(src, dst)
+
+        config_path = os.path.join(offline_qwen_dir, "config.json")
+        if not os.path.exists(config_path):
+            model_path = os.path.join(qwen_snapshot, "model.safetensors")
+            with safe_open(model_path, framework="pt") as f:
+                hidden_size = int(f.get_tensor("model.embed_tokens.weight").shape[1])
+                vocab_size = int(f.get_tensor("model.embed_tokens.weight").shape[0])
+                intermediate_size = int(f.get_tensor("model.layers.0.mlp.gate_proj.weight").shape[0])
+                q_out = int(f.get_tensor("model.layers.0.self_attn.q_proj.weight").shape[0])
+                kv_out = int(f.get_tensor("model.layers.0.self_attn.k_proj.weight").shape[0])
+                layer_ids = {
+                    int(k.split(".")[2]) for k in f.keys() if k.startswith("model.layers.")
+                }
+            head_dim = 64
+            num_attention_heads = q_out // head_dim
+            num_key_value_heads = max(1, kv_out // head_dim)
+            cfg = Qwen2Config(
+                vocab_size=vocab_size,
+                hidden_size=hidden_size,
+                intermediate_size=intermediate_size,
+                num_hidden_layers=max(layer_ids) + 1,
+                num_attention_heads=num_attention_heads,
+                num_key_value_heads=num_key_value_heads,
+                max_position_embeddings=32768,
+                rms_norm_eps=1e-6,
+                rope_theta=1_000_000.0,
+                hidden_act="silu",
+                tie_word_embeddings=False,
+                eos_token_id=151643,
+                pad_token_id=151643,
+            )
+            with open(config_path, "w") as f:
+                json.dump(cfg.to_dict(), f, indent=2)
+
+        from prismatic.models.backbones.llm import qwen25 as qwen25_mod
+        for key in ("qwen25-0_5b-extra", "qwen25-0_5b-pure"):
+            if key in qwen25_mod.QWEN25_MODELS:
+                qwen25_mod.QWEN25_MODELS[key]["hf_hub_path"] = offline_qwen_dir
+
     # Apply hook
     builtins.open = hooked_open
+    timm.create_model = offline_create_model
     try:
         vla = load_vla(checkpoint_path, load_for_training=False)
     finally:
         # Restore open
         builtins.open = original_open
+        timm.create_model = original_create_model
 
     vla = vla.to(device)
     vla.eval()
@@ -266,7 +341,7 @@ def save_failure_sample(out_dir, idx, sample_data):
         json.dump(meta, f, indent=2)
 
 
-def main():
+def build_parser():
     parser = argparse.ArgumentParser()
     parser.add_argument("--family", choices=["scratch", "openvla"], required=True)
     parser.add_argument("--condition", required=True)
@@ -275,6 +350,11 @@ def main():
     parser.add_argument("--sweep_tokenizer_type", default="")
     parser.add_argument("--sweep_checkpoint_path", default="")
     parser.add_argument("--data_root_dir", default=RLDS_DATA_ROOT)
+    parser.add_argument(
+        "--dataset_name",
+        default=DEFAULT_DATASET_NAME,
+        help="RLDS data mix / dataset name (e.g. calvin_dataset, bridge_dataset)",
+    )
     parser.add_argument("--out_dir", required=True)
     parser.add_argument("--top_k", type=int, default=10)
     parser.add_argument("--max_batches", type=int, default=50)
@@ -287,12 +367,22 @@ def main():
         "--device", default="cuda" if torch.cuda.is_available() else "cpu"
     )
     parser.add_argument("--debug", action="store_true")
-    args = parser.parse_args()
+    return parser
+
+
+def main(argv=None):
+    parser = build_parser()
+    args = parser.parse_args(argv)
 
     os.makedirs(args.out_dir, exist_ok=True)
     os.environ.setdefault("PRISMATIC_DATA_ROOT", args.data_root_dir)
 
     device = args.device
+    dataset_name = args.dataset_name
+    print(f"Dataset: {dataset_name}")
+    if str(device).startswith("cuda") and not torch.cuda.is_available():
+        print("CUDA requested but unavailable; falling back to cpu")
+        device = "cpu"
 
     # --- Load Model and Tokenizer ---
     if args.family == "openvla":
@@ -362,7 +452,7 @@ def main():
 
         _, action_tokenizer, _ = get_vla_dataset_and_collator(
             data_root_dir=Path(args.data_root_dir),
-            data_mix="calvin_dataset",
+            data_mix=dataset_name,
             image_transform=lambda x: x,  # dummy
             tokenizer=tokenizer,
             prompt_builder_fn=PurePromptBuilder,
@@ -391,8 +481,8 @@ def main():
             if stats_path.exists():
                 with open(stats_path) as f:
                     stats = json.load(f)
-                if "calvin_dataset" in stats:
-                    action_stats = stats["calvin_dataset"]["action"]
+                if dataset_name in stats:
+                    action_stats = stats[dataset_name]["action"]
                     unnorm_q01 = np.array(action_stats["q01"], dtype=np.float32)
                     unnorm_q99 = np.array(action_stats["q99"], dtype=np.float32)
                     unnorm_mask = np.array(
@@ -417,11 +507,14 @@ def main():
 
         # The 'current' action is the first one in the chunk if we're chunking
         if rlds_batch["action"].ndim == 2:  # [T, 7]
-            result["raw_action"] = rlds_batch["action"][0]
+            result["raw_action"] = torch.from_numpy(np.array(rlds_batch["action"][0], copy=True)).float()
         else:  # [7]
-            result["raw_action"] = rlds_batch["action"]
+            result["raw_action"] = torch.from_numpy(np.array(rlds_batch["action"], copy=True)).float()
 
-        result["raw_instruction"] = rlds_batch["task"]["language_instruction"].decode()
+        raw_instruction = rlds_batch["task"]["language_instruction"]
+        if isinstance(raw_instruction, bytes):
+            raw_instruction = raw_instruction.decode()
+        result["raw_instruction"] = raw_instruction
         return result
 
     RLDSBatchTransform.__call__ = wrapped_transform
@@ -450,7 +543,7 @@ def main():
 
         val_dataset = EpisodicRLDSDataset(
             data_root_dir=Path(args.data_root_dir),
-            data_mix="calvin_dataset",
+            data_mix=dataset_name,
             batch_transform=batch_transform,
             resize_resolution=(224, 224),
             shuffle_buffer_size=1,
@@ -461,7 +554,7 @@ def main():
     else:
         val_dataset = RLDSDataset(
             data_root_dir=Path(args.data_root_dir),
-            data_mix="calvin_dataset",
+            data_mix=dataset_name,
             batch_transform=batch_transform,
             resize_resolution=(224, 224),
             shuffle_buffer_size=1,  # Crucial for alignment: disable shuffling
@@ -483,6 +576,8 @@ def main():
 
     print(f"Starting analysis on {args.max_batches} samples...")
     n_codes = getattr(action_tokenizer, "n_codes_per_chunk", 7)
+    use_autocast = str(device).startswith("cuda")
+    vision_dtype = torch.bfloat16 if use_autocast else torch.float32
 
     with torch.no_grad():
         for i, batch in enumerate(dataloader):
@@ -509,15 +604,21 @@ def main():
                     pv = step_batch["pixel_values"]
                     if isinstance(pv, dict):
                         pixel_values = {
-                            k: v.to(torch.bfloat16).to(device) for k, v in pv.items()
+                            k: v.to(device=device, dtype=vision_dtype)
+                            for k, v in pv.items()
                         }
                     else:
-                        pixel_values = pv.to(torch.bfloat16).to(device)
+                        pixel_values = pv.to(device=device, dtype=vision_dtype)
 
                     input_ids = step_batch["input_ids"].to(device)
                     attention_mask = step_batch["attention_mask"].to(device)
 
-                    with torch.autocast("cuda", dtype=torch.bfloat16):
+                    autocast_ctx = (
+                        torch.autocast("cuda", dtype=torch.bfloat16)
+                        if use_autocast
+                        else nullcontext()
+                    )
+                    with autocast_ctx:
                         output = vla(
                             input_ids=input_ids,
                             attention_mask=attention_mask,
@@ -567,7 +668,7 @@ def main():
                             pred_cont,
                         ).astype(np.float32)
 
-                    current_raw_action = step["raw_action"].copy()
+                    current_raw_action = np.array(step["raw_action"], copy=True)
                     if current_raw_action.shape[-1] == 7:
                         # Map RLDS gripper [0, 1] to training range [-1, 1]
                         current_raw_action[6] = current_raw_action[6] * 2.0 - 1.0
@@ -601,15 +702,21 @@ def main():
                 pv = step_batch["pixel_values"]
                 if isinstance(pv, dict):
                     pixel_values = {
-                        k: v.to(torch.bfloat16).to(device) for k, v in pv.items()
+                        k: v.to(device=device, dtype=vision_dtype)
+                        for k, v in pv.items()
                     }
                 else:
-                    pixel_values = pv.to(torch.bfloat16).to(device)
+                    pixel_values = pv.to(device=device, dtype=vision_dtype)
 
                 input_ids = step_batch["input_ids"].to(device)
                 attention_mask = step_batch["attention_mask"].to(device)
 
-                with torch.autocast("cuda", dtype=torch.bfloat16):
+                autocast_ctx = (
+                    torch.autocast("cuda", dtype=torch.bfloat16)
+                    if use_autocast
+                    else nullcontext()
+                )
+                with autocast_ctx:
                     output = vla(
                         input_ids=input_ids,
                         attention_mask=attention_mask,
@@ -659,7 +766,7 @@ def main():
                     ).astype(np.float32)
 
                 # Use the raw data from our monkey-patched transform
-                gt_action = sample["raw_action"].copy()
+                gt_action = np.array(sample["raw_action"], copy=True)
                 if gt_action.shape[-1] == 7:
                     # Map RLDS gripper [0, 1] to training range [-1, 1]
                     gt_action[6] = gt_action[6] * 2.0 - 1.0

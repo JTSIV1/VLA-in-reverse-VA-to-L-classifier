@@ -36,21 +36,22 @@ from prismatic.vla.action_tokenizer import ActionTokenizer
 
 # Use current runtime sys.path for imports.
 
-def _get_normalizer(checkpoint_path, data_dir):
+def _get_normalizer(checkpoint_path, data_dir, dataset_name=None):
     """Load cached normalizer if available, else fit and cache."""
     # To avoid long re-fitting (13 mins), we cache normalizer stats.
     # 1. Primary cache: normalizer.pth in the same dir as the checkpoint
     # 2. Fallback cache: ~/.cache/vla_normalizers/norm_<hash>.pth (for read-only ckpt dirs)
     import hashlib
-    from tokenization.train_tokenizer import fit_normalizer
     from tokenization.oat.model.common.normalizer import LinearNormalizer
-    
+    from tokenization.train_tokenizer import fit_normalizer
+    from datasets.bridge_dataset import load_bridge_actions, fit_bridge_normalizer
+
     ckpt_hash = hashlib.md5(str(checkpoint_path).encode()).hexdigest()[:8]
     data_hash = hashlib.md5(str(data_dir).encode()).hexdigest()[:8]
     cache_name = f"norm_{ckpt_hash}_{data_hash}.pth"
     
     primary_cache = Path(checkpoint_path).parent / "normalizer.pth"
-    fallback_cache = Path.home() / ".cache" / "vla_normalizers" / cache_name
+    fallback_cache = Path("/tmp") / "vla_normalizers" / cache_name
     
     # Try loading
     for p in [primary_cache, fallback_cache]:
@@ -63,9 +64,30 @@ def _get_normalizer(checkpoint_path, data_dir):
             except Exception:
                 continue
 
+    # Try checkpoint-stored normalizer before re-fitting anything.
+    try:
+        ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+        if "normalizer" in ckpt:
+            normalizer = LinearNormalizer()
+            normalizer.load_state_dict(ckpt["normalizer"])
+            print("[*] Loaded normalizer from tokenizer checkpoint")
+            return normalizer
+    except Exception:
+        pass
+
     # Fitting
+    if dataset_name == "bridge" or "bridge" in str(checkpoint_path).lower() or "bridge" in str(data_dir).lower():
+        data_dir = str(data_dir)
+        if not Path(data_dir).exists() or not any(Path(data_dir).glob("shard_*.npz")):
+            fallback_bridge_dir = "/data/user_data/wenjiel2/datasets/bridge_actions"
+            if Path(fallback_bridge_dir).exists():
+                data_dir = fallback_bridge_dir
     print(f"[*] Fitting normalizer from {data_dir} (this may take ~13 minutes)...")
-    normalizer = fit_normalizer(data_dir)
+    if dataset_name == "bridge" or "bridge" in str(checkpoint_path).lower() or "bridge" in str(data_dir).lower():
+        actions_list, _ = load_bridge_actions(data_dir)
+        normalizer = fit_bridge_normalizer(actions_list)
+    else:
+        normalizer = fit_normalizer(data_dir)
     
     # Try saving
     for p in [primary_cache, fallback_cache]:
@@ -102,7 +124,8 @@ def _load_tokenizer_model(tokenizer_type, checkpoint_path, device="cpu"):
         )
         # Fit or Load normalizer
         data_dir = args.get("data_dir", "/data/user_data/yashagar/task_D_D/training/")
-        normalizer = _get_normalizer(checkpoint_path, data_dir)
+        dataset_name = args.get("dataset", None)
+        normalizer = _get_normalizer(checkpoint_path, data_dir, dataset_name=dataset_name)
         model.set_normalizer(normalizer)
 
         model.load_state_dict(ckpt["model_state_dict"])
@@ -124,7 +147,8 @@ def _load_tokenizer_model(tokenizer_type, checkpoint_path, device="cpu"):
             model = build_quest(build_args)
 
         data_dir = args.get("data_dir", "/data/user_data/yashagar/task_D_D/training/")
-        normalizer = _get_normalizer(checkpoint_path, data_dir)
+        dataset_name = args.get("dataset", None)
+        normalizer = _get_normalizer(checkpoint_path, data_dir, dataset_name=dataset_name)
         model.set_normalizer(normalizer)
 
         model.load_state_dict(ckpt["model_state_dict"])

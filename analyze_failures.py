@@ -37,6 +37,7 @@ import sys
 import json
 import argparse
 import numpy as np
+import pandas as pd
 import torch
 import matplotlib
 matplotlib.use("Agg")
@@ -95,8 +96,9 @@ def _load_checkpoint(args, device):
     tokenizer_ckpt = raw.get("tokenizer_ckpt", None)
     action_vocab_size = raw.get("action_vocab_size", None)
     latent_dim = raw.get("latent_dim", None)
+    dataset = raw.get("dataset", "calvin")
 
-    print(f"[ckpt] modality={modality}  action_rep={action_rep}  "
+    print(f"[ckpt] dataset={dataset}  modality={modality}  action_rep={action_rep}  "
           f"tokenizer_type={tokenizer_type}  num_verbs={num_verbs}")
 
     # Build model based on modality + action_rep
@@ -114,7 +116,7 @@ def _load_checkpoint(args, device):
             num_frames=num_frames,
             delta_patches=delta_patches,
         )
-    elif action_rep == "latent":
+    elif action_rep in ("latent", "vla_embed"):
         model = MotionVerbClassifier(
             num_verbs=num_verbs,
             action_rep="latent",
@@ -150,6 +152,7 @@ def _load_checkpoint(args, device):
     model.eval()
 
     ckpt_meta = dict(
+        dataset=dataset,
         modality=modality, action_rep=action_rep,
         image_encoder=image_encoder, max_action_len=max_action_len,
         num_frames=num_frames, delta_patches=delta_patches,
@@ -164,23 +167,29 @@ def _load_checkpoint(args, device):
 # ---------------------------------------------------------------------------
 
 def _build_dataset(args, ckpt_meta, verb_to_id):
-    """Build CalvinTokenizerDataset or CalvinVerbProbeDataset from ckpt_meta."""
-    from utils import load_calvin_to_dataframe
+    """Build the dataset described by the checkpoint metadata."""
+    dataset_name = args.dataset or ckpt_meta.get("dataset", "calvin")
 
     action_rep = ckpt_meta["action_rep"]
-    tokenizer_reps = {"vq_bet", "oat", "quest", "latent"}
+    tokenizer_reps = {"vq_bet", "oat", "quest", "latent", "vla_embed"}
+
+    if dataset_name == "bridge":
+        if action_rep in tokenizer_reps:
+            return _build_bridge_tokenizer_dataset(args, ckpt_meta, verb_to_id)
+        return _build_bridge_standard_dataset(args, ckpt_meta, verb_to_id)
 
     if action_rep in tokenizer_reps:
         return _build_tokenizer_dataset(args, ckpt_meta, verb_to_id)
-    else:
-        return _build_standard_dataset(args, ckpt_meta, verb_to_id)
+    return _build_standard_dataset(args, ckpt_meta, verb_to_id)
 
 
 def _build_tokenizer_dataset(args, ckpt_meta, verb_to_id):
     """Build CalvinTokenizerDataset + frozen tokenizer for on-the-fly encoding."""
     from utils import load_calvin_to_dataframe
     from datasets.calvin_dataset import CalvinTokenizerDataset
-    from verb_probe.train_verb_probe import _load_frozen_tokenizer, _make_tokenizer_batch_transform
+    from verb_probe.load_tokenizer import (
+        load_frozen_tokenizer, encode_tokenizer_batch, load_vla_embedding,
+    )
 
     tok_type = ckpt_meta["tokenizer_type"]
     tok_ckpt = args.tokenizer_ckpt or ckpt_meta["tokenizer_ckpt"]
@@ -191,14 +200,8 @@ def _build_tokenizer_dataset(args, ckpt_meta, verb_to_id):
             f"{ckpt_meta['action_rep']}. Use --tokenizer_ckpt."
         )
 
-    # Build a namespace that _load_frozen_tokenizer expects
-    tok_args = argparse.Namespace(
-        tokenizer_type=tok_type,
-        tokenizer_ckpt=tok_ckpt,
-    )
-
     print(f"Loading frozen {tok_type} from {tok_ckpt}")
-    tok_model = _load_frozen_tokenizer(tok_args)
+    tok_model = load_frozen_tokenizer(tok_type, tok_ckpt)
 
     # Get chunk_size from tokenizer checkpoint
     ckpt = torch.load(tok_ckpt, map_location="cpu", weights_only=False)
@@ -230,13 +233,26 @@ def _build_tokenizer_dataset(args, ckpt_meta, verb_to_id):
         val_ds.df = val_df[valid_mask].reset_index(drop=True)
 
     # Determine mode
-    mode = "latent" if ckpt_meta["action_rep"] == "latent" else "token_id"
+    mode = ckpt_meta["action_rep"] if ckpt_meta["action_rep"] in ("latent", "vla_embed") else "token_id"
 
     # Move tokenizer to device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     tok_model = tok_model.to(device)
+    vla_embed_info = None
+    if mode == "vla_embed":
+        policy_dir = args.policy_dir or getattr(args, "policy_dir", None)
+        if not policy_dir:
+            raise ValueError("--policy_dir is required for action_rep=vla_embed")
+        vla_embed_info = load_vla_embedding(policy_dir, device=device)
 
-    batch_transform = _make_tokenizer_batch_transform(tok_model, tok_type, mode)
+    def batch_transform(batch, batch_device):
+        actions, labels, seq_lengths = encode_tokenizer_batch(
+            batch, batch_device, tok_model, tok_type, mode,
+            vla_embed_info=vla_embed_info)
+        bsz = labels.shape[0]
+        frames = torch.zeros((bsz, 2, 3, 224, 224), device=batch_device)
+        scene_vecs = torch.zeros((bsz, 48), device=batch_device)
+        return frames, actions, scene_vecs, labels, seq_lengths
 
     return val_ds, batch_transform
 
@@ -284,6 +300,195 @@ def _build_standard_dataset(args, ckpt_meta, verb_to_id):
         val_ds.df = val_df[valid_mask].reset_index(drop=True)
 
     return val_ds, None  # no batch transform needed
+
+
+def _load_and_split_bridge(args):
+    """Load bridge actions, filter to CSV episodes, and reproduce the val split."""
+    from datasets.bridge_dataset import load_bridge_actions
+
+    if not args.shard_dir or not args.bridge_csv:
+        raise ValueError(
+            "Bridge failure analysis requires --shard_dir and --bridge_csv."
+        )
+
+    all_actions, all_keys = load_bridge_actions(args.shard_dir)
+    csv_df = pd.read_csv(args.bridge_csv)
+    csv_key_set = set(csv_df["episode_key"])
+
+    keep_idx = [i for i, key in enumerate(all_keys) if key in csv_key_set]
+    all_actions = [all_actions[i] for i in keep_idx]
+    all_keys = [all_keys[i] for i in keep_idx]
+    print(f"Filtered to {len(all_actions)} Bridge episodes using {args.bridge_csv}")
+
+    np.random.seed(42)
+    perm = np.random.permutation(len(all_actions))
+    n_val = max(1, int(len(all_actions) * args.val_fraction))
+    val_idx = perm[:n_val]
+
+    return csv_df, all_actions, all_keys, val_idx
+
+
+def _build_bridge_standard_dataset(args, ckpt_meta, verb_to_id):
+    """Build BridgeVerbDataset for native-action Bridge checkpoints."""
+    from datasets.bridge_dataset import BridgeVerbDataset, load_bridge_verb_labels
+
+    if ckpt_meta["modality"] != "action_only":
+        raise ValueError("Bridge failure analysis currently supports action_only probes only.")
+    if ckpt_meta["action_rep"] != "native":
+        raise ValueError(
+            f"Unsupported Bridge standard action_rep={ckpt_meta['action_rep']}; "
+            "expected native."
+        )
+
+    csv_df, all_actions, all_keys, val_idx = _load_and_split_bridge(args)
+    all_verb_ids, csv_verb_to_id = load_bridge_verb_labels(
+        args.bridge_csv, all_keys, min_class_count=args.min_class_count)
+    key_to_instruction = dict(zip(csv_df["episode_key"], csv_df["instruction"]))
+    key_to_csv_verb = dict(zip(csv_df["episode_key"], csv_df["verb"]))
+    id_to_verb = {idx: verb for verb, idx in verb_to_id.items()}
+
+    rows = []
+    actions_cache = {}
+    for seg_idx, global_idx in enumerate(val_idx):
+        vid = all_verb_ids[global_idx]
+        if vid < 0:
+            continue
+        episode_key = all_keys[global_idx]
+        csv_verb = key_to_csv_verb.get(episode_key)
+        if csv_verb not in verb_to_id:
+            continue
+        rows.append({
+            "seg_idx": seg_idx,
+            "episode_key": episode_key,
+            "instruction": key_to_instruction.get(episode_key, ""),
+            "verb": csv_verb,
+            "traj_len": int(len(all_actions[global_idx])),
+        })
+        actions_cache[f"actions_{seg_idx}"] = all_actions[global_idx]
+
+    val_df = pd.DataFrame(rows)
+    dropped = len([i for i in val_idx if all_verb_ids[i] >= 0]) - len(val_df)
+    if dropped > 0:
+        print(f"[dataset] Dropping {dropped} Bridge val samples with OOV verbs")
+    if args.debug:
+        val_df = val_df.head(min(args.debug, len(val_df))).reset_index(drop=True)
+        keep_keys = {f"actions_{int(seg_idx)}" for seg_idx in val_df["seg_idx"].tolist()}
+        actions_cache = {k: v for k, v in actions_cache.items() if k in keep_keys}
+        print(f"[debug] Using {len(val_df)} Bridge native samples")
+    val_ds = BridgeVerbDataset(
+        val_df, actions_cache,
+        max_seq_len=ckpt_meta["max_action_len"],
+        verb_to_id=verb_to_id,
+    )
+    val_ds.df = val_df.reset_index(drop=True)
+    return val_ds, None
+
+
+def _build_bridge_tokenizer_dataset(args, ckpt_meta, verb_to_id):
+    """Build BridgeTokenizerDataset + frozen tokenizer for on-the-fly encoding."""
+    from datasets.bridge_dataset import BridgeTokenizerDataset, load_bridge_verb_labels
+    from verb_probe.load_tokenizer import (
+        load_frozen_tokenizer, encode_tokenizer_batch, load_vla_embedding,
+    )
+
+    csv_df, all_actions, all_keys, val_idx = _load_and_split_bridge(args)
+    all_verb_ids, csv_verb_to_id = load_bridge_verb_labels(
+        args.bridge_csv, all_keys, min_class_count=args.min_class_count)
+    key_to_instruction = dict(zip(csv_df["episode_key"], csv_df["instruction"]))
+    key_to_csv_verb = dict(zip(csv_df["episode_key"], csv_df["verb"]))
+    id_to_verb = {idx: verb for verb, idx in verb_to_id.items()}
+
+    val_actions = [all_actions[i] for i in val_idx]
+    val_keys = [all_keys[i] for i in val_idx]
+    val_verb_ids = []
+    kept_actions = []
+    kept_keys = []
+    kept_episode_index = []
+    dropped = 0
+    for local_idx, global_idx in enumerate(val_idx):
+        raw_vid = all_verb_ids[global_idx]
+        if raw_vid < 0:
+            dropped += 1
+            continue
+        episode_key = all_keys[global_idx]
+        csv_verb = key_to_csv_verb.get(episode_key)
+        if csv_verb not in verb_to_id:
+            dropped += 1
+            continue
+        kept_actions.append(all_actions[global_idx])
+        kept_keys.append(episode_key)
+        kept_episode_index.append(local_idx)
+        val_verb_ids.append(verb_to_id[csv_verb])
+
+    val_actions = kept_actions
+    val_keys = kept_keys
+    if dropped > 0:
+        print(f"[dataset] Dropping {dropped} Bridge val samples with OOV verbs")
+
+    tok_type = ckpt_meta["tokenizer_type"]
+    tok_ckpt = args.tokenizer_ckpt or ckpt_meta["tokenizer_ckpt"]
+    if not tok_ckpt:
+        raise ValueError(
+            "Tokenizer checkpoint required for Bridge tokenizer failure analysis. "
+            "Use --tokenizer_ckpt."
+        )
+
+    print(f"Loading frozen {tok_type} from {tok_ckpt}")
+    tok_model = load_frozen_tokenizer(tok_type, tok_ckpt)
+    ckpt = torch.load(tok_ckpt, map_location="cpu", weights_only=False)
+    ckpt_args = ckpt["args"]
+    if not isinstance(ckpt_args, dict):
+        ckpt_args = vars(ckpt_args)
+
+    val_ds = BridgeTokenizerDataset(
+        val_actions,
+        chunk_size=ckpt_args.get("chunk_size", 16),
+        max_chunks=ckpt_args.get("max_chunks", 8),
+        sampling=ckpt_args.get("sampling", "random"),
+        verb_ids=val_verb_ids,
+        verb_to_id=verb_to_id,
+        instructions=[key_to_instruction.get(k, "") for k in val_keys],
+    )
+
+    rows = []
+    for ep_idx in val_ds.ep_indices:
+        episode_key = val_keys[ep_idx]
+        vid = val_verb_ids[ep_idx]
+        rows.append({
+            "dataset_index": int(ep_idx),
+            "episode_index": int(kept_episode_index[ep_idx]),
+            "episode_key": episode_key,
+            "instruction": key_to_instruction.get(episode_key, ""),
+            "verb": id_to_verb[vid],
+            "traj_len": int(len(val_actions[ep_idx])),
+        })
+    val_ds.df = pd.DataFrame(rows).reset_index(drop=True)
+    if args.debug:
+        n = min(args.debug, len(val_ds.ep_indices))
+        val_ds.ep_indices = val_ds.ep_indices[:n]
+        val_ds.df = val_ds.df.head(n).reset_index(drop=True)
+        print(f"[debug] Using {n} Bridge tokenizer samples")
+
+    mode = ckpt_meta["action_rep"] if ckpt_meta["action_rep"] in ("latent", "vla_embed") else "token_id"
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    tok_model = tok_model.to(device)
+    vla_embed_info = None
+    if mode == "vla_embed":
+        policy_dir = args.policy_dir or getattr(args, "policy_dir", None)
+        if not policy_dir:
+            raise ValueError("--policy_dir is required for action_rep=vla_embed")
+        vla_embed_info = load_vla_embedding(policy_dir, device=device)
+
+    def batch_transform(batch, batch_device):
+        actions, labels, seq_lengths = encode_tokenizer_batch(
+            batch, batch_device, tok_model, tok_type, mode,
+            vla_embed_info=vla_embed_info)
+        bsz = labels.shape[0]
+        frames = torch.zeros((bsz, 2, 3, 224, 224), device=batch_device)
+        scene_vecs = torch.zeros((bsz, 48), device=batch_device)
+        return frames, actions, scene_vecs, labels, seq_lengths
+
+    return val_ds, batch_transform
 
 
 # ---------------------------------------------------------------------------
@@ -381,30 +586,79 @@ def _save_trajectory(data_dir, start_idx, end_idx, out_dir, gt_verb, pred_verb):
     return traj_path
 
 
-def save_failure_sample(sample_dir, data_dir, df_row, gt_verb, pred_verb, conf,
-                        df_idx, label_id, pred_id):
-    """Save frames + trajectory for one failure case. Returns metadata dict."""
-    os.makedirs(sample_dir, exist_ok=True)
-    start_idx = int(df_row["start_idx"])
-    end_idx = int(df_row["end_idx"])
-    instruction = str(df_row["instruction"])
+def _save_bridge_trajectory(actions, out_dir, gt_verb, pred_verb):
+    """Save a Bridge action trajectory plot from an in-memory action array."""
+    if actions is None or len(actions) == 0:
+        return None
+    actions = np.asarray(actions)
+    T = actions.shape[0]
+    dims = ["x", "y", "z", "rx", "ry", "rz", "gripper"]
+    colors = plt.cm.tab10(np.linspace(0, 1, min(actions.shape[1], 7)))
 
-    frame_paths = _save_frames(data_dir, start_idx, end_idx, sample_dir)
-    traj_path = _save_trajectory(data_dir, start_idx, end_idx, sample_dir,
-                                 gt_verb, pred_verb)
-    meta = {
-        "df_idx": df_idx,
-        "start_idx": start_idx,
-        "end_idx": end_idx,
-        "instruction": instruction,
-        "gt_verb": gt_verb,
-        "pred_verb": pred_verb,
-        "confidence": round(float(conf), 4),
-        "frame_start": frame_paths.get("frame_start"),
-        "frame_end": frame_paths.get("frame_end"),
-        "trajectory": traj_path,
-        "sample_dir": sample_dir,
-    }
+    fig, axes = plt.subplots(7, 1, figsize=(8, 7), sharex=True)
+    for d in range(min(actions.shape[1], 7)):
+        axes[d].plot(range(T), actions[:, d], color=colors[d], linewidth=1.5)
+        axes[d].set_ylabel(dims[d], fontsize=8, rotation=0, labelpad=25)
+        axes[d].axhline(0, color="grey", linewidth=0.5, linestyle="--")
+        axes[d].grid(alpha=0.3)
+    axes[-1].set_xlabel("Timestep")
+    fig.suptitle(f"Action trajectory\nGT: {gt_verb}  ->  Predicted: {pred_verb}",
+                 fontsize=9, fontweight="bold")
+    plt.tight_layout()
+    traj_path = os.path.join(out_dir, "trajectory.png")
+    plt.savefig(traj_path, dpi=120, bbox_inches="tight")
+    plt.close(fig)
+    return traj_path
+
+
+def save_failure_sample(sample_dir, data_dir, dataset_name, dataset, df_row, gt_verb,
+                        pred_verb, conf, df_idx, label_id, pred_id):
+    """Save dataset-specific assets for one failure case. Returns metadata dict."""
+    os.makedirs(sample_dir, exist_ok=True)
+    instruction = str(df_row.get("instruction", ""))
+
+    if dataset_name == "bridge":
+        seg_idx = int(df_row.get("seg_idx", df_row.get("dataset_index", df_row.get("episode_index", df_idx))))
+        actions = None
+        if hasattr(dataset, "actions_cache"):
+            actions = dataset.actions_cache.get(f"actions_{seg_idx}")
+        elif hasattr(dataset, "actions"):
+            ep_idx = int(df_row.get("dataset_index", seg_idx))
+            actions = dataset.actions[ep_idx]
+        traj_path = _save_bridge_trajectory(actions, sample_dir, gt_verb, pred_verb)
+        meta = {
+            "df_idx": df_idx,
+            "episode_key": str(df_row.get("episode_key", "")),
+            "dataset_index": int(df_row.get("dataset_index", seg_idx)),
+            "episode_index": int(df_row.get("episode_index", seg_idx)),
+            "seg_idx": seg_idx,
+            "traj_len": int(df_row.get("traj_len", len(actions) if actions is not None else 0)),
+            "instruction": instruction,
+            "gt_verb": gt_verb,
+            "pred_verb": pred_verb,
+            "confidence": round(float(conf), 4),
+            "trajectory": traj_path,
+            "sample_dir": sample_dir,
+        }
+    else:
+        start_idx = int(df_row["start_idx"])
+        end_idx = int(df_row["end_idx"])
+        frame_paths = _save_frames(data_dir, start_idx, end_idx, sample_dir)
+        traj_path = _save_trajectory(data_dir, start_idx, end_idx, sample_dir,
+                                     gt_verb, pred_verb)
+        meta = {
+            "df_idx": df_idx,
+            "start_idx": start_idx,
+            "end_idx": end_idx,
+            "instruction": instruction,
+            "gt_verb": gt_verb,
+            "pred_verb": pred_verb,
+            "confidence": round(float(conf), 4),
+            "frame_start": frame_paths.get("frame_start"),
+            "frame_end": frame_paths.get("frame_end"),
+            "trajectory": traj_path,
+            "sample_dir": sample_dir,
+        }
     with open(os.path.join(sample_dir, "meta.json"), "w") as f:
         json.dump(meta, f, indent=2)
     return meta
@@ -424,6 +678,7 @@ def main(args):
 
     # --- Load model ---
     model, ckpt_meta, id_to_verb, verb_to_id = _load_checkpoint(args, device)
+    dataset_name = args.dataset or ckpt_meta.get("dataset", "calvin")
     modality = ckpt_meta["modality"]
     action_rep = ckpt_meta["action_rep"]
 
@@ -432,7 +687,7 @@ def main(args):
     dataset, batch_transform_fn = _build_dataset(args, ckpt_meta, verb_to_id)
     df = dataset.df
 
-    print(f"Dataset: {len(dataset)} samples, {len(verb_to_id)} verbs")
+    print(f"Dataset: {dataset_name}  |  {len(dataset)} samples, {len(verb_to_id)} verbs")
 
     # --- Inference ---
     print("Running inference ...")
@@ -523,7 +778,7 @@ def main(args):
                 f"pair{rank+1:02d}_k{k+1}_gt{safe_gt}_pred{safe_pred}"
                 f"_conf{int(conf*100):02d}")
             meta = save_failure_sample(
-                sample_dir, args.data_dir, row,
+                sample_dir, args.data_dir, dataset_name, dataset, row,
                 gt_verb, pred_verb, conf, int(df_idx), label_id, pred_id)
             meta["pair_rank"] = rank + 1
             meta["pair_count"] = count
@@ -551,10 +806,23 @@ if __name__ == "__main__":
                         help="Path to verb probe checkpoint (.pth)")
     parser.add_argument("--out_dir", type=str, required=True,
                         help="Directory to write all outputs")
+    parser.add_argument("--dataset", type=str, default=None,
+                        choices=["calvin", "bridge"],
+                        help="Override dataset type stored in checkpoint")
     parser.add_argument("--data_dir", type=str, default=VAL_DIR,
                         help="CALVIN validation directory")
     parser.add_argument("--tokenizer_ckpt", type=str, default=None,
                         help="Frozen tokenizer checkpoint (overrides ckpt path)")
+    parser.add_argument("--policy_dir", type=str, default=None,
+                        help="Policy directory for action_rep=vla_embed")
+    parser.add_argument("--shard_dir", type=str, default=None,
+                        help="Bridge action shards directory")
+    parser.add_argument("--bridge_csv", type=str, default=None,
+                        help="Bridge episode CSV used for filtering + verb labels")
+    parser.add_argument("--val_fraction", type=float, default=0.1,
+                        help="Bridge validation fraction; keep at 0.1 to match training")
+    parser.add_argument("--min_class_count", type=int, default=0,
+                        help="Bridge min class count; should match probe training")
     parser.add_argument("--top_k", type=int, default=5,
                         help="Top-K failures per (gt, pred) confusion pair")
     parser.add_argument("--batch_size", type=int, default=BATCH_SIZE)
