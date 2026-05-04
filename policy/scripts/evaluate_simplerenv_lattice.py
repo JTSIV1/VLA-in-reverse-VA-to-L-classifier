@@ -131,11 +131,13 @@ class LatticeBridgePolicy:
         device: torch.device,
         unnorm_key: str,
         action_unnorm_mode: str,
+        image_preprocess: str,
         require_wrapper: bool = True,
     ) -> None:
         self.device = device
         self.unnorm_key = unnorm_key
         self.action_unnorm_mode = action_unnorm_mode
+        self.image_preprocess = image_preprocess
         self.vla = load_native_vla(policy_ckpt, device)
         # Newer transformers GenerationMixin versions expect these cache
         # capability flags on the model. The native Prismatic/OpenVLA class in
@@ -178,7 +180,27 @@ class LatticeBridgePolicy:
         self.buffer.clear()
         self.last_generation = {}
 
+    def _preprocess_image(self, image: np.ndarray) -> np.ndarray:
+        if self.image_preprocess == "none":
+            return image
+        if self.image_preprocess != "simpler_bridge":
+            raise ValueError(f"Unknown image_preprocess: {self.image_preprocess}")
+
+        # Match OpenVLA's SimplerEnv Bridge path: JPEG round-trip, resize to
+        # Bridge base size 128, then to the model's 224px input size.
+        import io
+
+        pil = Image.fromarray(image).convert("RGB")
+        buf = io.BytesIO()
+        pil.save(buf, format="JPEG")
+        buf.seek(0)
+        pil = Image.open(buf).convert("RGB")
+        pil = pil.resize((128, 128), resample=Image.Resampling.LANCZOS)
+        pil = pil.resize((224, 224), resample=Image.Resampling.LANCZOS)
+        return np.asarray(pil, dtype=np.uint8)
+
     def _build_inputs(self, image: np.ndarray, instruction: str) -> Tuple[torch.Tensor, Any]:
+        image = self._preprocess_image(image)
         pil = Image.fromarray(image).convert("RGB")
         prompt_builder = self.vla.get_prompt_builder()
         prompt_builder.add_turn(
@@ -335,6 +357,7 @@ class LatticeBridgePolicy:
             "tokenizer_type": getattr(self.action_tokenizer, "tokenizer_type", None),
             "n_action_tokens": self.n_action_tokens,
             "chunk_size": self.chunk_size,
+            "image_preprocess": self.image_preprocess,
             "tokenizer_checkpoint": str(self.tokenizer_ckpt),
             "tokenizer_checkpoint_resolved": str(self.tokenizer_ckpt.resolve()),
             "dry_generation": meta,
@@ -389,6 +412,45 @@ def clip_action(action: np.ndarray, action_space: Any) -> np.ndarray:
     return np.clip(action, np.asarray(low, dtype=np.float32), np.asarray(high, dtype=np.float32))
 
 
+def transform_action(
+    action: np.ndarray,
+    action_scale: float,
+    gripper_mode: str,
+    rotation_mode: str,
+) -> np.ndarray:
+    action = np.asarray(action, dtype=np.float32).reshape(-1).copy()
+    if action.size >= 6:
+        action[:6] *= float(action_scale)
+        if rotation_mode == "euler":
+            pass
+        elif rotation_mode == "axis_angle":
+            from transforms3d.euler import euler2axangle
+
+            axis, angle = euler2axangle(float(action[3]), float(action[4]), float(action[5]))
+            action[3:6] = np.asarray(axis, dtype=np.float32) * float(angle)
+        else:
+            raise ValueError(f"Unknown rotation_mode: {rotation_mode}")
+
+    if action.size >= 7:
+        if gripper_mode == "identity":
+            pass
+        elif gripper_mode == "flip":
+            action[6] = -action[6]
+        elif gripper_mode == "normalize01":
+            action[6] = np.sign(2.0 * action[6] - 1.0)
+        elif gripper_mode == "normalize01_flip":
+            action[6] = -np.sign(2.0 * action[6] - 1.0)
+        elif gripper_mode == "open":
+            action[6] = 1.0
+        elif gripper_mode == "close":
+            action[6] = -1.0
+        elif gripper_mode == "zero":
+            action[6] = 0.0
+        else:
+            raise ValueError(f"Unknown gripper_mode: {gripper_mode}")
+    return action
+
+
 def write_video(path: Path, frames: Sequence[np.ndarray], fps: int) -> Optional[str]:
     if not frames:
         return None
@@ -415,6 +477,9 @@ def run_episode(
     save_video: bool,
     video_fps: int,
     verbose: bool,
+    action_scale: float,
+    gripper_mode: str,
+    rotation_mode: str,
 ) -> Dict[str, Any]:
     policy.reset()
     obs, reset_info = reset_env(env, seed)
@@ -424,6 +489,7 @@ def run_episode(
 
     frames: List[np.ndarray] = []
     raw_actions: List[np.ndarray] = []
+    transformed_actions: List[np.ndarray] = []
     clipped_actions: List[np.ndarray] = []
     chunk_metas: List[Dict[str, Any]] = []
     rewards: List[float] = []
@@ -436,8 +502,10 @@ def run_episode(
         image = get_image_from_obs(image_env, obs)
         frames.append(image)
         action, chunk_meta, generated_new_chunk = policy.step(image, instruction)
-        clipped = clip_action(action, env.action_space)
+        transformed = transform_action(action, action_scale, gripper_mode, rotation_mode)
+        clipped = clip_action(transformed, env.action_space)
         raw_actions.append(np.asarray(action, dtype=np.float32))
+        transformed_actions.append(np.asarray(transformed, dtype=np.float32))
         clipped_actions.append(np.asarray(clipped, dtype=np.float32))
         if chunk_meta:
             chunk_metas.append(chunk_meta)
@@ -499,7 +567,13 @@ def run_episode(
         "reset_info": jsonable(reset_info),
         "episode_stats": jsonable((info or {}).get("episode_stats", {})),
         "final_info": jsonable(info or {}),
+        "action_transform": {
+            "action_scale": float(action_scale),
+            "gripper_mode": gripper_mode,
+            "rotation_mode": rotation_mode,
+        },
         "raw_action_stats": action_stats(raw_actions),
+        "transformed_action_stats": action_stats(transformed_actions),
         "clipped_action_stats": action_stats(clipped_actions),
         "chunk_generations": len(chunk_metas),
         "first_chunk_meta": jsonable(chunk_metas[0] if chunk_metas else {}),
@@ -596,6 +670,30 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--skip_generation_check", action="store_true")
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--no_require_wrapper", action="store_true")
+    parser.add_argument(
+        "--image_preprocess",
+        default="none",
+        choices=["none", "simpler_bridge"],
+        help="Optional pre-model image preprocessing. 'simpler_bridge' matches OpenVLA SimplerEnv Bridge eval.",
+    )
+    parser.add_argument(
+        "--action_scale",
+        type=float,
+        default=1.0,
+        help="Multiply xyz/rpy action dimensions by this factor before env.step.",
+    )
+    parser.add_argument(
+        "--gripper_mode",
+        default="identity",
+        choices=["identity", "flip", "normalize01", "normalize01_flip", "open", "close", "zero"],
+        help="Transform gripper command before env.step; useful for action API diagnostics.",
+    )
+    parser.add_argument(
+        "--rotation_mode",
+        default="euler",
+        choices=["euler", "axis_angle"],
+        help="Transform action[3:6] before env.step. OpenVLA SimplerEnv reference uses axis_angle.",
+    )
     return parser
 
 
@@ -630,6 +728,7 @@ def main() -> int:
         device=device,
         unnorm_key=args.unnorm_key,
         action_unnorm_mode=args.action_unnorm_mode,
+        image_preprocess=args.image_preprocess,
         require_wrapper=not args.no_require_wrapper,
     )
 
@@ -637,6 +736,12 @@ def main() -> int:
         "policy_checkpoint": str(args.policy_checkpoint),
         "tokenizer_checkpoint": str(args.tokenizer_checkpoint),
         "tokenizer_checkpoint_resolved": str(args.tokenizer_checkpoint.resolve()),
+        "image_preprocess": args.image_preprocess,
+        "action_transform": {
+            "action_scale": float(args.action_scale),
+            "gripper_mode": args.gripper_mode,
+            "rotation_mode": args.rotation_mode,
+        },
     }
     if args.skip_generation_check:
         validation["generation_check_skipped"] = True
@@ -671,6 +776,9 @@ def main() -> int:
                 save_video=not args.no_video,
                 video_fps=args.video_fps,
                 verbose=args.verbose,
+                action_scale=args.action_scale,
+                gripper_mode=args.gripper_mode,
+                rotation_mode=args.rotation_mode,
             )
             records.append(record)
             write_outputs(args.output_dir, records, validation)

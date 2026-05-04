@@ -263,3 +263,142 @@ sampling or temperature vs greedy
 If a known-good OpenVLA/MiniVLA baseline checkpoint exists for these SimplerEnv
 Bridge tasks, running it through the same harness would also isolate whether the
 remaining issue is the policy checkpoint or our env/action plumbing.
+
+## Follow-up: FAST and Eval-Contract Ablations (2026-05-04)
+
+User question: OAT and VQ-BeT both had 0 success in smoke eval; check whether
+FAST has the same issue and whether incorrect eval parameters explain the shared
+failure.
+
+### FAST v1024 s2 Smoke
+
+Policy directory:
+
+```text
+/data/user_data/wenjiel2/Code/VLA-in-reverse-VA-to-L-classifier/checkpoints/bridge_sweep/policy/minivla_fast_v1024_s2
+```
+
+Tokenizer:
+
+```text
+/data/user_data/wenjiel2/Code/VLA-in-reverse-VA-to-L-classifier/checkpoints/bridge_fast_v1024_s2
+```
+
+Important wrinkle: FAST loads with plain `Embedding`, not
+`ActionEmbeddingWrapper`, so the first run failed at validation until the
+evaluator was run with `--no_require_wrapper`. This is expected for the FAST
+static token path: no dynamic pre-FSQ latent wrapper is needed.
+
+Two checkpoints were evaluated:
+
+| Checkpoint | Output Dir | Overall |
+|---|---|---:|
+| `step-050000-epoch-00-loss=0.4082.pt` | `results/simplerenv/fast_v1024_s2_smoke_nw` | 0/12 |
+| `step-030000-epoch-00-loss=0.3758.pt` | `results/simplerenv/fast_v1024_s2_30k_smoke_nw` | 0/12 |
+
+Per-task result for both:
+
+| Task | Success | Mean Steps | Mean Reward | Truncation |
+|---|---:|---:|---:|---:|
+| `widowx_spoon_on_towel` | 0/3 | 60 | 0.0 | 1.0 |
+| `widowx_carrot_on_plate` | 0/3 | 60 | 0.0 | 1.0 |
+| `widowx_stack_cube` | 0/3 | 60 | 0.0 | 1.0 |
+| `widowx_put_eggplant_in_basket` | 0/3 | 120 | 0.0 | 1.0 |
+
+FAST dry generation was valid: `BridgeFastActionTokenizer`, `chunk_size=2`,
+`n_action_tokens=16`, decoded shape `[2, 7]`. However, rollout still showed no
+useful interaction. Most episodes had gripper clipped near `1.0`; SimplerEnv
+task stats stayed false (`is_src_obj_grasped=false`, `moved_correct_obj=false`,
+`src_on_target=false`).
+
+### Diagnostic Flags Added
+
+`policy/scripts/evaluate_simplerenv_lattice.py` was extended with:
+
+```text
+--action_scale <float>
+--gripper_mode identity|flip|normalize01|normalize01_flip|open|close|zero
+--rotation_mode euler|axis_angle
+--image_preprocess none|simpler_bridge
+```
+
+The evaluator now logs both raw and transformed action stats:
+
+```text
+raw_action_stats
+transformed_action_stats
+clipped_action_stats
+action_transform
+```
+
+`--rotation_mode axis_angle` matches OpenVLA's SimplerEnv reference
+`convert_maniskill`: Euler deltas are converted to axis-angle before
+`env.step`.
+
+`--gripper_mode normalize01` matches the same reference path's
+`normalize_gripper_action`: gripper is interpreted as `[0, 1]`, mapped to
+`[-1, +1]`, and binarized.
+
+`--image_preprocess simpler_bridge` matches OpenVLA's SimplerEnv image path:
+JPEG encode/decode, Lanczos resize to `128x128`, then Lanczos resize to
+`224x224`, before the model's own image transform.
+
+### OAT One-Seed Ablations
+
+All below used `widowx_spoon_on_towel`, seed `0`, one episode, no video.
+
+| Output Dir | Action Transform | Result | Interaction Flags |
+|---|---|---:|---|
+| `diag_oat_identity` | raw actions | 0/1 | no movement, no grasp |
+| `diag_oat_flip` | gripper sign flipped | 0/1 | no movement, no grasp |
+| `diag_oat_close` | gripper forced `-1` | 0/1 | no movement, no grasp |
+| `diag_oat_scale5_flip` | scale 5, flip | 0/1 | no movement, no grasp |
+| `diag_oat_scale10_flip` | scale 10, flip | 0/1 | no movement, no grasp |
+| `diag_oat_scale50_flip` | scale 50, flip | 0/1 | no movement, no grasp |
+| `diag_oat_scale100_flip` | scale 100, flip | 0/1 | no movement, no grasp |
+| `diag_oat_scale50_close` | scale 50, forced close | 0/1 | no movement, no grasp |
+| `diag_oat_stats_flip` | `action_unnorm_mode=stats`, flip | 0/1 | no movement, no grasp |
+| `diag_oat_mani` | axis-angle + normalize01 | 0/1 | no movement, no grasp |
+| `diag_oat_mani_inv` | axis-angle + normalize01_flip | 0/1 | no movement, no grasp |
+| `diag_oat_mani_s50` | scale 50 + axis-angle + normalize01 | 0/1 | no movement, no grasp |
+| `diag_oat_ref` | simpler_bridge image + axis-angle + normalize01 | 0/1 | no movement, no grasp |
+| `diag_oat_ref_inv` | simpler_bridge image + axis-angle + normalize01_flip | 0/1 | no movement, no grasp |
+
+Main result: some original eval parameters were indeed incomplete relative to
+OpenVLA's SimplerEnv reference path, especially Maniskill rotation/gripper
+conversion and Bridge-style image preprocessing. But applying those reference
+transforms did not fix the zero-success behavior.
+
+### Updated Interpretation
+
+The shared 0 success is now less likely to be a simple gripper sign bug, simple
+action scaling bug, `stats` unnormalization bug, Euler-vs-axis-angle bug, or
+Bridge image preprocessing bug. Those were tested directly and still produced
+no reward or object interaction.
+
+The strongest remaining clue is policy/action-token collapse. For OAT, dry and
+rollout generations repeatedly use the same action token pattern:
+
+```text
+151833, 151813, 151833, 151813
+```
+
+Decoded xyz/rpy actions are tiny in the raw path (roughly `0.003-0.011` on
+position axes for the first diagnostic), and even aggressive scaling did not
+lead to SimplerEnv object movement or grasp. FAST and VQ-BeT show the same
+high-level failure: generated actions are valid tensors but behavior is
+ineffective.
+
+Current best diagnosis: the issue is probably in the checkpoint/token-generation
+path or policy distribution, not merely in the final env action postprocessing.
+
+Next best diagnostic:
+
+1. Run a known-good OpenVLA/MiniVLA Bridge SimplerEnv baseline through this
+   exact harness, with `--image_preprocess simpler_bridge`,
+   `--rotation_mode axis_angle`, and `--gripper_mode normalize01`.
+2. If the baseline succeeds, focus on custom checkpoint action-token generation
+   and tokenizer/vocab setup.
+3. If the baseline also fails, focus on harness differences from OpenVLA's
+   `experiments/robot/simpler/run_simpler_eval.py`, especially prompt format,
+   image path, and `predict_action`/generation internals.
