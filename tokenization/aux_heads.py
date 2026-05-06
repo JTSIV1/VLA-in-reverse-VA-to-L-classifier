@@ -246,7 +246,7 @@ def contrastive_loss(action_emb, text_emb, text_list, temperature):
 # ======================================================================
 
 class TextEncoderWrapper(nn.Module):
-    """Wraps a pretrained text encoder (CLIP or GPT-2) with optional LoRA."""
+    """Wraps a pretrained text encoder (CLIP, GPT-2, or precomputed VLM) with optional LoRA."""
 
     def __init__(self, model_name='laion/CLIP-ViT-B-32-laion2B-s34B-b79K',
                  model_type='clip', freeze=True, lora_r=0):
@@ -254,6 +254,21 @@ class TextEncoderWrapper(nn.Module):
         self.model_type = model_type
         self.freeze = freeze
         self.lora_r = lora_r
+
+        if model_type == 'vlm':
+            # Precomputed VLM embeddings: model_name is path to .pt cache file
+            cache = torch.load(model_name, map_location='cpu')
+            self._embed_cache = cache['embeddings']  # {str: tensor(d,)}
+            self.output_dim = cache['dim']
+            # Dummy parameter so .parameters() / .to(device) work
+            self._dummy = nn.Parameter(torch.zeros(1), requires_grad=False)
+            self.text_model = None
+            self.text_projection = None
+            self.tokenizer = None
+            print(f"VLM text encoder: loaded {len(self._embed_cache)} cached embeddings "
+                  f"(dim={self.output_dim}, layer={cache.get('layer', -1)}, "
+                  f"model={cache.get('model', '?')})")
+            return  # skip freeze/LoRA — everything is precomputed
 
         if model_type == 'clip':
             from transformers import CLIPModel, CLIPTokenizerFast
@@ -312,6 +327,9 @@ class TextEncoderWrapper(nn.Module):
         Subsequent forward() calls return cached embeddings instead of running
         the text model.
         """
+        if self.model_type == 'vlm':
+            # Already loaded from .pt file
+            return
         unique = list(set(all_instructions))
         if not unique:
             return
@@ -344,13 +362,20 @@ class TextEncoderWrapper(nn.Module):
             return pooled
 
     def forward(self, text_list):
-        device = next(self.text_model.parameters()).device
+        if self.text_model is not None:
+            device = next(self.text_model.parameters()).device
+        else:
+            device = self._dummy.device
 
-        # Serve from cache if available (frozen encoder)
+        # Serve from cache if available (frozen encoder or VLM)
         if hasattr(self, '_embed_cache') and self._embed_cache:
-            # Fall back to live encoding for any uncached strings
             missed = [t for t in text_list if t not in self._embed_cache]
             if missed:
+                if self.text_model is None:
+                    raise KeyError(
+                        f"VLM text encoder has no model to encode {len(missed)} "
+                        f"uncached instructions. Rerun precompute script. "
+                        f"Missing: {missed[:3]}")
                 with torch.no_grad():
                     emb = self._encode(missed, device)
                 for t, vec in zip(missed, emb):
@@ -451,8 +476,20 @@ def build_aux_heads(tokenizer_type, device,
     # ── CLIP head ──────────────────────────────────────────────────────
     if clip_config is not None:
         cfg = clip_config
+        text_type = cfg.get('text_type', 'clip')
         clip_d = head_d_model if aux_target == 'post_fsq' else cfg.get('d_model', 128)
         clip_nhead = head_nhead if aux_target == 'post_fsq' else 4
+
+        # Build text encoder (CLIP, GPT-2, or precomputed VLM)
+        text_enc = TextEncoderWrapper(
+            model_name=cfg.get('text_model',
+                               'laion/CLIP-ViT-B-32-laion2B-s34B-b79K'),
+            model_type=text_type,
+            freeze=(cfg.get('text_lora_r', 0) == 0) if text_type != 'vlm' else True,
+            lora_r=cfg.get('text_lora_r', 0) if text_type != 'vlm' else 0,
+        ).to(device)
+
+        # Same ContrastiveHead for all text encoder types
         result['clip_head'] = ContrastiveHead(
             latent_dim=head_latent_dim,
             d_model=clip_d,
@@ -460,17 +497,11 @@ def build_aux_heads(tokenizer_type, device,
             transformer_layers=cfg.get('transformer_layers', 2),
             proj_dim=cfg.get('proj_dim', 128),
         ).to(device)
-        result['text_encoder'] = TextEncoderWrapper(
-            model_name=cfg.get('text_model',
-                               'laion/CLIP-ViT-B-32-laion2B-s34B-b79K'),
-            model_type=cfg.get('text_type', 'clip'),
-            freeze=(cfg.get('text_lora_r', 0) == 0),
-            lora_r=cfg.get('text_lora_r', 0),
-        ).to(device)
+        result['text_encoder'] = text_enc
         result['text_proj'] = nn.Linear(
-            result['text_encoder'].output_dim,
+            text_enc.output_dim,
             cfg.get('proj_dim', 128)).to(device)
-        print(f"CLIP head: latent_dim={head_latent_dim}, "
-              f"proj_dim={cfg.get('proj_dim', 128)}")
+        print(f"Contrastive head ({text_type}): latent_dim={head_latent_dim}, "
+              f"text_dim={text_enc.output_dim}, proj_dim={cfg.get('proj_dim', 128)}")
 
     return result

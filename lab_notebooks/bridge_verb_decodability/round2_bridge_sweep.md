@@ -148,6 +148,131 @@ QueST dominates on reconstruction (0.00078-0.00349 MSE) and latent decodability,
 
 Adding verb or CLIP aux consistently increases codebook utilization (e.g., OAT v200: 74% → 93-96%) but at the cost of higher reconstruction error (0.00333 → 0.00382-0.00426). The aux loss gradient encourages more diverse code usage, which may partially explain why propagation works for OAT and VQ-BeT — more utilized codes means finer-grained discrete distinctions.
 
+## VLA Embedding Probes (2026-04-16)
+
+### Motivation
+
+The latent and tokid probes measure verb decodability from the tokenizer's internal representations. But the VLA (MiniVLA 0.5B, Qwen2.5 backbone) sees action tokens through its LLM embedding table — what verb information survives in the VLA's learned action embeddings?
+
+### Setup
+
+For each vanilla tokenizer config, load the 50k-step vanilla policy's LLM embedding table (`llm.model.embed_tokens.weight`, 896-d), map discrete tokenizer codes → LLM token embeddings, and train a VerbHead classifier (same Transformer + CLS token architecture as latent/tokid probes, 100 epochs, batch_size=64, weighted CE).
+
+The VLA embed probe uses `action_rep="latent"` internally (continuous 896-d vectors), with `Linear(896→128)` input projection → ActionTransformer → CLS → classifier.
+
+### Vanilla VLA Embed Results
+
+| Tokenizer | Config | VLA Embed Acc | VLA Embed MF1 | Job |
+|-----------|--------|--------------|--------------|-----|
+| OAT | 16_855_4 | 2.1 | 0.2 | 7154711 |
+| OAT | 32_888_8 | 12.0 | 10.3 | 7154712 |
+| OAT | 16_8555_4 | 35.6 | 6.2 | 7154713 |
+| VQ-BeT | 5_16_2_256 | 3.3 | 0.4 | 7154717 |
+| VQ-BeT | 5_16_2_512 | 6.1 | 0.7 | 7154718 |
+| VQ-BeT | 10_16_2_256 | 3.3 | 0.4 | 7154719 |
+
+All dramatically worse than latent probes (15–25% acc) and tokid probes (17–22% acc). Compare with native baseline: 23.1% acc / 27.4% MF1.
+
+### Root Cause: Embedding Collapse
+
+The LLM embedding table has 151,936 tokens. Action tokens occupy the last ~200–256 positions. After 50k steps of next-token prediction, these embeddings barely differentiate:
+
+| Condition | Last-N std | Per-row std | Avg Cosine Sim |
+|-----------|-----------|-------------|----------------|
+| OAT 16_855_4 vanilla | 0.0111 | 0.0111 | **0.91** |
+| VQ-BeT 10_16_2_256 vanilla | 0.0113 | 0.0113 | **0.69** |
+| VQ-BeT 10_16_2_256 **fullproj** | 0.0387 | 0.0334 | **0.007** |
+
+Vanilla VLA action embeddings are nearly identical (cosine sim 0.69–0.91), making them useless for verb classification. The fullproj initialization — where action embeddings are `proj(codebook_vector)` — produces well-differentiated embeddings (cosine sim 0.007).
+
+### Fullproj VLA Embed Results
+
+Two fullproj probes (VQ-BeT 10_16_2_256, the tokenizer used in the report's repr collapse / fullproj experiments):
+
+| Condition | VLA Embed Acc | VLA Embed MF1 | Job |
+|-----------|--------------|--------------|-----|
+| vanilla + fullproj | 14.8 | 10.8 | 7155185 |
+| clip0.1 + fullproj | 19.4 | 22.3 | 7155186 |
+
+Fullproj is much better than vanilla VLA embed (3.3% acc) — the embedding differentiation (cosine sim 0.007 vs 0.69) helps. But still well below latent probes (15–25% acc) and even tokid probes (17–22% acc). The 896-d fullproj embeddings carry some verb signal but the `Linear(896→128)` projection + Transformer + CLS pipeline doesn't recover as much as the direct latent or tokid representations.
+
+### Ridge R² Analysis
+
+Ridge R² (α=1.0, 5-fold stratified CV) on 128-d CLS embeddings from trained vanilla probes. Script: `analysis/compute_r2_decodability.py --all_vanilla` (job 7155531).
+
+**Caveat:** Native R² varies (0.15–0.21) because each config has its own separately-trained `probe_native.pth` — the representation is identical but probe training variance produces different CLS embeddings. Mean native R²=0.195.
+
+| Tokenizer | Config | Native R² | Latent R² | TokID R² | VLA Embed R² |
+|-----------|--------|-----------|-----------|----------|-------------|
+| OAT | 16_855_4 | 0.1510 | 0.0995 | 0.0899 | 0.0027 |
+| OAT | 32_888_8 | 0.2053 | 0.1163 | 0.0974 | 0.0676 |
+| OAT | 16_8555_4 | 0.2042 | 0.1025 | 0.0858 | 0.0382 |
+| VQ-BeT | 5_16_2_256 | 0.2055 | 0.0973 | 0.1178 | 0.0020 |
+| VQ-BeT | 5_16_2_512 | 0.1992 | 0.1005 | 0.1262 | 0.0001 |
+| VQ-BeT | 10_16_2_256 | 0.2024 | 0.0892 | 0.0889 | 0.0046 |
+
+**Fullproj VLA Embed R² (VQ-BeT 10_16_2_256):**
+
+| Condition | VLA Embed R² |
+|-----------|-------------|
+| vanilla_fullproj | 0.0896 |
+| clip0.1_fullproj | 0.1567 |
+
+**Observations:**
+- Native R² (~0.20) > latent (~0.10) > tokid (~0.09–0.13) > VLA embed (~0.00–0.07). Consistent with accuracy ordering.
+- VQ-BeT tokid R² (0.09–0.13) ≥ latent R² (0.09–0.10), unlike OAT where latent > tokid. Consistent with VQ-BeT's better aux signal propagation through ResidualVQ.
+- Vanilla VLA embed R² is near zero for most configs (0.0001–0.0046), confirming embedding collapse.
+- clip0.1_fullproj R²=0.1567 approaches native levels — fullproj + contrastive training preserves meaningful verb structure in the LLM embedding space.
+
+### Key Finding
+
+**VLA next-token prediction does NOT differentiate action token embeddings.** After 50k training steps, action tokens in the LLM embedding table remain nearly identical (cosine sim up to 0.91). The autoregressive loss provides insufficient gradient signal to separate 200–256 action tokens within a 151K-token vocabulary. Fullproj initialization (replacing learned embeddings with projected codebook vectors) solves this by construction.
+
+## VLM-Aligned Contrastive Loss Experiment (2026-04-02)
+
+### Motivation
+
+The CLIP contrastive head aligns action latents to CLIP text embeddings (512-d, from `laion/CLIP-ViT-B-32-laion2B-s34B-b79K`). But the downstream VLA uses Qwen2.5-0.5B as its language model — a different embedding space entirely. If the goal is to ground action token embeddings in the VLA's own language representations (via resdim128 or fullproj), we should align to the VLM's text embeddings directly.
+
+### Setup
+
+- **Text encoder**: Precomputed Qwen2.5-0.5B last-token hidden states (896-d) for all 15,091 unique BridgeV2 instructions. Cached in `tokenization/vlm_text_embeddings.pt`.
+- **Contrastive head**: Same ActionTransformer + projection architecture. `text_proj: Linear(896, 128)` projects VLM embeddings down to the 128-d contrastive space (same `proj_dim` as CLIP condition).
+- **Tokenizer**: VQ-BeT 10_16_2_256 (same as our policy sweep baseline).
+- **Training**: `--aux_head clip --aux_lambda 0.1 --text_type vlm --text_model tokenization/vlm_text_embeddings.pt`
+
+### Tokenizer Training Results
+
+| Condition | Val Recon | Val Clip Loss | R@1 | R@5 | R@10 | Codebook Util | Epochs | Notes |
+|-----------|-----------|---------------|-----|-----|------|---------------|--------|-------|
+| VQ-BeT 10_16_2_256 (vanilla) | 0.00393 | — | — | — | — | 109/256 (42.6%) | 65 (ES) | No aux loss |
+| VQ-BeT 10_16_2_256 + CLIP 0.1 | 0.00946 | 3.73 | 2.2% | 8.4% | 14.2% | 198/256 (77.3%) | 171 (ES) | External CLIP text encoder |
+| **VQ-BeT 10_16_2_256 + VLM-clip 0.1** | **0.01154** | **1.87** | **1.8%** | **8.0%** | **14.2%** | **233/256 (91.0%)** | **110 (ES)** | Qwen2.5-0.5B text embeddings |
+
+**Observations:**
+
+1. **Lower contrastive loss**: VLM-clip achieves val clip loss 1.87 vs CLIP's 3.73. The VLM embedding space is 896-d (vs CLIP's 512-d) and may capture richer instruction semantics, making the alignment task easier.
+
+2. **Similar retrieval performance**: R@1/R@5/R@10 are comparable (1.8/8.0/14.2% vs 2.2/8.4/14.2%). The absolute retrieval numbers are low for both — expected given the large number of unique instructions (~15k) and the coarse VQ-BeT latent bottleneck.
+
+3. **Higher codebook utilization**: VLM-clip uses 233/256 codes (91.0%) vs CLIP's 198/256 (77.3%) and vanilla's 109/256 (42.6%). The VLM-aligned contrastive pressure pushes the codebook toward fuller utilization.
+
+4. **Higher reconstruction error**: VLM-clip val recon 0.01154 vs CLIP's 0.00946 vs vanilla's 0.00393. More aggressive codebook usage trades off against reconstruction fidelity, consistent with the general aux-loss trend.
+
+5. **Earlier convergence**: VLM-clip early-stopped at epoch 110 vs CLIP's 171. The contrastive loss converges faster when aligning to the actual downstream language space.
+
+### Policy Training (In Progress)
+
+Three policies training with this tokenizer (jobs 6935178-6935180, submitted 2026-04-02):
+
+| Tag | d_fixed | Embedding Strategy | Job ID |
+|-----|---------|-------------------|--------|
+| `vq_bet_10_16_2_256_vlm_clip0.1` | — | Standard (free embeddings) | 6935178 |
+| `vq_bet_10_16_2_256_vlm_clip0.1_resdim128` | 128 | Partial: 128d proj(codebook) + 768d learnable | 6935179 |
+| `vq_bet_10_16_2_256_vlm_clip0.1_fullproj` | 896 | Full: all 896d from proj(codebook) | 6935180 |
+
+These use the corrected resdim128 initialization (free dims init'd to match pretrained embedding std, not default N(0,1)).
+
 ## Scripts
 
 - Sweep submission: `run_sweep.sh` with `DATASET="bridge"`

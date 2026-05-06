@@ -83,7 +83,9 @@ def eval_epoch(model, loader, device, args,
                                    positions=result['positions'])
             instructions = result['instructions']
             text_features = text_encoder(list(instructions))
-            text_emb = F.normalize(text_proj(text_features), dim=-1)
+            text_emb = F.normalize(
+                text_proj(text_features) if text_proj is not None else text_features,
+                dim=-1)
             clip_loss = contrastive_loss(
                 action_emb, text_emb, list(instructions), clip_head.temperature)
             totals['clip'] += clip_loss.item()
@@ -136,7 +138,9 @@ def eval_clip_retrieval(model, loader, device, args,
                                positions=result['positions'])
         instructions = result['instructions']
         text_features = text_encoder(list(instructions))
-        text_emb = F.normalize(text_proj(text_features), dim=-1)
+        text_emb = F.normalize(
+                text_proj(text_features) if text_proj is not None else text_features,
+                dim=-1)
 
         all_action_emb.append(action_emb.cpu())
         all_text_emb.append(text_emb.cpu())

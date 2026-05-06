@@ -193,7 +193,9 @@ def train_epoch(model, loader, optimizer, device, args,
             instructions = result['instructions']
             with torch.set_grad_enabled(text_encoder.lora_r > 0):
                 text_features = text_encoder(list(instructions))
-            text_emb = F.normalize(text_proj(text_features), dim=-1)
+            text_emb = F.normalize(
+                text_proj(text_features) if text_proj is not None else text_features,
+                dim=-1)
             clip_loss = contrastive_loss(
                 action_emb, text_emb, list(instructions), clip_head.temperature)
             loss = loss + args.clip_lambda * clip_loss
@@ -207,7 +209,8 @@ def train_epoch(model, loader, optimizer, device, args,
                 all_params += list(verb_head.parameters())
             if clip_head is not None:
                 all_params += list(clip_head.parameters())
-                all_params += list(text_proj.parameters())
+                if text_proj is not None:
+                    all_params += list(text_proj.parameters())
                 if text_encoder.lora_r > 0:
                     all_params += [p for p in text_encoder.parameters()
                                    if p.requires_grad]
@@ -349,6 +352,118 @@ def build_dataloaders(args):
             num_verbs = len(verb_to_id)
             verb_class_weights = _compute_verb_class_weights(
                 num_verbs, verb_to_id, train_verb_ids=train_verb_ids)
+    elif args.dataset == "libero_goal":
+        # LIBERO-Goal: 500 demos × 10 tasks × 50 demos. Action space is identical
+        # to Bridge (7-DoF Δ + gripper), so we reuse BridgeTokenizerDataset.
+        from datasets.libero_dataset import (
+            load_libero_actions, load_libero_verb_labels, load_libero_instructions,
+            DEFAULT_CSV as LIBERO_CSV, DEFAULT_ACTIONS_DIR as LIBERO_ACTIONS,
+        )
+
+        libero_csv = args.libero_csv or LIBERO_CSV
+        libero_actions = args.libero_actions_dir or LIBERO_ACTIONS
+
+        all_actions, all_keys = load_libero_actions(libero_actions, libero_csv)
+
+        np.random.seed(42)
+        perm = np.random.permutation(len(all_actions))
+        n_val = max(1, int(len(all_actions) * args.val_fraction))
+        train_actions = [all_actions[i] for i in perm[n_val:]]
+        val_actions = [all_actions[i] for i in perm[:n_val]]
+        print(f"LIBERO train: {len(train_actions)}, val: {len(val_actions)}")
+
+        train_verb_ids, val_verb_ids, verb_to_id = None, None, None
+        if aux_head == 'verb':
+            all_verb_ids, verb_to_id = load_libero_verb_labels(
+                libero_csv, all_keys, min_class_count=args.min_class_count)
+            train_verb_ids = [all_verb_ids[i] for i in perm[n_val:]]
+            val_verb_ids = [all_verb_ids[i] for i in perm[:n_val]]
+
+        train_instructions, val_instructions = None, None
+        if aux_head == 'clip':
+            all_instructions = load_libero_instructions(libero_csv, all_keys)
+            train_instructions = [all_instructions[i] for i in perm[n_val:]]
+            val_instructions = [all_instructions[i] for i in perm[:n_val]]
+
+        sampling = args.sampling
+        max_k = args.max_chunks if aux_head else 1
+
+        train_ds = BridgeTokenizerDataset(
+            train_actions, chunk_size=args.chunk_size, max_chunks=max_k,
+            sampling=sampling,
+            verb_ids=train_verb_ids, verb_to_id=verb_to_id,
+            instructions=train_instructions)
+        val_ds = BridgeTokenizerDataset(
+            val_actions, chunk_size=args.chunk_size, max_chunks=max_k,
+            sampling=sampling,
+            verb_ids=val_verb_ids, verb_to_id=verb_to_id,
+            instructions=val_instructions)
+        train_ds.verb_to_id = verb_to_id or {}
+        train_ds.id_to_verb = {v: k for k, v in train_ds.verb_to_id.items()}
+        val_ds.verb_to_id = train_ds.verb_to_id
+        val_ds.id_to_verb = train_ds.id_to_verb
+
+        normalizer = fit_bridge_normalizer(train_actions)
+
+        if aux_head == 'verb' and verb_to_id:
+            num_verbs = len(verb_to_id)
+            verb_class_weights = _compute_verb_class_weights(
+                num_verbs, verb_to_id, train_verb_ids=train_verb_ids)
+
+    elif args.dataset == "droid":
+        # DROID: load shards filtered to CSV; supports vanilla / verb / clip aux.
+        from datasets.droid_dataset import (
+            load_droid_actions, load_droid_verb_labels, load_droid_instructions,
+        )
+
+        all_actions, all_keys = load_droid_actions(
+            args.shard_dir, csv_path=args.droid_csv)
+
+        np.random.seed(42)
+        perm = np.random.permutation(len(all_actions))
+        n_val = max(1, int(len(all_actions) * args.val_fraction))
+        train_actions = [all_actions[i] for i in perm[n_val:]]
+        val_actions = [all_actions[i] for i in perm[:n_val]]
+        print(f"DROID train: {len(train_actions)}, val: {len(val_actions)}")
+
+        train_verb_ids, val_verb_ids, verb_to_id = None, None, None
+        if aux_head == 'verb':
+            all_verb_ids, verb_to_id = load_droid_verb_labels(
+                args.droid_csv, all_keys, min_class_count=args.min_class_count)
+            train_verb_ids = [all_verb_ids[i] for i in perm[n_val:]]
+            val_verb_ids = [all_verb_ids[i] for i in perm[:n_val]]
+
+        train_instructions, val_instructions = None, None
+        if aux_head == 'clip':
+            all_instructions = load_droid_instructions(args.droid_csv, all_keys)
+            train_instructions = [all_instructions[i] for i in perm[n_val:]]
+            val_instructions = [all_instructions[i] for i in perm[:n_val]]
+
+        sampling = args.sampling
+        max_k = args.max_chunks if aux_head else 1
+
+        train_ds = BridgeTokenizerDataset(
+            train_actions, chunk_size=args.chunk_size, max_chunks=max_k,
+            sampling=sampling,
+            verb_ids=train_verb_ids, verb_to_id=verb_to_id,
+            instructions=train_instructions)
+        val_ds = BridgeTokenizerDataset(
+            val_actions, chunk_size=args.chunk_size, max_chunks=max_k,
+            sampling=sampling,
+            verb_ids=val_verb_ids, verb_to_id=verb_to_id,
+            instructions=val_instructions)
+        train_ds.verb_to_id = verb_to_id or {}
+        train_ds.id_to_verb = {v: k for k, v in train_ds.verb_to_id.items()}
+        val_ds.verb_to_id = train_ds.verb_to_id
+        val_ds.id_to_verb = train_ds.id_to_verb
+
+        normalizer = fit_bridge_normalizer(train_actions)  # generic min-max, works for DROID
+
+        if aux_head == 'verb' and verb_to_id:
+            num_verbs = len(verb_to_id)
+            verb_class_weights = _compute_verb_class_weights(
+                num_verbs, verb_to_id, train_verb_ids=train_verb_ids)
+
     else:
         # CALVIN
         from datasets.calvin_dataset import build_calvin_tokenizer_data
@@ -465,14 +580,21 @@ def parse_args():
                         help="Override any config/arg value, e.g. --set chunk_size=8 lr=3e-4")
     parser.add_argument("--tag", type=str, default="",
                         help="Optional suffix appended to auto-generated run name")
+    parser.add_argument("--libero_csv", type=str, default=None,
+                        help="Override LIBERO episodes CSV (only used with --dataset libero_goal)")
+    parser.add_argument("--libero_actions_dir", type=str, default=None,
+                        help="Override LIBERO action npy dir (only used with --dataset libero_goal)")
     parser.add_argument("--dataset", type=str, default="calvin",
-                        choices=["calvin", "bridge"],
+                        choices=["calvin", "bridge", "droid", "libero_goal"],
                         help="Dataset to train on (default: calvin)")
     parser.add_argument("--data_dir", type=str, default=DATA_DIR)
     parser.add_argument("--val_dir", type=str, default=VAL_DIR)
     parser.add_argument("--shard_dir", type=str,
                         default="/data/user_data/wenjiel2/datasets/bridge_actions",
                         help="BridgeV2 action shard directory (only used with --dataset bridge)")
+    parser.add_argument("--droid_csv", type=str,
+                        default="data/droid_episodes_filtered.csv",
+                        help="DROID episode CSV (only used with --dataset droid)")
     parser.add_argument("--bridge_csv", type=str,
                         default="data/bridge_episodes_filtered.csv",
                         help="BridgeV2 episode CSV with verb labels (Bridge + verb head)")
@@ -496,10 +618,13 @@ def parse_args():
                         help="Auxiliary head type (default: none)")
     parser.add_argument("--aux_lambda", type=float, default=0.5,
                         help="Loss weight for the auxiliary head (default: 0.5)")
+    # NOTE 2026-05-03: post-FSQ aux is deprecated for the LATTiCE paper sweep.
+    # Pre-FSQ ('latent', the default) is the only supported recipe. The choice
+    # list is restricted to 'latent' to prevent accidental use of post_fsq.
     parser.add_argument("--aux_target", type=str, default="latent",
-                        choices=["latent", "post_fsq"],
-                        help="Which representation to feed to aux head: "
-                             "'latent' = 256d pre-FSQ, 'post_fsq' = 4d post-round with STE")
+                        choices=["latent"],  # post_fsq removed — see note
+                        help="Which representation to feed to aux head. "
+                             "Only 'latent' (256d pre-FSQ) is supported.")
     parser.add_argument("--min_class_count", type=int, default=30,
                         help="Min samples per verb class (sparse filtering)")
     parser.add_argument("--max_chunks", type=int, default=8,
@@ -510,9 +635,13 @@ def parse_args():
 
     # CLIP-specific
     parser.add_argument("--text_model", type=str,
-                        default='laion/CLIP-ViT-B-32-laion2B-s34B-b79K')
-    parser.add_argument("--text_type", type=str, default='clip',
-                        choices=['clip', 'gpt2'])
+                        default='/data/user_data/wenjiel2/Code/VLA-in-reverse-VA-to-L-classifier/tokenization/vlm_text_embeddings.pt')
+    # NOTE: 'clip' (generic OpenCLIP) was deprecated 2026-05-03 — runs trained with
+    # text_type=clip used a non-VLM text encoder which decouples the tokenizer
+    # from the downstream Qwen embedding space. LATTiCE requires text_type=vlm.
+    # Old generic-clip checkpoints are kept on disk but excluded from the paper sweep.
+    parser.add_argument("--text_type", type=str, default='vlm',
+                        choices=['gpt2', 'vlm'])
     parser.add_argument("--text_lora_r", type=int, default=0)
     parser.add_argument("--proj_dim", type=int, default=128)
     parser.add_argument("--clip_d_model", type=int, default=128)
@@ -707,7 +836,8 @@ def main():
         params += list(verb_head.parameters())
     if clip_head is not None:
         params += list(clip_head.parameters())
-        params += list(text_proj.parameters())
+        if text_proj is not None:
+            params += list(text_proj.parameters())
         if text_encoder.lora_r > 0:
             params += [p for p in text_encoder.parameters() if p.requires_grad]
 

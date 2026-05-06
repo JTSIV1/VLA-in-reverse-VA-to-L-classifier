@@ -101,9 +101,10 @@ def encode_tokenizer_batch(batch, device, tok_model, tok_type, mode,
     if mode == 'latent':
         actions = result['latents']
     elif mode == 'vla_embed':
-        # Get codes, then map to LLM token IDs, then look up VLA embeddings.
-        # The CalvinSweepActionTokenizer maps each raw code c → tokenizer_len-1-c
-        # WITHOUT group offsets (each VQ-BeT group code is mapped independently).
+        # Look up from (precomputed) embedding table.
+        # For vanilla VLA: codes → LLM token IDs → embed_weight lookup.
+        # For static fullproj: embed_weight already has proj(codebook) baked
+        #   into the last n_action token slots.
         codes = result['codes']
         if tok_type == 'vq_bet' and codes.ndim == 3:
             B, K, G = codes.shape
@@ -111,7 +112,7 @@ def encode_tokenizer_batch(batch, device, tok_model, tok_type, mode,
             n_valid = n_valid * G
         codes = codes.long()
         tokenizer_len = vla_embed_info['tokenizer_len']
-        embed_weight = vla_embed_info['embed_weight']
+        embed_weight = vla_embed_info['embed_weight'].to(device)
         llm_ids = (tokenizer_len - 1 - codes).clamp(0, embed_weight.shape[0] - 1)
         actions = embed_weight[llm_ids]  # (B, T, embed_dim)
     else:
@@ -147,9 +148,16 @@ def load_vla_embedding(policy_dir, device="cpu"):
     Extracts the frozen input embedding weights and the token ID mapping
     needed to convert tokenizer codes → LLM vocab IDs.
 
+    Handles three checkpoint formats:
+      - Standard: llm.model.embed_tokens.weight (vanilla VLA)
+      - Static fullproj (VQ-BeT): base_embedding + proj(codebook) → precomputed
+        action embedding table replaces last n_action tokens
+      - Dynamic fullproj (OAT/QueST): base_embedding + proj — requires per-input
+        latents at inference time. Returns proj weight for external use.
+
     Args:
         policy_dir: path to policy run directory (e.g.
-            checkpoints/calvin_sweep/policy/minivla_quest_16_4444_2).
+            checkpoints/bridge_sweep/policy/vq_bet_10_16_2_256/vanilla).
         device: torch device.
 
     Returns:
@@ -157,6 +165,9 @@ def load_vla_embedding(policy_dir, device="cpu"):
             'embed_weight': (vocab_size, embed_dim) tensor on device
             'tokenizer_len': int, LLM tokenizer vocab size
             'embed_dim': int, embedding dimension
+            'is_fullproj': bool, whether this is a fullproj checkpoint
+            'is_dynamic': bool, whether this is dynamic fullproj (OAT)
+            'proj_weight': (d_out, d_in) tensor if fullproj, else None
     """
     import re
 
@@ -172,18 +183,76 @@ def load_vla_embedding(policy_dir, device="cpu"):
         return int(m.group(1)) if m else -1
     fsdp_ckpt = str(max(candidates, key=step_num))
 
-    # Load only the LLM embedding weight from the checkpoint (skip vision/projector)
     print(f"Loading VLA embedding from {fsdp_ckpt} ...")
     ckpt = torch.load(fsdp_ckpt, map_location="cpu")
-    embed_weight = ckpt['model']['llm_backbone']['llm.model.embed_tokens.weight']
-    del ckpt  # free the rest immediately
-    embed_dim = embed_weight.shape[-1]
-    tokenizer_len = embed_weight.shape[0]
+    llm_sd = ckpt['model']['llm_backbone']
 
-    print(f"  embed_dim={embed_dim}, tokenizer_len={tokenizer_len}")
+    is_fullproj = any("embed_tokens.base_embedding." in k for k in llm_sd)
 
-    return {
-        "embed_weight": embed_weight.to(device),
-        "tokenizer_len": tokenizer_len,
-        "embed_dim": embed_dim,
-    }
+    if not is_fullproj:
+        # Standard vanilla: single embed_tokens.weight
+        embed_weight = llm_sd['llm.model.embed_tokens.weight']
+        del ckpt
+        embed_dim = embed_weight.shape[-1]
+        tokenizer_len = embed_weight.shape[0]
+        print(f"  [vanilla] embed_dim={embed_dim}, tokenizer_len={tokenizer_len}")
+        return {
+            "embed_weight": embed_weight.to(device),
+            "tokenizer_len": tokenizer_len,
+            "embed_dim": embed_dim,
+            "is_fullproj": False,
+            "is_dynamic": False,
+            "proj_weight": None,
+        }
+
+    # Fullproj: base_embedding + proj (+ optional codebook for static)
+    base_weight = llm_sd['llm.model.embed_tokens.base_embedding.weight']
+    proj_weight = llm_sd['llm.model.embed_tokens.proj.weight']
+    codebook_key = 'llm.model.embed_tokens.codebook'
+    has_codebook = codebook_key in llm_sd
+    embed_dim = base_weight.shape[-1]
+    tokenizer_len = base_weight.shape[0]
+
+    if has_codebook:
+        # Static fullproj (VQ-BeT): precompute action embeddings
+        codebook = llm_sd[codebook_key]  # (n_action_tokens, d_vq)
+        n_actions = codebook.shape[0]
+        # proj: (d_out, d_vq) — maps codebook → embedding space
+        action_embeds = codebook @ proj_weight.T  # (n_actions, d_out)
+
+        d_fixed = proj_weight.shape[0]
+        if d_fixed < embed_dim:
+            # Partial: first d_fixed from proj, rest from free embedding
+            free_key = 'llm.model.embed_tokens.action_embed_free.weight'
+            free_weight = llm_sd[free_key]  # (n_actions, d_llm - d_fixed)
+            action_embeds = torch.cat([action_embeds, free_weight], dim=-1)
+
+        # Replace last n_actions tokens in base_weight
+        embed_weight = base_weight.clone()
+        embed_weight[-n_actions:] = action_embeds
+        del ckpt
+        print(f"  [static fullproj] embed_dim={embed_dim}, "
+              f"n_actions={n_actions}, d_fixed={d_fixed}")
+        return {
+            "embed_weight": embed_weight.to(device),
+            "tokenizer_len": tokenizer_len,
+            "embed_dim": embed_dim,
+            "is_fullproj": True,
+            "is_dynamic": False,
+            "proj_weight": proj_weight.to(device),
+        }
+    else:
+        # Dynamic fullproj (OAT/QueST): proj maps per-input latents
+        # Can't precompute — return proj for external use
+        del ckpt
+        d_latent = proj_weight.shape[1]
+        print(f"  [dynamic fullproj] embed_dim={embed_dim}, "
+              f"d_latent={d_latent}, proj={proj_weight.shape}")
+        return {
+            "embed_weight": base_weight.to(device),
+            "tokenizer_len": tokenizer_len,
+            "embed_dim": embed_dim,
+            "is_fullproj": True,
+            "is_dynamic": True,
+            "proj_weight": proj_weight.to(device),
+        }

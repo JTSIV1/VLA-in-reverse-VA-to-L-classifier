@@ -49,12 +49,22 @@ def resume_checkpoint(args, model, optimizer, verb_head, clip_head, text_proj, d
 
 
 def setup_output_dir(args):
-    """Create output directory and return (save_dir, run_name)."""
+    """Create output directory and return (save_dir, run_name).
+
+    Naming convention:
+        <tokenizer>_<tag>[_<text_type>_<aux_head><aux_lambda>][_pfsq]
+    where <text_type> appears only for aux_head=clip (e.g. `_vlm_clip0.1`,
+    plain `_clip0.1` for legacy generic CLIP) so VLM-aligned and generic-CLIP
+    tokenizers get distinct directories.
+    """
     run_name = args.tokenizer
     if args.tag:
         run_name += f"_{args.tag}"
     if args.aux_head != 'none':
-        aux_suffix = f"_{args.aux_head}{args.aux_lambda}"
+        prefix = ""
+        if args.aux_head == 'clip' and getattr(args, 'text_type', 'clip') == 'vlm':
+            prefix = "vlm_"
+        aux_suffix = f"_{prefix}{args.aux_head}{args.aux_lambda}"
         if getattr(args, 'aux_target', 'latent') == 'post_fsq':
             aux_suffix += "_pfsq"
         run_name += aux_suffix
@@ -153,7 +163,8 @@ def save_best_checkpoint(save_dir, epoch, model, optimizer, train_m, val_m,
         ckpt['id_to_verb'] = train_ds.id_to_verb
     if args.aux_head == 'clip' and clip_head is not None:
         ckpt['clip_head_state_dict'] = clip_head.state_dict()
-        ckpt['text_proj_state_dict'] = text_proj.state_dict()
+        if text_proj is not None:
+            ckpt['text_proj_state_dict'] = text_proj.state_dict()
 
     torch.save(model.state_dict(),
                os.path.join(save_dir, "tokenizer_weights.pth"))
@@ -220,6 +231,9 @@ def extract_episode_batch(model, ep_batch, device, tok_type):
     instructions = ep_batch.get('instruction', [''] * chunks.size(0))
     B, K = chunks.shape[0], chunks.shape[1]
 
+    # Action real lens per chunk (if available from dataset)
+    raw_real_lens = ep_batch.get('action_real_lens')
+
     # Mask out padded chunks
     valid_mask = torch.arange(K, device=device).unsqueeze(0) < n_valid.unsqueeze(1)
     mask_flat = valid_mask.view(B * K)
@@ -231,7 +245,11 @@ def extract_episode_batch(model, ep_batch, device, tok_type):
     else:
         flat = chunks.view(B * K, chunks.shape[2], chunks.shape[3])
         valid_chunks = flat[mask_flat]
-        result = model({"action": valid_chunks})
+        batch_dict = {"action": valid_chunks}
+        if raw_real_lens is not None:
+            real_lens_flat = raw_real_lens.to(device).view(B * K)[mask_flat]
+            batch_dict["action_real_lens"] = real_lens_flat
+        result = model(batch_dict)
 
     lat = result['latents']
     raw_codes = result.get('codes')

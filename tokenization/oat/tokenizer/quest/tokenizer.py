@@ -162,6 +162,7 @@ class QueSTTok(BaseTokenizer):
             fsq_codes (B, T', fsq_dim) post-round 4-d with STE (FSQ only).
         """
         actions = batch['action']
+        action_real_lens = batch.get('action_real_lens', None)
         # Encoder → pre-FSQ 256-d
         pre_fsq = self.encode_pre_fsq(actions)  # (B, T', 256)
         # Quantize
@@ -175,7 +176,16 @@ class QueSTTok(BaseTokenizer):
             fsq_codes = self.vq.quantize(self.vq.project_in(pre_fsq))
         # Decode
         recons = self.decode(quants)
-        recon_loss = F.mse_loss(recons, actions)
+
+        # Masked recon loss: only on real (non-padded) timesteps
+        if action_real_lens is not None:
+            B, T, D = actions.shape
+            mask = torch.arange(T, device=actions.device).unsqueeze(0) < action_real_lens.unsqueeze(1)
+            mask = mask.unsqueeze(-1).expand_as(actions)
+            n_real = mask.sum()
+            recon_loss = (((recons - actions) ** 2) * mask).sum() / n_real if n_real > 0 else F.mse_loss(recons, actions)
+        else:
+            recon_loss = F.mse_loss(recons, actions)
         return {
             'recon_loss': recon_loss,
             'vq_loss': commit_loss,

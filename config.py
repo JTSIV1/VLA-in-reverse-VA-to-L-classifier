@@ -79,5 +79,13 @@ TOKENIZER_DOWNSAMPLE_FACTOR = (
 TOKENIZER_FIT_NORM_MAX_TRAJS = 1000  # max trajectories used to fit action normalizer
 OAT_NUM_REGISTERS = 8  # OAT register tokens (matches oat/config train_oattok.yaml)
 
+# ─── Bridge dataset ──────────────────────────────────────────────────────────
+BRIDGE_CSV = _os.path.join(PROJECT_DIR, "data", "bridge_episodes_filtered.csv")
+BRIDGE_RLDS_DIR = "/data/user_data/wenjiel2/datasets/bridge_rlds"
+BRIDGE_SWEEP_NAME = "bridge_sweep"
+BRIDGE_SWEEP_DIR = _os.path.join(PROJECT_DIR, "checkpoints", BRIDGE_SWEEP_NAME)
+BRIDGE_TOK_DIR = _os.path.join(BRIDGE_SWEEP_DIR, "tokenizers")
+BRIDGE_POLICY_DIR = _os.path.join(BRIDGE_SWEEP_DIR, "policy")
+
 # ─── NLP ──────────────────────────────────────────────────────────────────────
 SPACY_MODEL = "en_core_web_sm"

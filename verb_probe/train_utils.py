@@ -20,22 +20,14 @@ from tqdm import tqdm
 # Loss, optimizer, scheduler
 # ======================================================================
 
-def build_criterion(verb_counts, verb_to_id, num_verbs, device,
-                    weighted=False, label_smoothing=0.0):
-    """Build CE loss, optionally weighted by inverse class frequency."""
-    if weighted:
-        weights = torch.zeros(num_verbs)
-        for verb, cid in verb_to_id.items():
-            count = verb_counts.get(verb, 1)
-            weights[cid] = 1.0 / count
-        weights = weights / weights.sum() * num_verbs
-        criterion = nn.CrossEntropyLoss(weight=weights.to(device),
-                                        label_smoothing=label_smoothing)
-        print(f"Weighted CE (min={weights.min():.3f}, max={weights.max():.3f}), "
-              f"label_smoothing={label_smoothing}")
-    else:
-        criterion = nn.CrossEntropyLoss(label_smoothing=label_smoothing)
-    return criterion
+def build_criterion(verb_counts, verb_to_id, num_verbs, device):
+    """Build vanilla CE loss (no class weighting, no label smoothing).
+
+    Probes are reported in MI bits via held-out NLL, which assumes the
+    softmax is a calibrated posterior estimate. Class weighting and label
+    smoothing both bias the softmax and are intentionally not exposed.
+    """
+    return nn.CrossEntropyLoss()
 
 
 def build_optimizer_scheduler(model, lr, weight_decay, total_steps,

@@ -71,8 +71,16 @@ _TOKENIZER_REPS = {"vq_bet", "oat", "quest", "latent", "vla_embed"}
 def _load_and_split_bridge(args):
     """Load bridge actions, filter to CSV episodes, split train/val.
 
-    Uses the same seed=42 and val_fraction=0.1 as tokenizer training
-    so the verb probe evaluates on the same val set.
+    Default (num_folds == 1): seed=42, val_fraction=0.1 random split, matching
+    the original tokenizer-training split.
+
+    K-fold mode (num_folds > 1, fold in [0, num_folds)): stratified K-fold
+    split keyed on verb labels (sklearn `StratifiedKFold`, shuffle=True,
+    random_state=seed). Episodes filtered out by `min_class_count` are
+    excluded entirely from both train and val (they're never used by the
+    probe). Output `perm` is constructed so that `perm[:n_val]` is the val
+    fold and `perm[n_val:]` is the train fold, preserving the existing
+    downstream interface.
 
     Returns: (train_actions, val_actions, train_keys, val_keys, perm, n_val)
     """
@@ -90,16 +98,43 @@ def _load_and_split_bridge(args):
     print(f"Filtered to {len(all_actions)}/{n_total} episodes "
           f"using {args.bridge_csv}")
 
+    seed = getattr(args, 'seed', 42)
+    num_folds = getattr(args, 'num_folds', 1)
+    fold = getattr(args, 'fold', 0)
     val_fraction = getattr(args, 'val_fraction', 0.1)
-    np.random.seed(42)
-    perm = np.random.permutation(len(all_actions))
-    n_val = max(1, int(len(all_actions) * val_fraction))
+
+    if num_folds > 1:
+        # Stratified K-fold over the verb-labeled episodes.
+        from sklearn.model_selection import StratifiedKFold
+        from datasets.bridge_dataset import load_bridge_verb_labels
+        all_verb_ids, _ = load_bridge_verb_labels(
+            args.bridge_csv, all_keys,
+            min_class_count=getattr(args, 'min_class_count', 30))
+        verb_ids = np.asarray(all_verb_ids, dtype=np.int64)
+        valid_idx = np.where(verb_ids >= 0)[0]
+        valid_verbs = verb_ids[valid_idx]
+        skf = StratifiedKFold(n_splits=num_folds, shuffle=True,
+                              random_state=seed)
+        train_local, val_local = list(skf.split(valid_idx, valid_verbs))[fold]
+        val_idx = valid_idx[val_local]
+        train_idx = valid_idx[train_local]
+        # perm[:n_val] = val, perm[n_val:] = train (preserve existing interface)
+        perm = np.concatenate([val_idx, train_idx])
+        n_val = len(val_idx)
+        print(f"Stratified {num_folds}-fold (fold {fold}, seed {seed}): "
+              f"Train {len(train_idx)} / Val {n_val} (excluded "
+              f"{len(verb_ids) - len(valid_idx)} unlabeled).")
+    else:
+        np.random.seed(seed)
+        perm = np.random.permutation(len(all_actions))
+        n_val = max(1, int(len(all_actions) * val_fraction))
+        print(f"Single split seed {seed}: "
+              f"Train {len(all_actions) - n_val} / Val {n_val}")
 
     train_actions = [all_actions[i] for i in perm[n_val:]]
     val_actions = [all_actions[i] for i in perm[:n_val]]
     train_keys = [all_keys[i] for i in perm[n_val:]]
     val_keys = [all_keys[i] for i in perm[:n_val]]
-    print(f"Train: {len(train_actions)} episodes, Val: {len(val_actions)} episodes")
 
     return (all_actions, all_keys, train_actions, val_actions,
             train_keys, val_keys, perm, n_val)
@@ -132,6 +167,187 @@ def _build_bridge_tokenizer_data(args, chunk_params):
     from collections import Counter
     cnt = Counter(v for v in train_verb_ids if v >= 0)
     verb_counts = {id_to_verb[vid]: c for vid, c in cnt.items()}
+
+    return train_ds, val_ds, num_verbs, id_to_verb, verb_to_id, verb_counts
+
+
+def _load_and_split_droid(args):
+    """DROID counterpart of _load_and_split_bridge.
+
+    Returns (all_actions, all_keys, train_actions, val_actions,
+             train_keys, val_keys, perm, n_val).
+    """
+    from datasets.droid_dataset import (
+        load_droid_actions, load_droid_verb_labels,
+    )
+
+    all_actions, all_keys = load_droid_actions(
+        args.shard_dir, csv_path=args.droid_csv)
+
+    seed = getattr(args, 'seed', 42)
+    num_folds = getattr(args, 'num_folds', 1)
+    fold = getattr(args, 'fold', 0)
+    val_fraction = getattr(args, 'val_fraction', 0.1)
+
+    if num_folds > 1:
+        from sklearn.model_selection import StratifiedKFold
+        all_verb_ids, _ = load_droid_verb_labels(
+            args.droid_csv, all_keys,
+            min_class_count=getattr(args, 'min_class_count', 30))
+        verb_ids = np.asarray(all_verb_ids, dtype=np.int64)
+        valid_idx = np.where(verb_ids >= 0)[0]
+        valid_verbs = verb_ids[valid_idx]
+        skf = StratifiedKFold(n_splits=num_folds, shuffle=True,
+                              random_state=seed)
+        train_local, val_local = list(skf.split(valid_idx, valid_verbs))[fold]
+        val_idx = valid_idx[val_local]
+        train_idx = valid_idx[train_local]
+        perm = np.concatenate([val_idx, train_idx])
+        n_val = len(val_idx)
+        print(f"DROID stratified {num_folds}-fold (fold {fold}, seed {seed}): "
+              f"Train {len(train_idx)} / Val {n_val} (excluded "
+              f"{len(verb_ids) - len(valid_idx)} unlabeled).")
+    else:
+        np.random.seed(seed)
+        perm = np.random.permutation(len(all_actions))
+        n_val = max(1, int(len(all_actions) * val_fraction))
+
+    train_actions = [all_actions[i] for i in perm[n_val:]]
+    val_actions = [all_actions[i] for i in perm[:n_val]]
+    train_keys = [all_keys[i] for i in perm[n_val:]]
+    val_keys = [all_keys[i] for i in perm[:n_val]]
+
+    return (all_actions, all_keys, train_actions, val_actions,
+            train_keys, val_keys, perm, n_val)
+
+
+def _load_and_split_libero(args):
+    """LIBERO-Goal counterpart of _load_and_split_droid (single-fold only;
+    LIBERO-Goal has too few episodes for stratified k-fold)."""
+    from datasets.libero_dataset import (
+        load_libero_actions, load_libero_verb_labels,
+        DEFAULT_CSV as LIBERO_CSV, DEFAULT_ACTIONS_DIR as LIBERO_ACTIONS,
+    )
+
+    libero_csv = getattr(args, "libero_csv", None) or LIBERO_CSV
+    libero_actions = getattr(args, "libero_actions_dir", None) or LIBERO_ACTIONS
+    all_actions, all_keys = load_libero_actions(libero_actions, libero_csv)
+
+    seed = getattr(args, "seed", 42)
+    val_fraction = getattr(args, "val_fraction", 0.1)
+    np.random.seed(seed)
+    perm = np.random.permutation(len(all_actions))
+    n_val = max(1, int(len(all_actions) * val_fraction))
+
+    train_actions = [all_actions[i] for i in perm[n_val:]]
+    val_actions = [all_actions[i] for i in perm[:n_val]]
+    train_keys = [all_keys[i] for i in perm[n_val:]]
+    val_keys = [all_keys[i] for i in perm[:n_val]]
+
+    return (all_actions, all_keys, train_actions, val_actions,
+            train_keys, val_keys, perm, n_val)
+
+
+def _build_libero_tokenizer_data(args, chunk_params):
+    """LIBERO-Goal tokenizer-mode (latent / token-id) data builder."""
+    from datasets.bridge_dataset import BridgeTokenizerDataset
+    from datasets.libero_dataset import load_libero_verb_labels, DEFAULT_CSV as LIBERO_CSV
+
+    (all_actions, all_keys, train_actions, val_actions,
+     _, _, perm, n_val) = _load_and_split_libero(args)
+
+    libero_csv = getattr(args, "libero_csv", None) or LIBERO_CSV
+    all_verb_ids, verb_to_id = load_libero_verb_labels(
+        libero_csv, all_keys, min_class_count=args.min_class_count)
+    train_verb_ids = [all_verb_ids[i] for i in perm[n_val:]]
+    val_verb_ids = [all_verb_ids[i] for i in perm[:n_val]]
+
+    train_ds = BridgeTokenizerDataset(
+        train_actions, verb_ids=train_verb_ids, verb_to_id=verb_to_id,
+        **chunk_params)
+    val_ds = BridgeTokenizerDataset(
+        val_actions, verb_ids=val_verb_ids, verb_to_id=verb_to_id,
+        **chunk_params)
+
+    id_to_verb = {v: k for k, v in verb_to_id.items()}
+    num_verbs = len(verb_to_id)
+
+    from collections import Counter
+    cnt = Counter(v for v in train_verb_ids if v >= 0)
+    verb_counts = {id_to_verb[vid]: c for vid, c in cnt.items()}
+    return train_ds, val_ds, num_verbs, id_to_verb, verb_to_id, verb_counts
+
+
+def _build_droid_tokenizer_data(args, chunk_params):
+    """DROID counterpart of _build_bridge_tokenizer_data."""
+    from datasets.bridge_dataset import BridgeTokenizerDataset
+    from datasets.droid_dataset import load_droid_verb_labels
+
+    (all_actions, all_keys, train_actions, val_actions,
+     _, _, perm, n_val) = _load_and_split_droid(args)
+
+    all_verb_ids, verb_to_id = load_droid_verb_labels(
+        args.droid_csv, all_keys, min_class_count=args.min_class_count)
+    train_verb_ids = [all_verb_ids[i] for i in perm[n_val:]]
+    val_verb_ids = [all_verb_ids[i] for i in perm[:n_val]]
+
+    train_ds = BridgeTokenizerDataset(
+        train_actions, verb_ids=train_verb_ids, verb_to_id=verb_to_id,
+        **chunk_params)
+    val_ds = BridgeTokenizerDataset(
+        val_actions, verb_ids=val_verb_ids, verb_to_id=verb_to_id,
+        **chunk_params)
+
+    id_to_verb = {v: k for k, v in verb_to_id.items()}
+    num_verbs = len(verb_to_id)
+
+    from collections import Counter
+    cnt = Counter(v for v in train_verb_ids if v >= 0)
+    verb_counts = {id_to_verb[vid]: c for vid, c in cnt.items()}
+
+    return train_ds, val_ds, num_verbs, id_to_verb, verb_to_id, verb_counts
+
+
+def _build_droid_native_data(args):
+    """DROID counterpart of _build_bridge_native_data."""
+    import pandas as pd
+    from datasets.bridge_dataset import BridgeVerbDataset
+    from datasets.droid_dataset import load_droid_verb_labels
+
+    (all_actions, all_keys, train_actions, val_actions,
+     train_keys, val_keys, perm, n_val) = _load_and_split_droid(args)
+
+    all_verb_ids, verb_to_id = load_droid_verb_labels(
+        args.droid_csv, all_keys, min_class_count=args.min_class_count)
+    train_verb_ids = [all_verb_ids[i] for i in perm[n_val:]]
+    val_verb_ids = [all_verb_ids[i] for i in perm[:n_val]]
+
+    id_to_verb = {v: k for k, v in verb_to_id.items()}
+
+    def _make_df_and_cache(actions, verb_ids):
+        rows, cache = [], {}
+        for i, (act, vid) in enumerate(zip(actions, verb_ids)):
+            if vid < 0:
+                continue
+            rows.append({"seg_idx": i, "verb": id_to_verb[vid]})
+            cache[f"actions_{i}"] = act
+        return pd.DataFrame(rows), cache
+
+    train_df, train_cache = _make_df_and_cache(train_actions, train_verb_ids)
+    val_df, val_cache = _make_df_and_cache(val_actions, val_verb_ids)
+    print(f"DROID native probe: {len(train_df)} train / {len(val_df)} val")
+
+    train_ds = BridgeVerbDataset(train_df, train_cache,
+                                 max_seq_len=args.max_seq_len,
+                                 verb_to_id=verb_to_id)
+    val_ds = BridgeVerbDataset(val_df, val_cache,
+                               max_seq_len=args.max_seq_len,
+                               verb_to_id=verb_to_id)
+
+    num_verbs = len(verb_to_id)
+    from collections import Counter
+    cnt = Counter(train_df["verb"])
+    verb_counts = dict(cnt)
 
     return train_ds, val_ds, num_verbs, id_to_verb, verb_to_id, verb_counts
 
@@ -182,6 +398,108 @@ def _build_bridge_native_data(args):
     return train_ds, val_ds, num_verbs, id_to_verb, verb_to_id, verb_counts
 
 
+def _build_bridge_vision_data(args):
+    """Build BridgeVisionDataset for goal-only (first+last frame) probe.
+
+    Uses the same seed=42 / 90-10 split as _load_and_split_bridge so
+    train/val sets are identical to the action probe for fair comparison.
+    """
+    import pandas as pd
+    from collections import Counter
+    from datasets.bridge_dataset import (
+        BridgeVisionDataset, load_bridge_frames, load_bridge_verb_labels,
+    )
+
+    frames_dir = getattr(args, 'frames_dir', None)
+    if not frames_dir:
+        from datasets.bridge_dataset import BRIDGE_FRAMES_DIR
+        frames_dir = BRIDGE_FRAMES_DIR
+
+    # Load pre-extracted frames
+    frames_cache, frame_keys = load_bridge_frames(frames_dir)
+
+    # Load CSV for verb labels and filtering
+    csv_df = pd.read_csv(args.bridge_csv)
+    csv_key_set = set(csv_df["episode_key"])
+
+    # We need the same split as action probe. Action probe uses
+    # load_bridge_actions → filter to CSV → seed=42 permutation.
+    # We replicate the same index ordering: load action keys (which
+    # define the canonical ordering), filter to CSV, permute.
+    from datasets.bridge_dataset import load_bridge_actions
+    all_actions, all_keys = load_bridge_actions(args.shard_dir)
+
+    n_total = len(all_keys)
+    keep_idx = [i for i, k in enumerate(all_keys) if k in csv_key_set]
+    all_keys = [all_keys[i] for i in keep_idx]
+    print("Filtered to {}/{} episodes using {}".format(
+        len(all_keys), n_total, args.bridge_csv))
+
+    seed = getattr(args, 'seed', 42)
+    num_folds = getattr(args, 'num_folds', 1)
+    fold = getattr(args, 'fold', 0)
+    val_fraction = getattr(args, 'val_fraction', 0.1)
+
+    # Verb labels (loaded early so K-fold can stratify by verb)
+    all_verb_ids, verb_to_id = load_bridge_verb_labels(
+        args.bridge_csv, all_keys, min_class_count=args.min_class_count)
+
+    if num_folds > 1:
+        from sklearn.model_selection import StratifiedKFold
+        verb_ids_arr = np.asarray(all_verb_ids, dtype=np.int64)
+        valid_idx = np.where(verb_ids_arr >= 0)[0]
+        valid_verbs = verb_ids_arr[valid_idx]
+        skf = StratifiedKFold(n_splits=num_folds, shuffle=True,
+                              random_state=seed)
+        train_local, val_local = list(skf.split(valid_idx, valid_verbs))[fold]
+        val_idx = valid_idx[val_local]
+        train_idx = valid_idx[train_local]
+        perm = np.concatenate([val_idx, train_idx])
+        n_val = len(val_idx)
+        print(f"Stratified {num_folds}-fold (fold {fold}, seed {seed}): "
+              f"Train {len(train_idx)} / Val {n_val}")
+    else:
+        np.random.seed(seed)
+        perm = np.random.permutation(len(all_keys))
+        n_val = max(1, int(len(all_keys) * val_fraction))
+
+    train_keys = [all_keys[i] for i in perm[n_val:]]
+    val_keys = [all_keys[i] for i in perm[:n_val]]
+    train_verb_ids = [all_verb_ids[i] for i in perm[n_val:]]
+    val_verb_ids = [all_verb_ids[i] for i in perm[:n_val]]
+
+    id_to_verb = {v: k for k, v in verb_to_id.items()}
+    num_verbs = len(verb_to_id)
+
+    # Vision transform
+    img_size = 224
+    if transforms is not None:
+        from config import IMG_MEAN, IMG_STD
+        transform = transforms.Compose([
+            transforms.Resize((img_size, img_size)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=IMG_MEAN, std=IMG_STD),
+        ])
+    else:
+        transform = None
+
+    train_ds = BridgeVisionDataset(
+        train_keys, train_verb_ids, frames_cache,
+        verb_to_id=verb_to_id, transform=transform)
+    val_ds = BridgeVisionDataset(
+        val_keys, val_verb_ids, frames_cache,
+        verb_to_id=verb_to_id, transform=transform)
+
+    # verb_counts from train split
+    cnt = Counter(v for v in train_verb_ids if v >= 0)
+    verb_counts = {id_to_verb[vid]: c for vid, c in cnt.items()}
+
+    print("Vision probe: {} train / {} val episodes".format(
+        len(train_ds), len(val_ds)))
+
+    return train_ds, val_ds, num_verbs, id_to_verb, verb_to_id, verb_counts
+
+
 # ======================================================================
 # Dataset construction
 # ======================================================================
@@ -212,6 +530,12 @@ def _build_tokenizer_datasets(args):
     if args.dataset == "bridge":
         train_ds, val_ds, num_verbs, id_to_verb, verb_to_id, verb_counts = \
             _build_bridge_tokenizer_data(args, chunk_params)
+    elif args.dataset == "droid":
+        train_ds, val_ds, num_verbs, id_to_verb, verb_to_id, verb_counts = \
+            _build_droid_tokenizer_data(args, chunk_params)
+    elif args.dataset == "libero_goal":
+        train_ds, val_ds, num_verbs, id_to_verb, verb_to_id, verb_counts = \
+            _build_libero_tokenizer_data(args, chunk_params)
     else:
         train_ds, val_ds, num_verbs, id_to_verb, verb_to_id, verb_counts = \
             build_calvin_tokenizer_data(
@@ -259,7 +583,14 @@ def _build_standard_datasets(args):
     """Build standard datasets for native/fast/goal_only modes."""
 
     if args.dataset == "bridge":
+        if args.modality == "goal_only":
+            return _build_bridge_vision_data(args)
         return _build_bridge_native_data(args)
+
+    if args.dataset == "droid":
+        if args.modality == "goal_only":
+            raise NotImplementedError("DROID goal_only not supported yet (frame extraction needed)")
+        return _build_droid_native_data(args)
 
     from datasets.calvin_dataset import build_calvin_verb_probe_data
 
@@ -380,9 +711,7 @@ def main(args):
     print(f"Model: {n_params:,} trainable params")
 
     # Loss, optimizer, scheduler
-    criterion = build_criterion(
-        verb_counts, verb_to_id, num_verbs, device,
-        weighted=args.weighted_loss, label_smoothing=args.label_smoothing)
+    criterion = build_criterion(verb_counts, verb_to_id, num_verbs, device)
 
     total_steps = len(train_loader) * args.epochs
     optimizer, scheduler = build_optimizer_scheduler(
@@ -439,13 +768,21 @@ if __name__ == "__main__":
 
     # Dataset
     parser.add_argument("--dataset", type=str, default="calvin",
-                        choices=["calvin", "bridge"])
+                        choices=["calvin", "bridge", "droid", "libero_goal"])
+    parser.add_argument("--libero_csv", type=str, default=None,
+                        help="LIBERO episodes CSV (only used with --dataset libero_goal)")
+    parser.add_argument("--libero_actions_dir", type=str, default=None,
+                        help="LIBERO action npy dir (only used with --dataset libero_goal)")
     parser.add_argument("--data_dir", type=str, default=DATA_DIR)
     parser.add_argument("--val_dir", type=str, default=VAL_DIR)
     parser.add_argument("--shard_dir", type=str, default=None,
-                        help="Bridge action shards directory")
+                        help="Bridge or DROID action shards directory")
     parser.add_argument("--bridge_csv", type=str, default=None,
                         help="Bridge episode CSV (for filtering + verb labels)")
+    parser.add_argument("--droid_csv", type=str, default=None,
+                        help="DROID episode CSV (for filtering + verb labels)")
+    parser.add_argument("--frames_dir", type=str, default=None,
+                        help="Bridge pre-extracted frames directory (for goal_only)")
 
     # Modality
     parser.add_argument("--modality", type=str, default="action_only",
@@ -485,10 +822,15 @@ if __name__ == "__main__":
     parser.add_argument("--num_workers", type=int, default=NUM_WORKERS)
     parser.add_argument("--warmup_epochs", type=int, default=WARMUP_EPOCHS)
     parser.add_argument("--weight_decay", type=float, default=0.01)
-    parser.add_argument("--label_smoothing", type=float, default=0.0)
-    parser.add_argument("--weighted_loss", action="store_true")
     parser.add_argument("--min_class_count", type=int, default=0)
     parser.add_argument("--patience", type=int, default=0)
+    # Stratified K-fold CV (over the verb-labeled episodes). Default num_folds=1
+    # means the original single 90/10 split. With num_folds > 1, the per-fold
+    # train/val split is stratified by verb (paired across modality conditions
+    # when --seed is held fixed).
+    parser.add_argument("--num_folds", type=int, default=1)
+    parser.add_argument("--fold",      type=int, default=0)
+    parser.add_argument("--seed",      type=int, default=42)
 
     # Output
     parser.add_argument("--save_path", type=str, default=None)
@@ -512,5 +854,8 @@ if __name__ == "__main__":
     if args.dataset == "bridge":
         if not args.shard_dir or not args.bridge_csv:
             parser.error("--dataset bridge requires --shard_dir and --bridge_csv")
+    elif args.dataset == "droid":
+        if not args.shard_dir or not args.droid_csv:
+            parser.error("--dataset droid requires --shard_dir and --droid_csv")
 
     main(args)

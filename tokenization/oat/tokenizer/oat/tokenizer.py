@@ -72,6 +72,7 @@ class OATTok(BaseTokenizer):
             fsq_codes (B, T', fsq_dim) post-round 4-d with STE.
         """
         samples = batch['action']
+        action_real_lens = batch.get('action_real_lens', None)
 
         # normalize
         nsamples = self.normalizer['action'].normalize(samples)
@@ -85,7 +86,16 @@ class OATTok(BaseTokenizer):
 
         # decode
         recons = self.decoder(quant)
-        recon_loss = F.mse_loss(recons, nsamples)
+
+        # Masked recon loss: only on real (non-padded) timesteps
+        if action_real_lens is not None:
+            B, T, D = nsamples.shape
+            mask = torch.arange(T, device=nsamples.device).unsqueeze(0) < action_real_lens.unsqueeze(1)
+            mask = mask.unsqueeze(-1).expand_as(nsamples)
+            n_real = mask.sum()
+            recon_loss = (((recons - nsamples) ** 2) * mask).sum() / n_real if n_real > 0 else F.mse_loss(recons, nsamples)
+        else:
+            recon_loss = F.mse_loss(recons, nsamples)
 
         return {
             'recon_loss': recon_loss,
