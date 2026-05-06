@@ -816,13 +816,22 @@ def teacher_force_eval(run_dir, condition, output_dir, num_batches=None,
         instructions = [instructions[i] for i in keep]
         batch = {k: to_device(v, device) for k, v in batch.items()}
 
-        # Dynamic embedding injection for fullproj OAT/QueST
+        # Dynamic embedding injection for fullproj OAT/QueST.
+        # Use prefix-conditioned embeddings (leak-free) — see
+        # lab_notebooks/compression_rate_sweep/oat_tice_leakage.md. Set
+        # OAT_TICE_LEAKY_EMBED=1 to revert to the legacy `encode_pre_fsq`
+        # path for ablation against an old-style policy ckpt.
         embed_layer = vla.llm_backbone.llm.get_input_embeddings()
         if (hasattr(embed_layer, 'dynamic') and embed_layer.dynamic
                 and "raw_actions" in batch):
             with torch.no_grad():
                 raw_acts = batch["raw_actions"].cpu().float()
-                latents = action_tokenizer.encode_pre_fsq(raw_acts)
+                if os.environ.get("OAT_TICE_LEAKY_EMBED", "0") == "1":
+                    latents = action_tokenizer.encode_pre_fsq(raw_acts)
+                elif hasattr(action_tokenizer, "compute_prefix_embeddings"):
+                    latents = action_tokenizer.compute_prefix_embeddings(raw_acts)
+                else:
+                    latents = action_tokenizer.encode_pre_fsq(raw_acts)
                 latents = latents.to(device)
             embed_layer.set_current_latents(latents)
 
